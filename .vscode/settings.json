@@ -16,5 +16,16 @@
     "**/.venv/**": true,
     "**/venv/**": true,
     "**/__pycache__/**": true
+  },
+  "remote.autoForwardPorts": true,
+  "remote.portsAttributes": {
+    "5173": {
+      "label": "Yahboom Dashboard",
+      "onAutoForward": "silent"
+    },
+    "3000": {
+      "label": "Flask API",
+      "onAutoForward": "silent"
+    }
   }
 }

@@ -6,7 +6,18 @@
       "type": "npm",
       "script": "dev:backend",
       "path": "Yahboom Dashboard/",
-      "problemMatcher": [],
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "flask",
+        "pattern": {
+          "regexp": "^.*Running on (https?://\\S+).*$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\s*\\* Serving Flask app",
+          "endsPattern": "Running on (https?://\\S+)"
+        }
+      },
       "presentation": {
         "reveal": "always",
         "panel": "dedicated",
@@ -31,7 +42,7 @@
         "Dashboard: Backend",
         "Dashboard: Frontend"
       ],
-      "dependsOrder": "parallel",
+      "dependsOrder": "sequence",
       "problemMatcher": [],
       "group": {
         "kind": "build",

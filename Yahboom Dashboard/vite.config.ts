@@ -40,6 +40,7 @@ export default defineConfig(({ mode }) => {
     assetsInclude: ['**/*.svg', '**/*.csv'],
 
     server: {
+      open: false,
       // Forward /api/* to the Flask backend so fetch('/api/...') works in dev.
       proxy: {
         '/api': {
