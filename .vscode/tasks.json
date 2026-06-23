@@ -1,0 +1,42 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Dashboard: Backend",
+      "type": "npm",
+      "script": "dev:backend",
+      "path": "Yahboom Dashboard/",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "dashboard"
+      }
+    },
+    {
+      "label": "Dashboard: Frontend",
+      "type": "npm",
+      "script": "dev",
+      "path": "Yahboom Dashboard/",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "dashboard"
+      }
+    },
+    {
+      "label": "Run Dashboard",
+      "dependsOn": [
+        "Dashboard: Backend",
+        "Dashboard: Frontend"
+      ],
+      "dependsOrder": "parallel",
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}
