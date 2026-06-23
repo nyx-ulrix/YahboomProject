@@ -25,13 +25,9 @@ venv/
 "Yahboom Dashboard"/backend/slam_map.tmp
 
 ## Python cache files
-"Yahboom Dashboard"/backend/__pycache__/
-"Yahboom Dashboard"/backend/app/__pycache__/
-"Yahboom Dashboard"/backend/app/routes/__pycache__/
-"Yahboom Dashboard"/backend/app/services/__pycache__/
-"Yahboom Dashboard"/backend/app/services/vit/__pycache__/
-"Yahboom Dashboard"/backend/tools/__pycache__/
-"Yahboom Dashboard"/backend/app/models/__pycache__/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
 
 ## Log files
 "Yahboom Dashboard"/*.log
@@ -74,8 +70,10 @@ venv/
 Thumbs.db
 ehthumbs.db
 
-## VS Code
-.vscode/
+## VS Code (commit shared workspace settings)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
 *.code-workspace
 
 ## Cursor IDE
