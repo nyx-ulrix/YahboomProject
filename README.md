@@ -1248,12 +1248,8 @@ To run the Yahboom Dashboard on any device:
     This checks for Node.js and Python, installs frontend/backend packages, and sets up the virtual environment.
 
 2. **Run the dashboard**:
-    ```bash
     run-dashboard.bat
-    ```
     This launches the Flask backend (port 3000) and Vite frontend (port 5173) in **two separate terminal windows**.
-
-Access the dashboard at: **http://localhost:5173**
 
 Both batch files are located in the project root and automatically handle directory navigation. Make sure to run `install-dependencies.bat` before running the dashboard for the first time.
 
