@@ -1,0 +1,230 @@
+@custom-variant dark (&:is(.dark *));
+
+/* ============================================================
+   Premium Crypto-Style Dashboard Theme
+   Dark-first with light theme support via .dark / :root tokens
+   ============================================================ */
+
+:root {
+  --font-size: 14px;
+
+  /* Light theme — frosted lilac/indigo */
+  --bg-app: #f5f7ff;
+  --bg-ambient-1: #ede9fe;
+  --bg-ambient-2: #dbeafe;
+  --bg-ambient-3: #fce7f3;
+  --bg-surface: rgba(255, 255, 255, 0.74);
+  --bg-elevated: #ffffff;
+  --stroke-subtle: rgba(76, 58, 128, 0.12);
+  --stroke-strong: rgba(76, 58, 128, 0.22);
+  --text-primary: #17142b;
+  --text-secondary: #5d567a;
+  --text-muted: #8e88a8;
+  --accent-purple: #7c3aed;
+  --accent-cyan: #0891b2;
+  --accent-pink: #e11d48;
+  --accent-gold: #d97706;
+  --state-success: #16a34a;
+  --state-error: #dc2626;
+  --state-warning: #d97706;
+  --glow-color: rgba(124, 58, 237, 0.18);
+
+  /* Shadcn compat tokens (used by ui/* components) */
+  --background: var(--bg-app);
+  --foreground: var(--text-primary);
+  --card: var(--bg-elevated);
+  --card-foreground: var(--text-primary);
+  --popover: var(--bg-elevated);
+  --popover-foreground: var(--text-primary);
+  --primary: var(--accent-purple);
+  --primary-foreground: #ffffff;
+  --secondary: rgba(124, 58, 237, 0.08);
+  --secondary-foreground: var(--text-primary);
+  --muted: rgba(124, 58, 237, 0.06);
+  --muted-foreground: var(--text-muted);
+  --accent: rgba(124, 58, 237, 0.12);
+  --accent-foreground: var(--text-primary);
+  --destructive: var(--state-error);
+  --destructive-foreground: #ffffff;
+  --border: var(--stroke-subtle);
+  --input: transparent;
+  --input-background: rgba(255, 255, 255, 0.6);
+  --switch-background: rgba(76, 58, 128, 0.2);
+  --font-weight-medium: 500;
+  --font-weight-normal: 400;
+  --ring: var(--accent-purple);
+  --chart-1: #7c3aed;
+  --chart-2: #0891b2;
+  --chart-3: #e11d48;
+  --chart-4: #d97706;
+  --chart-5: #16a34a;
+  --radius: 1rem;
+}
+
+.dark {
+  /* Dark theme — deep indigo/violet luxury */
+  --bg-app: #141229;
+  --bg-ambient-1: rgba(139, 92, 246, 0.22);
+  --bg-ambient-2: rgba(103, 232, 249, 0.16);
+  --bg-ambient-3: rgba(251, 113, 133, 0.18);
+  --bg-surface: rgba(32, 28, 60, 0.72);
+  --bg-elevated: #2a244b;
+  --stroke-subtle: rgba(255, 255, 255, 0.08);
+  --stroke-strong: rgba(255, 255, 255, 0.16);
+  --text-primary: #f4f3ff;
+  --text-secondary: #a8a3c7;
+  --text-muted: #7b7697;
+  --accent-purple: #8b5cf6;
+  --accent-cyan: #67e8f9;
+  --accent-pink: #fb7185;
+  --accent-gold: #f6c15b;
+  --state-success: #22c55e;
+  --state-error: #f43f5e;
+  --state-warning: #f6c15b;
+  --glow-color: rgba(139, 92, 246, 0.32);
+
+  --background: var(--bg-app);
+  --foreground: var(--text-primary);
+  --card: var(--bg-elevated);
+  --card-foreground: var(--text-primary);
+  --popover: var(--bg-elevated);
+  --popover-foreground: var(--text-primary);
+  --primary: var(--accent-purple);
+  --primary-foreground: #0b0820;
+  --secondary: rgba(255, 255, 255, 0.06);
+  --secondary-foreground: var(--text-primary);
+  --muted: rgba(255, 255, 255, 0.04);
+  --muted-foreground: var(--text-muted);
+  --accent: rgba(139, 92, 246, 0.18);
+  --accent-foreground: var(--text-primary);
+  --destructive: var(--state-error);
+  --destructive-foreground: #ffffff;
+  --border: var(--stroke-subtle);
+  --input: rgba(255, 255, 255, 0.06);
+  --input-background: rgba(255, 255, 255, 0.04);
+  --switch-background: rgba(255, 255, 255, 0.16);
+  --ring: var(--accent-purple);
+  --chart-1: #8b5cf6;
+  --chart-2: #67e8f9;
+  --chart-3: #fb7185;
+  --chart-4: #f6c15b;
+  --chart-5: #22c55e;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-input-background: var(--input-background);
+  --color-switch-background: var(--switch-background);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) - 8px);
+  --radius-md: calc(var(--radius) - 4px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 8px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    background: var(--bg-app);
+    color: var(--text-primary);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  html {
+    font-size: var(--font-size);
+    /* Always reserve space for the vertical scrollbar so the viewport width
+       stays constant whether or not it is visible. Without this, the dashboard
+       grid's square row-height (derived from container width) feeds back into a
+       ResizeObserver loop: scrollbar appears -> width shrinks -> grid shrinks ->
+       scrollbar disappears -> width grows -> repeat. */
+    scrollbar-gutter: stable;
+  }
+
+  h1 { font-size: 1.75rem; font-weight: 600; line-height: 1.3; letter-spacing: -0.02em; }
+  h2 { font-size: 1.25rem; font-weight: 600; line-height: 1.35; letter-spacing: -0.01em; }
+  h3 { font-size: 1rem; font-weight: 600; line-height: 1.4; }
+  h4 { font-size: 0.875rem; font-weight: 600; line-height: 1.4; }
+  label { font-size: 0.8125rem; font-weight: 500; }
+  button { font-weight: 500; }
+  input { font-weight: 400; }
+}
+
+/* Utility classes for the dashboard's signature surfaces */
+.glass-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--stroke-subtle);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-radius: 20px;
+}
+.glass-panel-elevated {
+  background: var(--bg-elevated);
+  border: 1px solid var(--stroke-subtle);
+  border-radius: 20px;
+}
+.app-shell {
+  background: var(--bg-app);
+  border-radius: 32px;
+  border: 1px solid var(--stroke-subtle);
+  position: relative;
+  overflow: hidden;
+}
+.ambient-glow::before {
+  content: '';
+  position: absolute;
+  inset: -200px;
+  background:
+    radial-gradient(circle at 15% 20%, var(--bg-ambient-1) 0%, transparent 35%),
+    radial-gradient(circle at 85% 10%, var(--bg-ambient-2) 0%, transparent 35%),
+    radial-gradient(circle at 70% 90%, var(--bg-ambient-3) 0%, transparent 40%);
+  pointer-events: none;
+  z-index: 0;
+}
+.ambient-glow > * { position: relative; z-index: 1; }
+
+.pill {
+  border-radius: 999px;
+  padding: 0.5rem 1rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  transition: all 200ms ease-out;
+}
+
+/* react-grid-layout overrides */
+.react-grid-item.react-grid-placeholder {
+  background: var(--accent-purple) !important;
+  opacity: 0.18 !important;
+  border-radius: 20px !important;
+}
+.react-grid-item > .react-resizable-handle {
+  opacity: 0;
+  transition: opacity 200ms;
+}
+.react-grid-item:hover > .react-resizable-handle { opacity: 0.5; }
+.react-grid-item.react-draggable-dragging { z-index: 10; }

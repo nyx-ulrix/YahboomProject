@@ -1,0 +1,852 @@
+// Custom hooks — backend polling, keyboard input, and client auto-pilot.
+
+import { useEffect, useRef, useState } from 'react';
+import { DEFAULT_BROKER_HOST, useMetricsStore, usePickerStore, useSettingsStore } from './store';
+import { sendCommand, sendCameraCommand, setEstopState, vecToCameraCommand, type BotCommand } from '../lib/Controls';
+import { connectBroker } from '../lib/Connections';
+import type { LiveGridData } from './types';
+
+/** Start/stop webrtc_server.py on the Pi (video + VIT embeddings). */
+function streamUserError(message: string | undefined): string | null {
+  if (!message) return null;
+  const lower = message.toLowerCase();
+  if (lower === 'error') return null;
+  if (/errno\s*22|invalid argument|\[errno 22\]/i.test(message)) return null;
+  return message;
+}
+
+export function usePiVitVideoServer() {
+  const brokerIp = useSettingsStore((s) => s.brokerIp);
+  const serverRunning = useMetricsStore((s) => s.streamRunning);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [startLocked, setStartLocked] = useState(false);
+  const startLockUntilRef = useRef<number>(0);
+
+  const isRunning = serverRunning;
+  const isBusy = pending || (!isRunning && startLocked);
+
+  // Release post-start lock early when backend confirms running; otherwise timeout.
+  useEffect(() => {
+    if (!startLocked) return;
+    if (serverRunning) {
+      setStartLocked(false);
+      startLockUntilRef.current = 0;
+      return;
+    }
+    const id = setInterval(() => {
+      if (Date.now() >= startLockUntilRef.current) {
+        setStartLocked(false);
+        startLockUntilRef.current = 0;
+      }
+    }, 250);
+    return () => clearInterval(id);
+  }, [startLocked, serverRunning]);
+
+  const start = async () => {
+    if (pending || startLocked) return;
+    setPending(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/start_stream', { method: 'POST' });
+      const data = await res.json().catch(() => ({})) as {
+        running?: boolean;
+        video_url?: string;
+        error?: string;
+        status?: string;
+        terminal_opened?: boolean;
+      };
+      const terminalOpened = data.terminal_opened === true;
+      if (!res.ok && !terminalOpened) {
+        const userErr =
+          streamUserError(data.error)
+          || streamUserError(data.status)
+          || `Start failed (HTTP ${res.status})`;
+        setError(userErr);
+        return;
+      }
+      useMetricsStore.setState({ streamRunning: data.running ?? true });
+      if (data.video_url) {
+        useSettingsStore.getState().setVideoStreamUrl(data.video_url);
+      }
+      // Keep START disabled while the Pi finishes booting the server.
+      // Unlock early if /api/status flips streamRunning=true.
+      startLockUntilRef.current = Date.now() + 20_000;
+      setStartLocked(true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not reach backend';
+      setError(streamUserError(msg) || msg);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const stop = async () => {
+    if (pending) return;
+    setPending(true);
+    setError(null);
+    setStartLocked(false);
+    startLockUntilRef.current = 0;
+    useMetricsStore.setState({ streamRunning: false });
+    useSettingsStore.getState().setVideoStreamUrl('');
+    try {
+      const res = await fetch('/api/stop_stream', { method: 'POST' });
+      const data = await res.json().catch(() => ({})) as { error?: string; status?: string };
+      if (!res.ok) {
+        const userErr =
+          streamUserError(data.error)
+          || streamUserError(data.status)
+          || `Stop failed (HTTP ${res.status})`;
+        setError(userErr);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not reach backend';
+      setError(streamUserError(msg) || msg);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const label = isBusy
+    ? (isRunning ? 'STOPPING VIT AND VIDEO…' : 'STARTING VIT AND VIDEO…')
+    : (isRunning ? 'STOP VIT AND VIDEO' : 'START VIT AND VIDEO');
+
+  return {
+    brokerIp,
+    isRunning,
+    isBusy,
+    label,
+    error,
+    start,
+    stop,
+  };
+}
+
+// Polls /api/status every 3 s and writes the backend's
+// connection state into the shared stores. Because all devices talk to the
+// same Flask process, every browser stays in sync automatically: when one
+// device clicks Connect the rest will reflect it within ~3 seconds.
+const FRONT_CLEAR_DISTANCE = 0.90;
+const FRONT_BLOCK_DISTANCE = 0.65;
+const SIDE_CLEAR_DISTANCE = 0.65;
+const REVERSE_DURATION_MS = 700;
+const TURN_DURATION_MS = 1600;
+const CHECK_CLEAR_DURATION_MS = 400;
+const RECOVERY_TURN_DURATION_MS = 2200;
+const AUTO_DECISION_INTERVAL_MS = 200;
+const COMMAND_COOLDOWN_MS = 150;
+
+type SafetyPayload = {
+  raw?: string;
+  status?: string;
+  distance?: string | number | null;
+  estop?: boolean;
+  updatedAt?: number | null;
+};
+
+function textForStatus(data: SafetyPayload) {
+  return `${data.status ?? ''} ${data.raw ?? ''}`.toLowerCase();
+}
+
+function hasToken(data: SafetyPayload, token: string) {
+  return textForStatus(data).includes(token.toLowerCase());
+}
+
+function isHardEstopStatus(data: SafetyPayload) {
+  if (hasToken(data, 'auto_blocked') || hasToken(data, 'estop_grace')) return false;
+  return hasToken(data, 'estop=true') || hasToken(data, 'manual_estop_triggered');
+}
+
+function isAutoBlockedStatus(data: SafetyPayload) {
+  return hasToken(data, 'auto_blocked');
+}
+
+function isGraceStatus(data: SafetyPayload) {
+  return hasToken(data, 'estop_grace');
+}
+
+function parseDistance(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string') return null;
+  const match = value.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseRawJson(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== 'string' || raw.trim() === '') return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function toInt(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+function normalizeGridCells(grid: unknown): number[] | null {
+  if (!Array.isArray(grid)) return null;
+  const flat = Array.isArray(grid[0])
+    ? (grid as unknown[][]).flat()
+    : grid;
+  return flat.map((cell) => {
+    const value = toInt(cell);
+    if (value == null) return -1;
+    return value < 0 ? -1 : value > 0 ? 1 : 0;
+  });
+}
+
+function normalizeGridStatus(data: Record<string, unknown>): LiveGridData {
+  const rawJson = parseRawJson(data.raw);
+  const merged = { ...rawJson, ...data };
+  const cells = normalizeGridCells(merged.grid ?? merged.cells ?? merged.data ?? merged.occupancy);
+  const size = merged.size as LiveGridData['size'];
+  const tupleSize = Array.isArray(size) ? size : null;
+  const objectSize = size && typeof size === 'object' && !Array.isArray(size) ? size : null;
+  const w =
+    toInt(merged.w) ??
+    toInt(merged.width) ??
+    toInt(objectSize && 'cols' in objectSize ? objectSize.cols : null) ??
+    toInt(objectSize && 'width' in objectSize ? objectSize.width : null) ??
+    toInt(tupleSize?.[1]) ??
+    120;
+  const h =
+    toInt(merged.h) ??
+    toInt(merged.height) ??
+    toInt(objectSize && 'rows' in objectSize ? objectSize.rows : null) ??
+    toInt(objectSize && 'height' in objectSize ? objectSize.height : null) ??
+    toInt(tupleSize?.[0]) ??
+    toInt(typeof size === 'number' ? size : null) ??
+    120;
+  const expected = w * h;
+  const grid = cells && expected > 0 && cells.length >= expected ? cells.slice(0, expected) : cells;
+
+  return {
+    raw: typeof merged.raw === 'string' ? merged.raw : undefined,
+    status: typeof merged.status === 'string' ? merged.status : undefined,
+    resolution: parseDistance(merged.resolution),
+    size,
+    w,
+    h,
+    grid,
+    robot_row: toInt(merged.robot_row),
+    robot_col: toInt(merged.robot_col),
+    front: parseDistance(merged.front ?? merged.distance),
+    left: parseDistance(merged.left),
+    right: parseDistance(merged.right),
+    auto_mode: typeof merged.auto_mode === 'boolean' ? merged.auto_mode : undefined,
+    estop_active: typeof merged.estop_active === 'boolean'
+      ? merged.estop_active
+      : typeof merged.estop === 'boolean'
+        ? merged.estop
+        : undefined,
+    timestamp: merged.timestamp as number | string | null | undefined,
+    updatedAt: toInt(merged.updatedAt),
+  };
+}
+
+function stopClientAuto() {
+  useMetricsStore.setState({
+    mode: 'manual',
+    autoMode: false,
+    exploreActive: false,
+    autoRunning: false,
+    movementVec: null,
+  });
+}
+
+export function useConnectionSync() {
+  // Track the last-seen backend event ID in a ref so it stays independent of
+  // local events (which use Date.now() as their ID and would otherwise corrupt
+  // the dedup comparison against the backend's small sequential integers).
+  const lastBackendEventIdRef = useRef(0);
+  const lastVideoUrlRef = useRef<string | null>(null);
+  // Throttle auto-connect attempts so a disconnected backend (e.g. after a
+  // restart) is retried automatically without hammering the broker every poll.
+  const lastAutoConnectAtRef = useRef(0);
+
+  useEffect(() => {
+    const sync = async () => {
+      try {
+        const [statusRes, eventsRes] = await Promise.all([
+          fetch('/api/status'),
+          fetch('/api/events'),
+        ]);
+
+        const status: {
+          connected: boolean;
+          broker_ip: string;
+          estop_active: boolean;
+          video_url: string | null;
+          stream_running: boolean;
+        } = await statusRes.json();
+
+        // Auto-connect (and auto-reconnect) whenever the backend reports it is
+        // not connected. Throttled to at most once every 8s so a genuinely
+        // down broker isn't hammered, while still recovering automatically
+        // after a backend restart with the tab left open.
+        if (!status.connected) {
+          const now = Date.now();
+          if (now - lastAutoConnectAtRef.current >= 8000) {
+            lastAutoConnectAtRef.current = now;
+            const ip = useSettingsStore.getState().brokerIp || DEFAULT_BROKER_HOST;
+            connectBroker(ip);
+          }
+        }
+
+        useSettingsStore.getState().setBrokerIp(status.broker_ip || useSettingsStore.getState().brokerIp);
+        useSettingsStore.getState().setConnected(status.connected);
+        const videoUrl = status.video_url ?? '';
+        useSettingsStore.getState().setVideoStreamUrl(videoUrl);
+        if (videoUrl && videoUrl !== lastVideoUrlRef.current) {
+          lastVideoUrlRef.current = videoUrl;
+          console.info('[VideoFeed] using stream URL:', videoUrl);
+        } else if (!videoUrl && lastVideoUrlRef.current) {
+          lastVideoUrlRef.current = null;
+          console.info('[VideoFeed] stream URL cleared');
+        }
+        if ((status.estop_active ?? false) && useMetricsStore.getState().autoRunning) {
+          sendCommand('auto_off');
+        }
+
+        useMetricsStore.setState({
+          connectionStatus: status.connected ? 'CONNECTED' : 'DISCONNECTED',
+          mqttLinkStatus:   status.connected ? 'CONNECTED' : 'DISCONNECTED',
+          estopActive:      status.estop_active ?? false,
+          streamRunning:    status.stream_running ?? false,
+          ...((status.estop_active ?? false)
+            ? {
+                currentCommand: 'STOP' as const,
+                missionStatus: 'E-STOP' as const,
+                mode: 'manual' as const,
+                autoMode: false,
+                exploreActive: false,
+                autoRunning: false,
+                movementVec: null,
+              }
+            : {}),
+        });
+
+        const incoming: { id: number; timestamp: string; level: 'info' | 'warning' | 'error'; message: string }[] =
+          await eventsRes.json();
+        if (incoming.length > 0) {
+          // Append-only: only add events with IDs higher than any we already hold.
+          // Uses a ref (not the store max) so locally-pushed events with
+          // Date.now()-based IDs never inflate lastId and block backend events.
+          const lastId = lastBackendEventIdRef.current;
+          const fresh  = incoming.filter((e) => e.id > lastId);
+          if (fresh.length > 0) {
+            lastBackendEventIdRef.current = incoming.reduce((m, e) => (e.id > m ? e.id : m), lastId);
+            useMetricsStore.setState((s) => ({
+              events: [...s.events, ...fresh],
+            }));
+          }
+        }
+      } catch {
+        // Backend unreachable — leave existing state untouched.
+      }
+    };
+
+    sync();                              // immediate fetch on mount
+    const id = setInterval(sync, 3000); // then every 3 s
+    return () => clearInterval(id);
+  }, []);
+}
+
+// LiDAR e-stop feedback from backend MQTT subscription.
+export function useSafetyStatusPoll() {
+  const lastEstopRef = useRef(false);
+  const lastRawRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        let res = await fetch('/api/safety_topic_status');
+        if (!res.ok) res = await fetch('/api/safety_status');
+        if (!res.ok) return;
+        const data: SafetyPayload = await res.json();
+
+        const raw = data.raw ?? '';
+        const statusText = raw || data.status || 'unknown';
+        const hardEstop = isHardEstopStatus(data);
+        const autoBlocked = isAutoBlockedStatus(data);
+        const grace = isGraceStatus(data);
+
+        useMetricsStore.setState({
+          safetyStatus: statusText,
+          safetyGraceStatus: grace ? statusText : null,
+          ...(autoBlocked ? { autoDecisionRequestedAt: Date.now() } : {}),
+        });
+
+        if (hardEstop) {
+          if (useMetricsStore.getState().autoRunning) {
+            sendCommand('auto_off');
+          }
+          stopClientAuto();
+
+          useMetricsStore.setState({
+            estopActive: true,
+            currentCommand: 'STOP',
+            missionStatus: 'E-STOP',
+            mode: 'manual',
+            autoMode: false,
+            exploreActive: false,
+            autoRunning: false,
+            movementVec: null,
+          });
+
+          if (!lastEstopRef.current || raw !== lastRawRef.current) {
+            useMetricsStore.getState().pushEvent('warning', `LiDAR E-stop triggered — ${raw}`);
+          }
+        } else if (autoBlocked && raw !== lastRawRef.current) {
+          useMetricsStore.getState().pushEvent('warning', 'Auto blocked - client choosing turn');
+        }
+
+        lastEstopRef.current = hardEstop;
+        lastRawRef.current = raw;
+      } catch {
+        // Backend unreachable — leave current safety latch untouched.
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 500);
+    return () => clearInterval(id);
+  }, []);
+}
+
+export function useGridStatusPoll() {
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/grid_status');
+        if (!res.ok) return;
+        const data = normalizeGridStatus(await res.json() as Record<string, unknown>);
+        if (!alive) return;
+
+        useMetricsStore.setState({
+          latestGrid: data,
+          frontDistance: data.front,
+          leftDistance: data.left,
+          rightDistance: data.right,
+        });
+
+      } catch {
+        // Backend unreachable - keep last grid for display and decision state.
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 500);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+}
+
+export function useDriveStatusPoll() {
+  const routeMissingRef = useRef(false);
+
+  useEffect(() => {
+    const poll = async () => {
+      if (routeMissingRef.current) return;
+      try {
+        const res = await fetch('/api/drive_status');
+        if (res.status === 404) {
+          routeMissingRef.current = true;
+          useMetricsStore.setState({ driveStatus: 'unavailable' });
+          return;
+        }
+        if (!res.ok) return;
+        const data = await res.json() as { raw?: string; status?: string; state?: string };
+        useMetricsStore.setState({ driveStatus: data.raw || data.status || data.state || 'unknown' });
+      } catch {
+        useMetricsStore.setState({ driveStatus: 'unknown' });
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 1000);
+    return () => clearInterval(id);
+  }, []);
+}
+
+export function useClientAutoPilot() {
+  type AutoPilotState = 'IDLE' | 'FORWARD' | 'BLOCKED' | 'REVERSING' | 'TURNING' | 'CHECK_CLEAR' | 'RECOVERY';
+  type TurnDirection = 'left' | 'right';
+  type RecoveryPhase = 'reverse' | 'turn';
+
+  const autoStateRef = useRef<AutoPilotState>('IDLE');
+  const stateStartedAtRef = useRef(Date.now());
+  const blockedStartedAtRef = useRef<number | null>(null);
+  const turnAttemptsRef = useRef(0);
+  const lastTurnDirectionRef = useRef<TurnDirection>('left');
+  const recoveryPhaseRef = useRef<RecoveryPhase | null>(null);
+  const lastAutoCommandRef = useRef<BotCommand | null>(null);
+  const lastAutoCommandTimeRef = useRef(0);
+
+  useEffect(() => {
+    const logAuto = (message: string) => {
+      useMetricsStore.getState().pushEvent('info', message);
+    };
+
+    const setAutoState = (nextState: AutoPilotState) => {
+      if (autoStateRef.current === nextState) return;
+      autoStateRef.current = nextState;
+      stateStartedAtRef.current = Date.now();
+    };
+
+    const chooseTurnDirection = (): TurnDirection => {
+      const state = useMetricsStore.getState();
+      return (state.leftDistance ?? 0) > (state.rightDistance ?? 0) ? 'left' : 'right';
+    };
+
+    function sendAutoCommand(command: BotCommand) {
+      const now = Date.now();
+
+      if (
+        lastAutoCommandRef.current === command &&
+        now - lastAutoCommandTimeRef.current < 1000
+      ) {
+        return;
+      }
+
+      if (now - lastAutoCommandTimeRef.current < COMMAND_COOLDOWN_MS) {
+        return;
+      }
+
+      lastAutoCommandRef.current = command;
+      lastAutoCommandTimeRef.current = now;
+      sendCommand(command, 'auto');
+    }
+
+    const enterIdle = (resetCommandMemory = true) => {
+      setAutoState('IDLE');
+      blockedStartedAtRef.current = null;
+      turnAttemptsRef.current = 0;
+      recoveryPhaseRef.current = null;
+      if (resetCommandMemory) {
+        lastAutoCommandRef.current = null;
+        lastAutoCommandTimeRef.current = 0;
+      }
+    };
+
+    const enterForward = () => {
+      setAutoState('FORWARD');
+      blockedStartedAtRef.current = null;
+      turnAttemptsRef.current = 0;
+      recoveryPhaseRef.current = null;
+      logAuto('AUTO: front clear, moving forward');
+      sendAutoCommand('fwd');
+    };
+
+    const enterBlocked = () => {
+      const now = Date.now();
+      if (blockedStartedAtRef.current == null) blockedStartedAtRef.current = now;
+      turnAttemptsRef.current = 0;
+      setAutoState('BLOCKED');
+      recoveryPhaseRef.current = null;
+      logAuto('AUTO: obstacle detected, stopping');
+      sendAutoCommand('stop');
+    };
+
+    const enterTurning = (repeatLastDirection = false) => {
+      const direction = repeatLastDirection ? lastTurnDirectionRef.current : chooseTurnDirection();
+      lastTurnDirectionRef.current = direction;
+      turnAttemptsRef.current += 1;
+      setAutoState('TURNING');
+      recoveryPhaseRef.current = null;
+      logAuto(`AUTO: turning ${direction}`);
+      sendAutoCommand(direction);
+    };
+
+    const enterReversing = () => {
+      setAutoState('REVERSING');
+      recoveryPhaseRef.current = null;
+      logAuto('AUTO: reversing before turn');
+      sendAutoCommand('bck');
+    };
+
+    const enterCheckClear = () => {
+      setAutoState('CHECK_CLEAR');
+      recoveryPhaseRef.current = null;
+      sendAutoCommand('stop');
+    };
+
+    const enterRecovery = () => {
+      setAutoState('RECOVERY');
+      recoveryPhaseRef.current = 'reverse';
+      lastTurnDirectionRef.current = chooseTurnDirection();
+      blockedStartedAtRef.current = Date.now();
+      turnAttemptsRef.current = 0;
+      logAuto('AUTO: recovery mode');
+      sendAutoCommand('bck');
+    };
+
+    const decide = () => {
+      const state = useMetricsStore.getState();
+      const autoActive = state.exploreActive && !state.estopActive;
+
+      if (!autoActive) {
+        enterIdle();
+        return;
+      }
+
+      if (!state.latestGrid?.grid) {
+        sendAutoCommand('stop');
+        enterIdle(false);
+        return;
+      }
+
+      const now = Date.now();
+      const elapsed = now - stateStartedAtRef.current;
+      const front = state.frontDistance ?? 0;
+      const left = state.leftDistance ?? 0;
+      const right = state.rightDistance ?? 0;
+      const blockedFor = blockedStartedAtRef.current == null ? 0 : now - blockedStartedAtRef.current;
+
+      if (
+        autoStateRef.current !== 'RECOVERY' &&
+        blockedStartedAtRef.current != null &&
+        blockedFor > 5000
+      ) {
+        enterRecovery();
+        return;
+      }
+
+      if (autoStateRef.current === 'FORWARD' && front <= FRONT_BLOCK_DISTANCE) {
+        enterBlocked();
+        return;
+      }
+
+      if (autoStateRef.current === 'IDLE') {
+        if (front > FRONT_CLEAR_DISTANCE) {
+          enterForward();
+        } else if (front <= FRONT_BLOCK_DISTANCE) {
+          enterBlocked();
+        } else {
+          sendAutoCommand('stop');
+          enterCheckClear();
+        }
+        return;
+      }
+
+      if (autoStateRef.current === 'FORWARD') {
+        if (lastAutoCommandRef.current !== 'fwd') sendAutoCommand('fwd');
+        return;
+      }
+
+      if (autoStateRef.current === 'BLOCKED') {
+        if (left < SIDE_CLEAR_DISTANCE && right < SIDE_CLEAR_DISTANCE) {
+          enterReversing();
+        } else {
+          enterTurning();
+        }
+        return;
+      }
+
+      if (autoStateRef.current === 'REVERSING') {
+        if (elapsed < REVERSE_DURATION_MS) return;
+        sendAutoCommand('stop');
+        lastAutoCommandTimeRef.current = 0;
+        enterTurning();
+        return;
+      }
+
+      if (autoStateRef.current === 'TURNING') {
+        if (elapsed < TURN_DURATION_MS) return;
+        enterCheckClear();
+        return;
+      }
+
+      if (autoStateRef.current === 'CHECK_CLEAR') {
+        if (elapsed < CHECK_CLEAR_DURATION_MS) return;
+        if (front > FRONT_CLEAR_DISTANCE) {
+          enterForward();
+        } else if (turnAttemptsRef.current < 2) {
+          logAuto('AUTO: still blocked, turning again');
+          enterTurning(true);
+        } else {
+          enterRecovery();
+        }
+        return;
+      }
+
+      if (autoStateRef.current === 'RECOVERY') {
+        if (recoveryPhaseRef.current === 'reverse') {
+          if (elapsed < REVERSE_DURATION_MS) return;
+          sendAutoCommand('stop');
+          recoveryPhaseRef.current = 'turn';
+          stateStartedAtRef.current = now;
+          lastAutoCommandTimeRef.current = 0;
+          logAuto(`AUTO: turning ${lastTurnDirectionRef.current}`);
+          sendAutoCommand(lastTurnDirectionRef.current);
+          return;
+        }
+
+        if (recoveryPhaseRef.current === 'turn') {
+          if (elapsed < RECOVERY_TURN_DURATION_MS) return;
+          enterCheckClear();
+        }
+      }
+    };
+
+    const id = setInterval(decide, AUTO_DECISION_INTERVAL_MS);
+    decide();
+    return () => clearInterval(id);
+  }, []);
+}
+
+const MOVEMENT_KEYS = new Set(['w', 's', 'a', 'd']);
+
+function computeMovementCommand(held: Set<string>): BotCommand | null {
+  const fwd = held.has('w') && !held.has('s');
+  const bck = held.has('s') && !held.has('w');
+  const lft = held.has('a') && !held.has('d');
+  const rgt = held.has('d') && !held.has('a');
+
+  if (fwd && lft) return 'fwdleft';
+  if (fwd && rgt) return 'fwdright';
+  if (bck && lft) return 'bckleft';
+  if (bck && rgt) return 'bckright';
+  if (fwd)        return 'fwd';
+  if (bck)        return 'bck';
+  if (lft)        return 'left';
+  if (rgt)        return 'right';
+  return null;
+}
+
+export function useKeyboardMovement() {
+  const heldKeys = useRef(new Set<string>());
+  const lastCmd  = useRef<BotCommand | null>(null);
+
+  useEffect(() => {
+    const dispatch = () => {
+      const cmd = computeMovementCommand(heldKeys.current);
+      if (cmd === null) {
+        if (lastCmd.current !== null) {
+          lastCmd.current = null;
+          sendCommand('stop', 'release');
+        }
+      } else if (cmd !== lastCmd.current) {
+        if (useMetricsStore.getState().estopActive) return;
+        lastCmd.current = cmd;
+        sendCommand(cmd);
+      }
+    };
+
+    const onDown = (e: KeyboardEvent) => {
+      if (isInputFocused()) return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        heldKeys.current.clear();
+        lastCmd.current = null;
+        sendCommand('stop', 'manual');
+        return;
+      }
+
+      const key = e.key.toLowerCase();
+      if (!MOVEMENT_KEYS.has(key)) return;
+      if (heldKeys.current.has(key)) return; // ignore OS key-repeat
+      heldKeys.current.add(key);
+      dispatch();
+    };
+
+    const onUp = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      if (!MOVEMENT_KEYS.has(key)) return;
+      heldKeys.current.delete(key);
+      dispatch();
+    };
+
+    window.addEventListener('keydown', onDown);
+    window.addEventListener('keyup', onUp);
+    return () => {
+      window.removeEventListener('keydown', onDown);
+      window.removeEventListener('keyup', onUp);
+    };
+  }, []);
+}
+
+export function useKeyboardCamera(onChange?: (v: { pan: number; tilt: number }) => void) {
+  const keysRef    = useRef<Set<string>>(new Set());
+  const lastCmdRef = useRef<ReturnType<typeof vecToCameraCommand>>(null);
+
+  useEffect(() => {
+    const compute = () => {
+      const k = keysRef.current;
+      let pan = 0;
+      let tilt = 0;
+      if (k.has('ArrowUp'))    tilt += 1;
+      if (k.has('ArrowDown'))  tilt -= 1;
+      if (k.has('ArrowLeft'))  pan  -= 1;
+      if (k.has('ArrowRight')) pan  += 1;
+      onChange?.({ pan, tilt });
+
+      const cmd = vecToCameraCommand(pan, tilt);
+      if (cmd !== null && cmd !== lastCmdRef.current) {
+        lastCmdRef.current = cmd;
+        sendCameraCommand(cmd);
+      } else if (cmd === null) {
+        if (lastCmdRef.current !== null) sendCameraCommand('cstop');
+        lastCmdRef.current = null;
+      }
+    };
+    const onDown = (e: KeyboardEvent) => {
+      if (isInputFocused()) return;
+      if (!e.key.startsWith('Arrow')) return;
+      e.preventDefault();
+      if (keysRef.current.has(e.key)) return;
+      keysRef.current.add(e.key);
+      compute();
+    };
+    const onUp = (e: KeyboardEvent) => {
+      if (!e.key.startsWith('Arrow')) return;
+      keysRef.current.delete(e.key);
+      compute();
+    };
+    window.addEventListener('keydown', onDown);
+    window.addEventListener('keyup', onUp);
+    return () => {
+      window.removeEventListener('keydown', onDown);
+      window.removeEventListener('keyup', onUp);
+    };
+  }, [onChange]);
+}
+
+export function useGlobalShortcuts() {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isInputFocused()) return;
+      if (e.key === 'x' || e.key === 'X') {
+        e.preventDefault();
+        sendCommand('estop_on', 'estop');
+        setEstopState(true);
+      } else if (e.key === 'c' || e.key === 'C') {
+        e.preventDefault();
+        sendCameraCommand('crst');
+      } else if (e.key === 'p' || e.key === 'P') {
+        e.preventDefault();
+        usePickerStore.getState().toggle();
+      } else if (e.key === 'Escape') {
+        usePickerStore.getState().setOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+}
+
+function isInputFocused() {
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || (el as HTMLElement).isContentEditable;
+}

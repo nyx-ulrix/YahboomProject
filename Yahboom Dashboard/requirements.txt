@@ -1,0 +1,9 @@
+Flask==2.3.3
+paho-mqtt==1.6.1
+python-dotenv==1.0.0
+paramiko
+numpy
+scipy
+# VIT scene decoder (MobileCLIP-S1) — used by backend/app/services/vit/vit_service.py
+torch
+open_clip_torch

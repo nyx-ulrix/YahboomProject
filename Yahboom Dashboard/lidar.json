@@ -1,0 +1,22 @@
+{
+  "udp_ip": "0.0.0.0",
+  "udp_port": 6677,
+
+  "forward_speed": 0.15,
+  "backward_speed": -0.12,
+  "turn_speed": 0.35,
+
+  "auto_forward_speed": 0.13,
+  "auto_turn_speed": 0.35,
+
+  "safe_front_distance": 0.35,
+  "safe_side_distance": 0.25,
+
+  "auto_front_distance": 0.40,
+  "auto_side_distance": 0.30,
+
+  "control_period": 0.10,
+
+  "cmd_vel_topic": "/cmd_vel",
+  "scan_topic": "/scan"
+}
