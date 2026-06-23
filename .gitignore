@@ -1,0 +1,107 @@
+# ============================================================
+# Unified .gitignore for Yahboom Project
+# ============================================================
+
+# ============================================================
+# Yahboom Dashboard - Frontend & Backend
+# ============================================================
+
+## Dependencies
+node_modules/
+.venv/
+venv/
+
+## Production / build output
+"Yahboom Dashboard"/dist/
+"Yahboom Dashboard"/build/
+"Yahboom Dashboard"/.vite/
+
+## Local environment variables (do not commit secrets)
+"Yahboom Dashboard"/.env.local
+"Yahboom Dashboard"/.env.*.local
+
+## SLAM output (constantly updated)
+"Yahboom Dashboard"/backend/slam_map.json
+"Yahboom Dashboard"/backend/slam_map.tmp
+
+## Python cache files
+"Yahboom Dashboard"/backend/__pycache__/
+"Yahboom Dashboard"/backend/app/__pycache__/
+"Yahboom Dashboard"/backend/app/routes/__pycache__/
+"Yahboom Dashboard"/backend/app/services/__pycache__/
+"Yahboom Dashboard"/backend/app/services/vit/__pycache__/
+"Yahboom Dashboard"/backend/tools/__pycache__/
+"Yahboom Dashboard"/backend/app/models/__pycache__/
+
+## Log files
+"Yahboom Dashboard"/*.log
+"Yahboom Dashboard"/npm-debug.log*
+"Yahboom Dashboard"/yarn-debug.log*
+"Yahboom Dashboard"/yarn-error.log*
+"Yahboom Dashboard"/pnpm-debug.log*
+
+# ============================================================
+# Yahboom Car - ROS/Python Robot Code
+# ============================================================
+
+## Python virtual environment
+"Yahboom Car"/.venv/
+"Yahboom Car"/venv/
+
+## Python cache files
+"Yahboom Car"/**/__pycache__/
+"Yahboom Car"/**/*.pyc
+"Yahboom Car"/**/*.pyo
+
+## ROS build artifacts
+"Yahboom Car"/build/
+"Yahboom Car"/devel/
+"Yahboom Car"/install/
+
+## Log files
+"Yahboom Car"/*.log
+
+# ============================================================
+# System & Editor Files
+# ============================================================
+
+## macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+## Windows
+Thumbs.db
+ehthumbs.db
+
+## VS Code
+.vscode/
+*.code-workspace
+
+## Cursor IDE
+.cursor/
+.cursor
+cursor.json
+
+## JetBrains IDEs
+.idea/
+*.iml
+*.iws
+*.ipr
+
+## Environment files
+.env
+.env.local
+.env.*.local
+
+# ============================================================
+# General Build & Cache
+# ============================================================
+
+*.egg-info/
+.pytest_cache/
+coverage/
+htmlcov/
+dist/
+build/
+Yahboom Dashboard/backend/slam_map.json

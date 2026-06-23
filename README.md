@@ -6,13 +6,18 @@ This README documents the main features, expected behaviour, and the responsible
 
 ## Table of Contents
 
-1. [Yahboom Car](#yahboom-car)
-2. [Yahboom Dashboard Backend](#yahboom-dashboard-backend)
-3. [Movement & Motor Control](#movement--motor-control)
-4. [Camera & Servo Control](#camera--servo-control)
-5. [SLAM Mapping Settings](#slam-mapping-settings)
-6. [Backend Configuration & SLAM Service Details](#backend-configuration--slam-service-details)
-7. [MQTT Topics Reference](#mqtt-topics-reference)
+1. [Quick Start](#quick-start---running-the-dashboard)
+2. [Yahboom Car](#yahboom-car)
+   - [Yahboom Car Core System Architecture](#yahboom-car-core-system-architecture)
+   - [Yahboom Car Command Reference](#yahboom-car-command-reference)
+   - [Yahboom Car Startup & Testing](#yahboom-car-startup--testing)
+   - [How the System Works Together](#how-the-system-works-together)
+3. [Yahboom Dashboard Backend](#yahboom-dashboard-backend)
+4. [Movement & Motor Control](#movement--motor-control)
+5. [Camera & Servo Control](#camera--servo-control)
+6. [SLAM Mapping Settings](#slam-mapping-settings)
+7. [Backend Configuration & SLAM Service Details](#backend-configuration--slam-service-details)
+8. [MQTT Topics Reference](#mqtt-topics-reference)
 
 ---
 
@@ -28,6 +33,279 @@ This README documents the main features, expected behaviour, and the responsible
 | Drive / Safety status           | Periodically publish drive and safety state (front/left/right distances, auto mode, estop) to MQTT for dashboard real-time feedback.                                      | [Yahboom Car/Used/mqtt_ros_node.py](Yahboom%20Car/Used/mqtt_ros_node.py): `publish_drive_status()`; [Yahboom Car/Used/lidar_safety_node.py](Yahboom%20Car/Used/lidar_safety_node.py): `publish_status()` and `publish_mode_status()`                                                                    |
 | VIT / Embedding encoder         | Capture camera frames, encode embeddings (MobileCLIP), publish embeddings and encoder status to MQTT for AI-assisted navigation.                                          | [Yahboom Car/Used/robot_sender.py](Yahboom%20Car/Used/robot_sender.py): `load_model()`, `get_embedding()`, `main()`; [Yahboom Car/Used/webrtc_server.py](Yahboom%20Car/Used/webrtc_server.py): VIT workers `camera_worker()`, `vit_worker()`, `get_embedding()`, plus WebRTC server                     |
 | WebRTC video + VIT control      | Serve a browser UI for live video and allow runtime commands (change embedding size) via MQTT topic. Low-latency video streaming.                                         | [Yahboom Car/Used/webrtc_server.py](Yahboom%20Car/Used/webrtc_server.py): `index()`, `offer()`, `CameraVideoTrack`, `create_mqtt_client()` and MQTT command handler                                                                                                                                     |
+
+---
+
+## Yahboom Car Core System Architecture
+
+The Yahboom Car is controlled by four main Python scripts that work together to provide movement control, safety monitoring, video streaming, and AI-powered image embeddings:
+
+1. **`mqtt_ros_node.py`** – Main robot control bridge between MQTT and ROS 2
+2. **`lidar_safety_node.py`** – LiDAR-based obstacle detection and safety enforcement
+3. **`robot_sender.py`** – MobileCLIP image embedding encoder (standalone)
+4. **`webrtc_server.py`** – WebRTC video server with integrated embedding publishing
+
+### `mqtt_ros_node.py` - MQTT to ROS 2 Bridge
+
+**Purpose**: Handles all robot movement commands, camera servo control, LiDAR grid publishing, autonomous navigation, and emergency-stop state management.
+
+**Key Responsibilities**:
+- Receives movement commands from MQTT topic `yahboom/cmd`
+- Publishes `/cmd_vel` (Twist messages) to ROS 2 for robot movement
+- Controls servo motors via `/servo_s1` and `/servo_s2` topics
+- Reads LiDAR data from `/scan` and builds occupancy grid
+- Publishes grid and drive status to MQTT
+- Handles manual, auto, and e-stop modes
+- Smooths acceleration for natural movement
+
+**Main MQTT Topics**:
+- `yahboom/cmd` – Receives movement, servo, auto, and e-stop commands
+- `yahboom/grid` – Publishes local occupancy grid (5 Hz)
+- `yahboom/drive/status` – Publishes drive state and distances
+
+**Key Functions**:
+- `on_message()` – Command handler (movement, camera, auto, e-stop)
+- `publish_cmd_vel()` – Publishes velocity commands to ROS
+- `auto_movement_logic()` – Autonomous forward/turn decision logic
+- `servo_tick()` – Updates servo positions every 100ms
+- `build_grid()` / `publish_grid_mqtt()` – Occupancy grid creation and publishing
+
+---
+
+### `lidar_safety_node.py` - Safety Monitoring
+
+**Purpose**: Continuously monitors LiDAR for obstacles and enforces safety by triggering hard e-stop in manual mode or soft stop in auto mode.
+
+**Key Responsibilities**:
+- Monitors front LiDAR cone for obstacles
+- Triggers hard emergency stop in manual mode
+- Triggers soft stop in auto mode (allows recovery)
+- Enforces 30-second grace period after `estop_off` to prevent re-triggering
+- Publishes safety status to MQTT
+
+**Safety Parameters**:
+- `WARNING_DISTANCE = 0.60m` – Advisory distance
+- `BLOCK_DISTANCE = 0.35m` – Stop distance
+- `FRONT_ANGLE = 20°` – Cone angle (±20° from center)
+- `CONFIRM_POINTS = 8` – Require 8 LiDAR points for confirmation
+- `ESTOP_REARM_DELAY = 30s` – Grace period after e-stop clear
+
+**Main MQTT Topics**:
+- `yahboom/cmd` – Subscribes to detect mode changes and e-stop commands
+- `yahboom/safety/status` – Publishes safety state (clear, warning, blocked, etc.)
+
+**Key Functions**:
+- `scan_callback()` – Processes LiDAR data and detects obstacles
+- `trigger_manual_estop()` – Publishes hard e-stop in manual mode
+- `trigger_auto_soft_stop()` – Publishes soft stop in auto mode
+- `publish_status()` – Periodic safety status updates
+
+---
+
+### `robot_sender.py` - VIT Embedding Encoder (Standalone)
+
+**Purpose**: Runs MobileCLIP-S1 image encoder on robot camera frames and publishes embeddings to MQTT.
+
+**Key Responsibilities**:
+- Opens camera and captures frames
+- Loads MobileCLIP-S1 model (with GPU/CPU detection)
+- Performs inference every 5 frames (configurable)
+- Converts images to embeddings
+- Publishes Base64-encoded embeddings to MQTT
+- Publishes encoder status
+
+**Configuration**:
+- `INFERENCE_EVERY_N_FRAMES = 5` – Process every 5th frame
+- `EMBEDDING_BYTES = 2048` – Embedding size (512/1024/2048 options)
+- `CAMERA_WIDTH = 640`, `CAMERA_HEIGHT = 480`
+
+**Main MQTT Topics**:
+- `yahboom/vit/embedding` – Publishes image embeddings (Base64 encoded)
+- `yahboom/vit/status` – Publishes encoder status (running, error, etc.)
+
+---
+
+### `webrtc_server.py` - WebRTC Video + VIT Integration
+
+**Purpose**: Provides low-latency WebRTC video streaming to browser and runs MobileCLIP embedding publishing in background threads.
+
+**Key Responsibilities**:
+- Opens camera via OpenCV
+- Serves WebRTC video stream on port 8080
+- Creates WebRTC peer connections for browser
+- Runs camera worker thread for frame capture
+- Runs VIT worker thread for embedding publishing
+- Allows runtime embedding size changes via MQTT
+- Handles browser connections and disconnections
+
+**Web Interface**:
+- Accessible at: `http://<robot-ip>:8080`
+- Shows live WebRTC video, connection status, and restart button
+- JavaScript auto-connects to WebRTC
+
+**Main MQTT Topics**:
+- `yahboom/vit/embedding` – Publishes embeddings from background VIT worker
+- `yahboom/vit/status` – Publishes VIT status updates
+- `yahboom/vit/command` – Receives embedding size commands (`embds1`, `embds2`, `embds3`)
+
+**Embedding Size Commands**:
+- `embds1` → 512 bytes, 128 dimensions
+- `embds2` → 1024 bytes, 256 dimensions
+- `embds3` → 2048 bytes, 512 dimensions
+
+**Key Components**:
+- `CameraVideoTrack` – Custom WebRTC video source
+- `camera_worker()` – Background thread for frame capture
+- `vit_worker()` – Background thread for embedding publishing
+- `offer()` – WebRTC peer negotiation handler
+
+---
+
+## Yahboom Car Command Reference
+
+### Movement Commands
+
+| Command    | Action                  | Details                              |
+| ---------- | ----------------------- | ------------------------------------ |
+| `fwd`      | Move forward            | LINEAR_SPEED = 0.5 m/s              |
+| `bck`      | Move backward           | LINEAR_SPEED = -0.5 m/s             |
+| `left`     | Rotate left             | ANGULAR_SPEED = 1.0 rad/s           |
+| `right`    | Rotate right            | ANGULAR_SPEED = -1.0 rad/s          |
+| `fwdleft`  | Forward-left diagonal   | 0.5 m/s + 0.5 rad/s                 |
+| `fwdright` | Forward-right diagonal  | 0.5 m/s - 0.5 rad/s                 |
+| `bckleft`  | Backward-left diagonal  | -0.5 m/s + 0.5 rad/s                |
+| `bckright` | Backward-right diagonal | -0.5 m/s - 0.5 rad/s                |
+| `stop`     | Stop all movement       | Zero velocity                        |
+
+### Camera Servo Commands
+
+| Command      | Action                   | Details                    |
+| ------------ | ------------------------ | -------------------------- |
+| `cleft`      | Pan left                 | S1 -5°, S2 0°              |
+| `cright`     | Pan right                | S1 +5°, S2 0°              |
+| `up`         | Tilt up                  | S1 0°, S2 +5°              |
+| `down`       | Tilt down                | S1 0°, S2 -5°              |
+| `upcleft`    | Up + left                | S1 -5°, S2 +5°             |
+| `upcright`   | Up + right               | S1 +5°, S2 +5°             |
+| `downcleft`  | Down + left              | S1 -5°, S2 -5°             |
+| `downcright` | Down + right             | S1 +5°, S2 -5°             |
+| `crst`       | Reset to center          | S1→0°, S2→-60°             |
+| `cstop`      | Stop servo movement      | Freeze current position    |
+
+### Safety & Mode Commands
+
+| Command          | Action                     | Effect                                                               |
+| ---------------- | -------------------------- | -------------------------------------------------------------------- |
+| `auto_on`        | Enable autonomous mode     | Robot uses LiDAR for obstacle avoidance                              |
+| `auto_off`       | Disable autonomous mode    | Returns to manual control                                            |
+| `estop_on`       | Activate emergency stop    | Hard lock; blocks all movement commands                              |
+| `estop_off`      | Clear emergency stop       | Unlocks movement; 30s grace period before LiDAR can re-trigger       |
+| `auto_soft_stop` | Soft stop in auto mode     | Halts robot without locking e-stop; allows recovery                 |
+
+### VIT Embedding Commands
+
+| Command | Size    | Dimensions | Use Case                     |
+| ------- | ------- | ---------- | ---------------------------- |
+| `embds1` | 512 B   | 128        | Low latency, fast processing |
+| `embds2` | 1024 B  | 256        | Balanced speed/quality       |
+| `embds3` | 2048 B  | 512        | High quality, slower         |
+
+---
+
+## Yahboom Car Startup & Testing
+
+### Basic Run Order
+
+```bash
+# Terminal 1: Robot movement and ROS bridge
+python3 mqtt_ros_node.py
+
+# Terminal 2: Safety monitoring
+python3 lidar_safety_node.py
+
+# Terminal 3: WebRTC video + VIT embeddings (recommended)
+python3 webrtc_server.py
+
+# OR Terminal 3: VIT embeddings only (no video)
+python3 robot_sender.py
+```
+
+### Testing with MQTT
+
+```bash
+# Move forward
+mosquitto_pub -h localhost -t yahboom/cmd -m "fwd"
+
+# Stop
+mosquitto_pub -h localhost -t yahboom/cmd -m "stop"
+
+# Rotate left
+mosquitto_pub -h localhost -t yahboom/cmd -m "left"
+
+# Enable auto mode
+mosquitto_pub -h localhost -t yahboom/cmd -m "auto_on"
+
+# Disable auto mode
+mosquitto_pub -h localhost -t yahboom/cmd -m "auto_off"
+
+# Activate e-stop
+mosquitto_pub -h localhost -t yahboom/cmd -m "estop_on"
+
+# Clear e-stop
+mosquitto_pub -h localhost -t yahboom/cmd -m "estop_off"
+
+# Move camera left
+mosquitto_pub -h localhost -t yahboom/cmd -m "cleft"
+
+# Reset camera
+mosquitto_pub -h localhost -t yahboom/cmd -m "crst"
+
+# Change embedding size to 512B/128D
+mosquitto_pub -h localhost -t yahboom/vit/command -m "embds1"
+```
+
+### Accessing WebRTC Video
+
+Open browser and navigate to:
+```
+http://<robot-ip>:8080
+```
+
+The page displays live camera feed and connection status. The system auto-connects to WebRTC.
+
+---
+
+## How the System Works Together
+
+### Manual Control Flow
+
+1. Dashboard sends command → `yahboom/cmd`
+2. `mqtt_ros_node.py` receives command
+3. Converts to ROS 2 `/cmd_vel` message
+4. Robot moves via ROS control
+5. `lidar_safety_node.py` monitors front LiDAR
+6. If too close: publishes `estop_on` → movement blocked
+7. Dashboard receives safety status via `yahboom/safety/status`
+
+### Autonomous Mode Flow
+
+1. Dashboard sends `auto_on` → `yahboom/cmd`
+2. Both `mqtt_ros_node.py` and `lidar_safety_node.py` switch to auto mode
+3. Robot moves forward if path is clear (LiDAR check)
+4. If obstacle detected: `lidar_safety_node.py` publishes `auto_soft_stop`
+5. `mqtt_ros_node.py` stops robot but keeps e-stop unlocked
+6. Auto logic or client decides next move
+
+### Video & Embedding Flow
+
+1. `webrtc_server.py` opens camera
+2. `camera_worker()` thread reads frames continuously
+3. `vit_worker()` thread processes frames every 5 frames
+4. MobileCLIP-S1 creates embeddings
+5. Embeddings published → `yahboom/vit/embedding`
+6. Status updates → `yahboom/vit/status`
+7. Browser connects to port 8080 for live WebRTC video
+8. Embedding size can be changed via `yahboom/vit/command`
 
 ---
 
@@ -980,6 +1258,30 @@ python slam_service.py --broker raspberrypi.local --reset
 ---
 
 If you need more granular function-to-line references or want additional modules included (for example files under `Yahboom Car/Unused/`), tell me which folders to prioritise and I will extend the README with exact function signatures and line links.
+
+---
+
+## Quick Start - Running the Dashboard
+
+To run the Yahboom Dashboard on any device:
+
+1. **Install dependencies** (one-time setup):
+
+    ```bash
+    install-dependencies.bat
+    ```
+
+    This checks for Node.js and Python, installs frontend/backend packages, and sets up the virtual environment.
+
+2. **Run the dashboard**:
+    ```bash
+    run-dashboard.bat
+    ```
+    This launches the Flask backend (port 3000) and Vite frontend (port 5173) in **two separate terminal windows**.
+
+Access the dashboard at: **http://localhost:5173**
+
+Both batch files are located in the project root and automatically handle directory navigation. Make sure to run `install-dependencies.bat` before running the dashboard for the first time.
 
 ---
 
