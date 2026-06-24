@@ -1,6 +1,6 @@
 // Pinned top bar: nav pills, theme toggle, settings, plus inline status row.
 import { useState } from 'react';
-import { Antenna, Battery, BatteryLow, Check, Gamepad2, LayoutGrid, LayoutTemplate, Moon, Play, Radio, Settings, Square, Sun, Timer } from 'lucide-react';
+import { Antenna, Check, Gamepad2, LayoutGrid, LayoutTemplate, Moon, Play, Radio, Settings, Square, Sun, Timer } from 'lucide-react';
 import { LAYOUT_TEMPLATES, useLayoutStore, useMetricsStore, usePickerStore, useSettingsStore, useViewStore } from '../store';
 import type { LayoutStore, SettingsStore, ViewStore } from '../store';
 import type { MetricsState } from '../types';
@@ -10,16 +10,12 @@ export function TopBar({ darkMode, toggleDark }: { darkMode: boolean; toggleDark
   const connectionStatus = useMetricsStore((s: MetricsState) => s.connectionStatus);
   const networkMode = useMetricsStore((s: MetricsState) => s.networkMode);
   const latencyMs = useMetricsStore((s: MetricsState) => s.latencyMs);
-  const batteryPercent = useMetricsStore((s: MetricsState) => s.batteryPercent);
   const openSettings = useSettingsStore((s: SettingsStore) => s.setOpen);
   const togglePicker = usePickerStore((s) => s.toggle);
   const view = useViewStore((s: ViewStore) => s.view);
   const setView = useViewStore((s: ViewStore) => s.setView);
   const connColor = connectionStatus === 'CONNECTED' ? 'var(--state-success)'
     : connectionStatus === 'RECONNECTING' ? 'var(--state-warning)' : 'var(--state-error)';
-  const batteryColor = (batteryPercent ?? 100) > 50 ? 'var(--state-success)'
-    : (batteryPercent ?? 100) > 20 ? 'var(--state-warning)' : 'var(--state-error)';
-  const BatteryIcon = (batteryPercent ?? 100) > 20 ? Battery : BatteryLow;
 
   return (
     // Lift the whole TopBar above its ambient-glow siblings (heading + grid),
@@ -111,19 +107,13 @@ export function TopBar({ darkMode, toggleDark }: { darkMode: boolean; toggleDark
         <div className="flex items-center gap-1.5" style={{ fontSize: 12 }}>
           <Antenna size={12} style={{ color: 'var(--accent-cyan)' }} />
           <span style={{ color: 'var(--text-muted)' }}>Network:</span>
-          <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{networkMode}</span>
-          <Timer size={11} style={{ color: 'var(--text-muted)', marginLeft: 6 }} />
+          <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{networkMode ?? '--'}</span>
+        </div>
+        <div className="flex items-center gap-1.5" style={{ fontSize: 12 }}>
+          <Timer size={12} style={{ color: 'var(--accent-cyan)' }} />
           <span style={{ color: 'var(--text-muted)' }}>Latency:</span>
           <span style={{ color: 'var(--text-primary)', fontWeight: 600, fontFamily: 'monospace' }}>
-            {latencyMs ?? '--'}<span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> ms</span>
-          </span>
-        </div>
-        {/* Battery — inline text between latency and movement legend */}
-        <div className="flex items-center gap-1.5" style={{ fontSize: 12 }}>
-          <BatteryIcon size={12} style={{ color: batteryColor }} />
-          <span style={{ color: 'var(--text-muted)' }}>Battery:</span>
-          <span style={{ color: batteryColor, fontWeight: 600, fontFamily: 'monospace' }}>
-            {batteryPercent ?? '--'}<span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>%</span>
+            {latencyMs != null ? latencyMs : '--'}<span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> ms</span>
           </span>
         </div>
         <div className="flex-1 flex items-center justify-end gap-2 flex-wrap" style={{ fontSize: 11, color: 'var(--text-muted)' }}>

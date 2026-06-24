@@ -1,0 +1,106 @@
+import { sendCommand } from './Controls';
+import { useMetricsStore } from '../app/store';
+
+/** VIT label from labels.json — edge-aware stop triggers on this class only. */
+export const EDGE_AWARE_STOP_LABEL = 'bottle';
+
+export const EDGE_AWARE_MIN_CONFIDENCE = 40;
+const EDGE_AWARE_COOLDOWN_MS = 5_000;
+
+export type VitStatusForStopLabel = {
+  latest?: {
+    top_label?: string;
+    top_confidence?: number;
+    results?: { label: string; confidence: number }[];
+    timestamp?: string;
+  } | null;
+  activity?: { last_decode_at?: string | null };
+};
+
+let edgeAwareEnabled = false;
+let stopLabelEstopArmed = false;
+let lastHandledKey: string | null = null;
+let lastTriggerAt = 0;
+
+export function isStopLabel(label: string): boolean {
+  return label.trim().toLowerCase() === EDGE_AWARE_STOP_LABEL.toLowerCase();
+}
+
+/** Called when the test bench stop-mode toggle changes (or loads from backend). */
+export function setEdgeAwareStopEnabled(enabled: boolean) {
+  const was = edgeAwareEnabled;
+  edgeAwareEnabled = enabled;
+  if (enabled && !was) {
+    lastHandledKey = null;
+  }
+}
+
+export function isEdgeAwareStopEnabled(): boolean {
+  return edgeAwareEnabled;
+}
+
+/** Dedupe key for a VIT decode (timestamp from latest or last_decode_at). */
+export function vitDecodeEventKey(vit: VitStatusForStopLabel): string | null {
+  const latest = vit.latest;
+  if (!latest) return null;
+  return latest.timestamp || vit.activity?.last_decode_at || null;
+}
+
+/**
+ * Arm stop-label soft-stop only while a test-bench session is active (after START).
+ * Pass ignoreCurrentDecodeKey (from vitDecodeEventKey) to skip the decode already
+ * visible when START was pressed — only new decodes after START can trigger.
+ */
+export function setStopLabelEstopArmed(armed: boolean, ignoreCurrentDecodeKey?: string | null) {
+  const was = stopLabelEstopArmed;
+  stopLabelEstopArmed = armed;
+  if (armed && !was) {
+    lastHandledKey = ignoreCurrentDecodeKey ?? null;
+  }
+}
+
+/** All label/confidence rows from the latest decode (ranking ignored). */
+function labelRows(latest: NonNullable<VitStatusForStopLabel['latest']>) {
+  const rows = [...(latest.results ?? [])];
+  const topLabel = latest.top_label?.trim();
+  if (topLabel && !rows.some((r) => r.label === topLabel)) {
+    rows.push({ label: topLabel, confidence: latest.top_confidence ?? 0 });
+  }
+  return rows;
+}
+
+/** True when any stop-label row meets the confidence threshold (any rank). */
+export function hasQualifyingStopLabel(vit: VitStatusForStopLabel): boolean {
+  const latest = vit.latest;
+  if (!latest) return false;
+  return labelRows(latest).some(
+    (row) => isStopLabel(row.label) && row.confidence >= EDGE_AWARE_MIN_CONFIDENCE,
+  );
+}
+
+/**
+ * When edge-aware mode is on, session is armed, and stop label is >= 40%, send
+ * auto_soft_stop (halts robot without latching e-stop). Returns true if triggered.
+ */
+export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): boolean {
+  if (!edgeAwareEnabled || !stopLabelEstopArmed) return false;
+
+  const latest = vit.latest;
+  const key = vitDecodeEventKey(vit);
+  if (!latest || !key || key === lastHandledKey) return false;
+  if (!hasQualifyingStopLabel(vit)) return false;
+
+  return triggerStopLabelSoftStop(key);
+}
+
+function triggerStopLabelSoftStop(key: string): boolean {
+  const now = Date.now();
+  if (now - lastTriggerAt < EDGE_AWARE_COOLDOWN_MS) return false;
+  if (useMetricsStore.getState().estopActive) return false;
+
+  lastHandledKey = key;
+  lastTriggerAt = now;
+  sendCommand('auto_soft_stop');
+  useMetricsStore.getState().pushEvent('warning', `Edge-aware stop — ${EDGE_AWARE_STOP_LABEL} detected, soft stop sent`);
+  return true;
+}

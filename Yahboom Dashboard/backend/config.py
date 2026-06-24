@@ -13,6 +13,7 @@ BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 TOPIC = os.getenv("MQTT_TOPIC", "yahboom/cmd")
 SAFETY_TOPIC = os.getenv("MQTT_SAFETY_TOPIC", "yahboom/safety/status")
 GRID_TOPIC = os.getenv("MQTT_GRID_TOPIC", "yahboom/grid")
+DRIVE_STATUS_TOPIC = os.getenv("MQTT_DRIVE_STATUS_TOPIC", "yahboom/drive/status")
 # Flask settings
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "3000"))
@@ -60,7 +61,7 @@ CAMERA_COMMANDS = {
     "crst", "cstop",
 }
 
-AUTO_COMMANDS = {"auto_on", "auto_off"}
+AUTO_COMMANDS = {"auto_on", "auto_off", "auto_soft_stop"}
 ESTOP_COMMANDS = {"estop_on", "estop_off"}
 
 # VIT encoder on the Pi (robot_sender.py) — separate SSH from the video server
@@ -71,6 +72,16 @@ PI_VIT_SERVER_LOG = os.getenv(
 # How often to SSH-pgrep the VIT encoder and refresh vit_server_running (seconds).
 VIT_PROBE_INTERVAL_SEC = float(os.getenv("VIT_PROBE_INTERVAL_SEC", "2"))
 VIT_PROBE_CACHE_TTL_SEC = float(os.getenv("VIT_PROBE_CACHE_TTL_SEC", "2"))
+
+# Cache-aware offloading script on the Pi (test bench — cache aware stop mode)
+PI_CACHE_AWARE_SCRIPT_PATH = os.getenv(
+    "PI_CACHE_AWARE_SCRIPT_PATH", "cache_aware_offloading.py")
+PI_CACHE_AWARE_LOG = os.getenv(
+    "PI_CACHE_AWARE_LOG", "/tmp/yahboom_cache_aware.log")
+PI_CACHE_AWARE_TERMINAL_TITLE = os.getenv(
+    "PI_CACHE_AWARE_TERMINAL_TITLE", "Cache Aware Offloading")
+CACHE_SCRIPT_START_TIMEOUT_SEC = float(os.getenv("CACHE_SCRIPT_START_TIMEOUT_SEC", "30"))
+CACHE_SCRIPT_START_POLL_SEC = float(os.getenv("CACHE_SCRIPT_START_POLL_SEC", "1"))
 
 # VIT / MobileCLIP scene decoder MQTT topics (see vit_service.py)
 VIT_EMBEDDING_TOPIC = os.getenv(

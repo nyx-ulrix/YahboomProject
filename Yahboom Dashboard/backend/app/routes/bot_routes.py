@@ -146,6 +146,12 @@ def safety_topic_status():
     return jsonify(mqtt_service.get_safety_topic_status())
 
 
+@bot_bp.route("/drive_status", methods=["GET"])
+def drive_status():
+    """Return the latest drive-status JSON from the Pi (includes robotTimestamp)."""
+    return jsonify(mqtt_service.get_drive_status())
+
+
 @bot_bp.route("/config", methods=["GET"])
 def config():
     """Expose backend defaults so the frontend never has to hard-code them."""

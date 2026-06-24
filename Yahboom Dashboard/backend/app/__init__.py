@@ -14,10 +14,12 @@ def create_app():
     from app.routes.stream_routes import stream_bp
     from app.routes.slam_routes import slam_bp
     from app.routes.vit_routes import vit_bp
+    from app.routes.test_bench_routes import test_bench_bp
     app.register_blueprint(bot_bp)
     app.register_blueprint(stream_bp)
     app.register_blueprint(slam_bp)
     app.register_blueprint(vit_bp)
+    app.register_blueprint(test_bench_bp)
 
     from app.routes.stream_routes import start_background_video_probe
     start_background_video_probe()

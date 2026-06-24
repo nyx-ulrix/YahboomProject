@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 import time
 import json
 from config import (
-    BROKER_PORT, GRID_TOPIC, TOPIC, MQTT_TIMEOUT, PUBLISH_TIMEOUT, SAFETY_TOPIC,
-    EVENT_LOG_MAX, EVENT_LOG_MESSAGE_MAXLEN,
+    BROKER_PORT, DRIVE_STATUS_TOPIC, GRID_TOPIC, TOPIC, MQTT_TIMEOUT, PUBLISH_TIMEOUT,
+    SAFETY_TOPIC, EVENT_LOG_MAX, EVENT_LOG_MESSAGE_MAXLEN,
 )
 
 
@@ -22,10 +22,13 @@ class MQTTService:
         self.broker_ip = None
         self.connected = False
         self.estop_active = False
+        # After a manual resume, ignore stale MQTT latch messages briefly.
+        self._ignore_estop_latch_until = 0.0
         self.stream_running = False
         # Keep latest values for both sources; API will prefer GRID_TOPIC.
         self.latest_grid_status = self._parse_grid_message("")
         self.latest_safety_status = self._parse_safety_message("")
+        self.latest_drive_status = self._parse_drive_message("")
         # Pi MJPEG URL (single upstream for the relay ingest thread).
         self.video_upstream_url: str | None = None
         # Path/URL for <img src> on clients — backend relay, not the Pi.
@@ -59,12 +62,27 @@ class MQTTService:
     # Emergency stop
     # -------------------------------------------------------------------------
 
+    def _try_latch_estop(self) -> None:
+        """Latch e-stop from LiDAR/grid unless the user just cleared it."""
+        if time.time() < self._ignore_estop_latch_until:
+            return
+        self.estop_active = True
+
     def set_estop(self, active: bool) -> None:
         self.estop_active = active
         if active:
             self.log_event('warning', 'Emergency stop engaged')
+            cmd = 'estop_on'
         else:
+            self._ignore_estop_latch_until = time.time() + 2.5
             self.log_event('info', 'Emergency stop released — control resumed')
+            cmd = 'estop_off'
+        if self.connected:
+            try:
+                self.mqtt_client.publish(TOPIC, cmd)
+                self.log_event('info', f'MQTT -> {TOPIC}: {cmd}')
+            except Exception as e:
+                self.log_event('error', f'E-stop MQTT publish failed: {e}')
 
     # -------------------------------------------------------------------------
     # Connection
@@ -87,6 +105,7 @@ class MQTTService:
             self.mqtt_client.subscribe(TOPIC)
             self.mqtt_client.subscribe(SAFETY_TOPIC)
             self.mqtt_client.subscribe(GRID_TOPIC)
+            self.mqtt_client.subscribe(DRIVE_STATUS_TOPIC)
             self.mqtt_client.loop_start()
             self.connected = True
             msg = f"Connected to MQTT broker at {self.broker_ip}:{BROKER_PORT}"
@@ -108,6 +127,24 @@ class MQTTService:
         client.subscribe(TOPIC)
         client.subscribe(SAFETY_TOPIC)
         client.subscribe(GRID_TOPIC)
+        client.subscribe(DRIVE_STATUS_TOPIC)
+
+    @staticmethod
+    def _robot_timestamp_seconds(obj: dict) -> float | None:
+        """Pi clock from mqtt_ros_node.py payloads (time.time() seconds)."""
+        raw_ts = obj.get("timestamp")
+        if raw_ts is None:
+            return None
+        try:
+            value = float(raw_ts)
+        except (TypeError, ValueError):
+            return None
+        if not (value > 0):
+            return None
+        # Accept ms payloads defensively.
+        if value > 1e12:
+            value /= 1000.0
+        return value
 
     def _parse_safety_message(self, raw: str) -> dict:
         """Parse messages like 'blocked,distance=0.23m,estop=true'."""
@@ -209,12 +246,17 @@ class MQTTService:
             else:
                 flat = None
 
+            robot_ts = self._robot_timestamp_seconds(obj)
+            auto_mode = obj.get("auto_mode") if "auto_mode" in obj else None
+
             return {
                 "raw": text,
                 "status": str(status),
                 "distance": str(distance) if distance is not None else None,
                 "estop": estop,
                 "updatedAt": updated_at,
+                "robotTimestamp": robot_ts,
+                "auto_mode": bool(auto_mode) if auto_mode is not None else None,
                 "w": w,
                 "h": h,
                 "grid": flat,
@@ -226,6 +268,35 @@ class MQTTService:
             "status": "grid",
             "distance": None,
             "estop": False,
+            "updatedAt": updated_at,
+            "robotTimestamp": None,
+            "auto_mode": None,
+        }
+
+    def _parse_drive_message(self, raw: str) -> dict:
+        """Parse yahboom/drive/status JSON from mqtt_ros_node.py."""
+        text = raw.strip()
+        updated_at = int(time.time() * 1000) if text else None
+        try:
+            obj = json.loads(text) if text else {}
+        except Exception:
+            obj = {}
+
+        if not isinstance(obj, dict):
+            obj = {}
+
+        status = obj.get("status") or obj.get("state") or "unknown"
+        robot_ts = self._robot_timestamp_seconds(obj)
+        auto_mode = obj.get("auto_mode") if "auto_mode" in obj else None
+        estop_val = obj.get("estop_active") if "estop_active" in obj else obj.get("estop")
+        estop = bool(estop_val) if estop_val is not None else False
+
+        return {
+            "raw": text,
+            "status": str(status),
+            "robotTimestamp": robot_ts,
+            "auto_mode": bool(auto_mode) if auto_mode is not None else None,
+            "estop": estop,
             "updatedAt": updated_at,
         }
 
@@ -244,17 +315,23 @@ class MQTTService:
             self.latest_grid_status = status
             # Don't log GRID_TOPIC payloads: they can be very large (120x120 grid)
             # and will flood the dashboard event log.
+            # Grid carries the Pi's authoritative estop_active flag.
             if status.get("estop"):
-                self.estop_active = True
+                self._try_latch_estop()
+            else:
+                self.estop_active = False
             return
 
         if message.topic == SAFETY_TOPIC:
             status = self._parse_safety_message(raw)
             self.latest_safety_status = status
             if status["estop"]:
-                # Latch e-stop on safety trips. Clear only through the user-controlled
-                # /api/estop route, not when the LiDAR later reports clear.
-                self.estop_active = True
+                # Latch e-stop on safety trips. Clear via /api/estop or Pi grid estop=false.
+                self._try_latch_estop()
+            return
+
+        if message.topic == DRIVE_STATUS_TOPIC:
+            self.latest_drive_status = self._parse_drive_message(raw)
             return
 
         return
@@ -273,6 +350,10 @@ class MQTTService:
     def get_safety_topic_status(self) -> dict:
         """Return latest parsed SAFETY_TOPIC text payload."""
         return dict(self.latest_safety_status)
+
+    def get_drive_status(self) -> dict:
+        """Return latest parsed drive-status JSON from the Pi."""
+        return dict(self.latest_drive_status)
 
 
 # Global instance

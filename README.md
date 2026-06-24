@@ -7,17 +7,60 @@ This README documents the main features, expected behaviour, and the responsible
 ## Table of Contents
 
 1. [Quick Start](#quick-start---running-the-dashboard)
-2. [Yahboom Car](#yahboom-car)
+2. [Recent dashboard changes](#recent-dashboard-changes)
+3. [Yahboom Car](#yahboom-car)
     - [Yahboom Car Core System Architecture](#yahboom-car-core-system-architecture)
     - [Yahboom Car Command Reference](#yahboom-car-command-reference)
     - [Yahboom Car Startup & Testing](#yahboom-car-startup--testing)
     - [How the System Works Together](#how-the-system-works-together)
-3. [Yahboom Dashboard Backend](#yahboom-dashboard-backend)
-4. [Movement & Motor Control](#movement--motor-control)
-5. [Camera & Servo Control](#camera--servo-control)
-6. [SLAM Mapping Settings](#slam-mapping-settings)
-7. [Backend Configuration & SLAM Service Details](#backend-configuration--slam-service-details)
-8. [MQTT Topics Reference](#mqtt-topics-reference)
+4. [Yahboom Dashboard Backend](#yahboom-dashboard-backend)
+5. [Movement & Motor Control](#movement--motor-control)
+6. [Camera & Servo Control](#camera--servo-control)
+7. [SLAM Mapping Settings](#slam-mapping-settings)
+8. [Backend Configuration & SLAM Service Details](#backend-configuration--slam-service-details)
+9. [MQTT Topics Reference](#mqtt-topics-reference)
+
+---
+
+## Recent dashboard changes
+
+### Stop-Time Test Bench widget
+
+A **control** widget measures robot stop time after explore mode starts. See [Yahboom Dashboard/README.md](Yahboom%20Dashboard/README.md#stop-time-test-bench) for full behaviour.
+
+Summary:
+
+- **START** sends `auto_on` (same as the EXPLORE button). Stop-mode toggle is disabled during an active session.
+- **Stop modes:** *Cache aware stop* (Pi drive-status only) or *Edge aware stop* (VIT scene decoder sends `auto_soft_stop` on the `bottle` label after START, ≥ 40% confidence).
+- Timestamps in **CSV export** come from the **Raspberry Pi clock** (`timestamp` / `robotTimestamp` on `yahboom/drive/status` and `yahboom/grid`), not the browser.
+- **Command time** is stamped when START is pressed; **movement start** is when the Pi reports wheels in motion; **stop** is detected from Pi drive-status and e-stop (manual, grid, or edge-aware VIT).
+- Live on-screen timer extrapolates from the last Pi sample between MQTT updates (display only).
+- Multiple runs, per-run stopping distance, network type, and stop mode; **Export CSV** and **Clear** history.
+
+**APIs:** `GET /api/drive_status`, `GET /api/grid_status`, `GET /api/test_bench/stop_mode`, `GET /api/vit/status` (edge-aware mode).
+
+**Code:** `StopTestBenchWidget` in [Widgets.tsx](Yahboom%20Dashboard/src/app/components/Widgets.tsx); `edgeAwareStopLabelEstop.ts`; `useEdgeAwareStopLabelEstop()` in [hooks.ts](Yahboom%20Dashboard/src/app/hooks.ts); [test_bench_routes.py](Yahboom%20Dashboard/backend/app/routes/test_bench_routes.py).
+
+### Drive status on the backend
+
+- New MQTT subscription: `yahboom/drive/status` (env: `MQTT_DRIVE_STATUS_TOPIC`).
+- New REST endpoint: **`GET /api/drive_status`** — used by the test bench, drive status polling, and System Status.
+- Grid parser forwards **`robotTimestamp`** and **`auto_mode`** from Pi payloads.
+
+Files: [Yahboom Dashboard/backend/config.py](Yahboom%20Dashboard/backend/config.py), [Yahboom Dashboard/backend/app/services/mqtt_service.py](Yahboom%20Dashboard/backend/app/services/mqtt_service.py), [Yahboom Dashboard/backend/app/routes/bot_routes.py](Yahboom%20Dashboard/backend/app/routes/bot_routes.py).
+
+### Client-side auto removed
+
+The dashboard **no longer** runs browser-based explore autopilot:
+
+| Removed | Replacement |
+|---------|-------------|
+| **CLIENT AUTO** widget | Use **EXPLORE** (ROS Auto Button) → Pi `auto_on` |
+| `useClientAutoPilot()` hook | Pi `auto_movement_logic()` on the car |
+| `toggleClientExplore()` | `toggleRosAuto()` |
+| `exploreActive` store field | `autoRunning` (set from `auto_on` / `auto_off` only) |
+
+Manual joystick, keyboard, and Pi autonomous mode are unchanged.
 
 ---
 
@@ -279,7 +322,7 @@ The page displays live camera feed and connection status. The system auto-connec
 3. Robot moves forward if path is clear (LiDAR check)
 4. If obstacle detected: `lidar_safety_node.py` publishes `auto_soft_stop`
 5. `mqtt_ros_node.py` stops robot but keeps e-stop unlocked
-6. Auto logic or client decides next move
+6. Pi auto logic selects the next move (turn, reverse, or halt)
 
 ### Video & Embedding Flow
 
@@ -298,6 +341,8 @@ The page displays live camera feed and connection status. The system auto-connec
 
 | Feature                          | Expected behaviour                                                                                                                                            | Responsible functions / files                                                                                                                                                                                                                                 |
 | :------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| MQTT drive status relay          | Subscribe to `yahboom/drive/status`, parse Pi `timestamp` as `robotTimestamp`, expose via REST for widgets and stop-time experiments.                         | [backend/app/services/mqtt_service.py](Yahboom%20Dashboard/backend/app/services/mqtt_service.py): `_parse_drive_message()`, `get_drive_status()`; [backend/app/routes/bot_routes.py](Yahboom%20Dashboard/backend/app/routes/bot_routes.py): `GET /api/drive_status` |
+| Stop-Time Test Bench widget      | Pi-clock stop timing, cache vs edge-aware stop modes, VIT stop-label e-stop (armed after START), CSV export. Uses drive/grid/VIT APIs and `toggleRosAuto()`. | [src/app/components/Widgets.tsx](Yahboom%20Dashboard/src/app/components/Widgets.tsx): `StopTestBenchWidget`; [src/lib/edgeAwareStopLabelEstop.ts](Yahboom%20Dashboard/src/lib/edgeAwareStopLabelEstop.ts); [backend/app/routes/test_bench_routes.py](Yahboom%20Dashboard/backend/app/routes/test_bench_routes.py) |
 | Backend server startup           | Create and start Flask app, load config, manage background services (SLAM, VIT relay). Provides REST API endpoints.                                           | [backend/main.py](Yahboom%20Dashboard/backend/main.py): `create_app()` and top-level run block — see [client_backend_README.md](client_backend_README.md)                                                                                                     |
 | Configuration                    | Centralised settings for MQTT topics, Flask host/port, VIT, SLAM and Raspberry Pi SSH/video settings. Configured via `.env` file.                             | [backend/config.py](Yahboom%20Dashboard/backend/config.py) — referenced in [client_backend_README.md](client_backend_README.md)                                                                                                                               |
 | SLAM mapping service             | Subscribe to scan/grid/cmd topics, feed data to SLAM core, write `slam_map.json`, provide API endpoints returning map/status. Real-time 2D occupancy mapping. | [backend/slam_service.py](Yahboom%20Dashboard/backend/slam_service.py): `SlamService` methods `connect()`, `_on_message()`, `_writer_loop()`, `get_map()`, `get_status()`; CartographerSLAM class methods like `process_raw_scan()`, `_update()`, `to_dict()` |
@@ -334,15 +379,17 @@ These settings are configured in [Yahboom Car/Used/mqtt_ros_node.py](Yahboom%20C
 - **`LINEAR_STEP = 0.02`**: Linear velocity increment per control cycle (enables smooth acceleration)
 - **`ANGULAR_STEP = 0.05`**: Angular velocity increment per control cycle (enables smooth rotation acceleration)
 
-### Client-Side Auto Mode
+### Pi autonomous mode (dashboard)
 
-The dashboard/client can control the robot's autonomous navigation by publishing MQTT commands:
+The dashboard enables Pi autonomous navigation by publishing MQTT commands (EXPLORE button or `auto_on`):
 
 | Command          | Action                           | Effect                                                                                                  |
 | ---------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `auto_on`        | Enable autonomous mode           | Robot begins autonomous navigation; ignores manual movement commands; uses LiDAR for obstacle avoidance |
+| `auto_on`        | Enable autonomous mode           | Pi runs `auto_movement_logic()`; manual movement commands are blocked while `autoMode` is active       |
 | `auto_off`       | Disable autonomous mode          | Robot stops; returns to manual control mode                                                             |
-| `auto_soft_stop` | Soft emergency stop in auto mode | Halts robot immediately but does NOT latch e-stop; allows client to resume auto or send manual commands |
+| `auto_soft_stop` | Soft emergency stop in auto mode | Halts robot immediately but does NOT latch e-stop; Pi or operator can resume                            |
+
+**Note:** Client-side explore autopilot (browser LiDAR decision loop) was removed. All autonomous driving runs on the Pi via `mqtt_ros_node.py`.
 
 **Important**: Camera commands (`up`, `down`, `cleft`, `cright`, etc.) work in both manual and auto modes and are NOT blocked by e-stop.
 
@@ -713,6 +760,18 @@ Local occupancy grid from robot
 **Default**: `yahboom/grid`
 
 **Env variable**: `MQTT_GRID_TOPIC`
+
+---
+
+#### `DRIVE_STATUS_TOPIC`
+
+Drive state and Pi timestamps from `publish_drive_status()` on the robot
+
+**Default**: `yahboom/drive/status`
+
+**Env variable**: `MQTT_DRIVE_STATUS_TOPIC`
+
+**API**: `GET /api/drive_status` returns parsed JSON including `robotTimestamp` (Pi `time.time()` seconds)
 
 ---
 
@@ -1234,7 +1293,7 @@ python slam_service.py --broker raspberrypi.local --reset
 | yahboom/cmd           | Robot command strings: movement (`fwd`, `bck`, `left`, `right`, `fwdleft`, `fwdright`, `bckleft`, `bckright`, `stop`), camera (`up`, `down`, `cleft`, `cright`, `upcleft`, `upcright`, `downcleft`, `downcright`, `crst`, `cstop`), autonomous (`auto_on`, `auto_off`), emergency (`estop_on`, `estop_off`), soft stop (`auto_soft_stop`) | Dashboard backend, other controllers                                                                      | [Yahboom Car/Used/mqtt_ros_node.py](Yahboom%20Car/Used/mqtt_ros_node.py), [Yahboom Car/Used/lidar_safety_node.py](Yahboom%20Car/Used/lidar_safety_node.py), [backend/slam_service.py](Yahboom%20Dashboard/backend/slam_service.py) |
 | yahboom/grid          | Local occupancy grid JSON: `{w, h, grid[], resolution, robot_x, robot_y, front_dist, left_dist, right_dist, timestamp}`                                                                                                                                                                                                                   | [Yahboom Car/Used/mqtt_ros_node.py](Yahboom%20Car/Used/mqtt_ros_node.py) (5 Hz via `publish_grid_mqtt()`) | [backend/slam_service.py](Yahboom%20Dashboard/backend/slam_service.py), dashboard viewer                                                                                                                                           |
 | yahboom/safety/status | Safety state: `clear`, `warning`, `blocked`, `manual_estop_triggered`, or CSV sensor data                                                                                                                                                                                                                                                 | [Yahboom Car/Used/lidar_safety_node.py](Yahboom%20Car/Used/lidar_safety_node.py)                          | Dashboard display, backend services, logging                                                                                                                                                                                       |
-| yahboom/drive/status  | Drive state JSON: `{status, distances: {front, left, right}, auto_mode, estop_active, timestamp}`                                                                                                                                                                                                                                         | [Yahboom Car/Used/mqtt_ros_node.py](Yahboom%20Car/Used/mqtt_ros_node.py) (via `publish_drive_status()`)   | Dashboard, logging services                                                                                                                                                                                                        |
+| yahboom/drive/status  | Drive state JSON: `{status, auto_mode, estop_active, front, left, right, …, timestamp}` (Pi `time.time()` seconds)                                                                                                                                                                                                                        | [Yahboom Car/mqtt_ros_node.py](Yahboom%20Car/mqtt_ros_node.py) (via `publish_drive_status()`)   | Dashboard (`GET /api/drive_status`), Stop-Time Test Bench, drive status widget                                                                                                                                                     |
 | yahboom/scan          | Raw LiDAR LaserScan JSON: `{angle_min, angle_max, angle_increment, ranges[], timestamp}`                                                                                                                                                                                                                                                  | Robot LiDAR nodes (ROS bridge)                                                                            | [backend/slam_service.py](Yahboom%20Dashboard/backend/slam_service.py) (via `process_raw_scan()`)                                                                                                                                  |
 | yahboom/vit/embedding | Base64-encoded embedding JSON: `{raw_bytes, embedding_dim, data, dtype, frame, timestamp}`                                                                                                                                                                                                                                                | [Yahboom Car/Used/webrtc_server.py](Yahboom%20Car/Used/webrtc_server.py)                                  | [backend/app/services/vit/vit_service.py](Yahboom%20Dashboard/backend/app/services/vit/vit_service.py)                                                                                                                             |
 | yahboom/vit/status    | VIT encoder status: `vit_encoder_started`, `running`, `error`, frame count                                                                                                                                                                                                                                                                | VIT encoder ( webrtc_server.py)                                                                           | Dashboard/monitoring services                                                                                                                                                                                                      |

@@ -9,7 +9,7 @@ import { useMetricsStore, useSettingsStore, useViewStore } from '../store';
 import type { SettingsStore, ViewStore } from '../store';
 import type { MetricsState } from '../types';
 import {
-  useClientAutoPilot, useConnectionSync, useDriveStatusPoll, useGlobalShortcuts,
+  useConnectionSync, useDriveStatusPoll, useEdgeAwareStopLabelEstop, useGlobalShortcuts,
   useGridStatusPoll, useKeyboardCamera, useKeyboardMovement, useSafetyStatusPoll,
 } from '../hooks';
 import { VideoFeedCore } from '../../lib/VideoFeed';
@@ -206,8 +206,7 @@ function EStop() {
   const handleEngage = () => {
     if (estopActive) return;
     justEngagedRef.current = true;
-    sendCommand('estop_on', 'estop');
-    setEstopState(true);
+    void setEstopState(true);
   };
 
   // Resume requires a complete click cycle to prevent accidental dismissal on swipe.
@@ -218,8 +217,7 @@ function EStop() {
       return;
     }
     if (!estopActive) return;
-    sendCommand('estop_off');
-    setEstopState(false);
+    void setEstopState(false);
   };
 
   return (
@@ -334,7 +332,7 @@ export function ControllerPage({
   const setView = useViewStore((s: ViewStore) => s.setView);
   const openSettings = useSettingsStore((s: SettingsStore) => s.setOpen);
   const view = useViewStore((s: ViewStore) => s.view);
-  const [kbdCam, setKbdCam]   = useState({ x: 0, y: 0 });
+  const kbdCam = useMetricsStore((s: MetricsState) => s.cameraKeyboardVec);
   const [camCmd, setCamCmd]   = useState<CameraCommand | null>(null);
   const lastCmdRef    = useRef<BotCommand | null>(null);
   const lastCamCmdRef = useRef<ReturnType<typeof vecToCameraCommand>>(null);
@@ -347,15 +345,12 @@ export function ControllerPage({
   }, [estopActive]);
 
   useConnectionSync();
+  useEdgeAwareStopLabelEstop();
   useSafetyStatusPoll();
   useGridStatusPoll();
   useDriveStatusPoll();
-  useClientAutoPilot();
   useKeyboardMovement();
-  useKeyboardCamera(({ pan, tilt }) => {
-    setKbdCam({ x: pan, y: tilt });
-    setCamCmd(vecToCameraCommand(pan, tilt));
-  });
+  useKeyboardCamera();
   useGlobalShortcuts();
 
   return (
@@ -439,7 +434,7 @@ export function ControllerPage({
 
         {/* Status bar */}
         <div className="flex-shrink-0">
-          <MiniStatusBar cameraCmd={camCmd} />
+          <MiniStatusBar cameraCmd={camCmd ?? vecToCameraCommand(kbdCam.x, kbdCam.y)} />
         </div>
 
         {/* Controls row: [Movement] [E-STOP col] [Camera] */}
