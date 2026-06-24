@@ -25,7 +25,7 @@ TOPIC_COMMAND   = "yahboom/cmd"             # publish   send stop command
 TOPIC_DETECT    = "yahboom/detect/status"   # publish   detection events
 
 # Detection config
-DETECTION_LABEL     = "a water bottle"
+DETECTION_LABEL     = "bottle"
 DETECTION_THRESHOLD = 0.25   # cosine similarity threshold  tune this
 STOP_COMMAND        = "auto_soft_stop"
 
