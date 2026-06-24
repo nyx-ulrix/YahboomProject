@@ -288,8 +288,6 @@ def main():
                                 "topic": TOPIC_CLIP,
                                 "image_file_size": image_file_size,
                                 "image_payload_size_bytes": image_file_size,
-                                "data": base64.b64encode(raw_bytes).decode("utf-8"),
-
                             },
                         )
 
