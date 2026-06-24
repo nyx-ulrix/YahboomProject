@@ -27,7 +27,7 @@ TOPIC_DETECT    = "yahboom/detect/status"   # publish   detection events
 # Detection config
 DETECTION_LABEL     = "bottle"
 DETECTION_THRESHOLD = 0.25   # cosine similarity threshold  tune this
-STOP_COMMAND        = "auto_soft_stop"
+STOP_COMMAND        = "stop"
 
 # Cooldown: seconds to wait after a detection before detecting again.
 # Prevents flooding mqtt_ros_node.py with repeated stop commands.
