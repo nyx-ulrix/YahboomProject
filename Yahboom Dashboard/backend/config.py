@@ -61,7 +61,7 @@ CAMERA_COMMANDS = {
     "crst", "cstop",
 }
 
-AUTO_COMMANDS = {"auto_on", "auto_off", "auto_soft_stop"}
+AUTO_COMMANDS = {"auto_on", "auto_off"}
 ESTOP_COMMANDS = {"estop_on", "estop_off"}
 
 # VIT encoder on the Pi (robot_sender.py) — separate SSH from the video server

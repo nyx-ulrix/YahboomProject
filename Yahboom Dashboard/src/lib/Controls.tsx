@@ -39,7 +39,7 @@ export type MovementCommand =
   | 'fwdleft' | 'fwdright' | 'bckleft' | 'bckright'
   | 'stop';
 
-export type AutoMoveCommand = 'auto_on' | 'auto_off' | 'auto_soft_stop';
+export type AutoMoveCommand = 'auto_on' | 'auto_off';
 
 export type EStopCommand = 'estop_on' | 'estop_off';
 
@@ -101,13 +101,6 @@ function commandState(command: BotCommand, source?: CommandSource) {
       movementVec: null,
     };
   }
-  if (command === 'auto_soft_stop') {
-    return {
-      currentCommand: 'STOP' as const,
-      missionStatus: 'STOPPED' as const,
-      movementVec: null,
-    };
-  }
   if (command === 'estop_on') {
     return {
       currentCommand: 'STOP' as const,
@@ -151,7 +144,6 @@ export function sendCommand(command: BotCommand, source?: CommandSource): void {
   if (
     command !== 'stop'
     && command !== 'auto_off'
-    && command !== 'auto_soft_stop'
     && command !== 'estop_on'
     && command !== 'estop_off'
     && state.estopActive

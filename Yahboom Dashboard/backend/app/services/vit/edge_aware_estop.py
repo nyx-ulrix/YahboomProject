@@ -1,7 +1,7 @@
 """
 Edge-aware stop mode for the test bench.
 
-Bottle detections engage soft stop (`auto_soft_stop`) on the dashboard client, not e-stop. This module only stores which stop mode is active.
+Bottle detections send stop on the dashboard client, not e-stop. This module only stores which stop mode is active.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ class EdgeAwareEstopService:
             }
 
     def on_vit_results(self, results: list[tuple[str, float]]) -> None:
-        """Stop-label soft stop is handled on the dashboard client via auto_soft_stop."""
+        """Stop-label stop is handled on the dashboard client via stop command."""
         return
 
 

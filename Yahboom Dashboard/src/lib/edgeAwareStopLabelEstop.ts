@@ -47,7 +47,7 @@ export function vitDecodeEventKey(vit: VitStatusForStopLabel): string | null {
 }
 
 /**
- * Arm stop-label soft-stop only while a test-bench session is active (after START).
+ * Arm stop-label stop only while a test-bench session is active (after START).
  * Pass ignoreCurrentDecodeKey (from vitDecodeEventKey) to skip the decode already
  * visible when START was pressed — only new decodes after START can trigger.
  */
@@ -80,7 +80,7 @@ export function hasQualifyingStopLabel(vit: VitStatusForStopLabel): boolean {
 
 /**
  * When edge-aware mode is on, session is armed, and stop label is >= 40%, send
- * auto_soft_stop (halts robot without latching e-stop). Returns true if triggered.
+ * stop (same as manual stop). Returns true if triggered.
  */
 export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): boolean {
   if (!edgeAwareEnabled || !stopLabelEstopArmed) return false;
@@ -90,17 +90,17 @@ export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): b
   if (!latest || !key || key === lastHandledKey) return false;
   if (!hasQualifyingStopLabel(vit)) return false;
 
-  return triggerStopLabelSoftStop(key);
+  return triggerStopLabelStop(key);
 }
 
-function triggerStopLabelSoftStop(key: string): boolean {
+function triggerStopLabelStop(key: string): boolean {
   const now = Date.now();
   if (now - lastTriggerAt < EDGE_AWARE_COOLDOWN_MS) return false;
   if (useMetricsStore.getState().estopActive) return false;
 
   lastHandledKey = key;
   lastTriggerAt = now;
-  sendCommand('auto_soft_stop');
-  useMetricsStore.getState().pushEvent('warning', `Edge-aware stop — ${EDGE_AWARE_STOP_LABEL} detected, soft stop sent`);
+  sendCommand('stop', 'manual');
+  useMetricsStore.getState().pushEvent('warning', `Edge-aware stop — ${EDGE_AWARE_STOP_LABEL} detected, stop sent`);
   return true;
 }
