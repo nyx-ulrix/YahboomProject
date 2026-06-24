@@ -31,7 +31,7 @@ A **control** widget measures robot stop time after explore mode starts. See [Ya
 Summary:
 
 - **START** sends `auto_on` (same as the EXPLORE button). Stop-mode toggle is disabled during an active session.
-- **Stop modes:** *Cache aware stop* (Pi drive-status only) or *Edge aware stop* (VIT scene decoder sends `auto_soft_stop` on the `bottle` label after START, ≥ 40% confidence).
+- **Stop modes:** *Cache aware stop* (Pi drive-status only) or *Edge aware stop* (VIT scene decoder sends `stop` on the `bottle` label after START, ≥ 40% confidence).
 - Timestamps in **CSV export** come from the **Raspberry Pi clock** (`timestamp` / `robotTimestamp` on `yahboom/drive/status` and `yahboom/grid`), not the browser.
 - **Command time** is stamped when START is pressed; **movement start** is when the Pi reports wheels in motion; **stop** is detected from Pi drive-status and e-stop (manual, grid, or edge-aware VIT).
 - Live on-screen timer extrapolates from the last Pi sample between MQTT updates (display only).

@@ -65,21 +65,21 @@ Located in `src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode a
 | Mode | Label in UI | Behaviour |
 |------|-------------|-----------|
 | `cache_aware_offloading` | Cache aware stop | Default. Stop is detected from Pi drive-status only (same as before edge-aware was added). |
-| `edge_aware` | Edge aware stop | VIT scene decoder sends `auto_soft_stop` when the configured **stop label** is detected (see below). Pi drive-status still ends the run and records stop time. |
+| `edge_aware` | Edge aware stop | VIT scene decoder sends `stop` when the configured **stop label** is detected (see below). Pi drive-status still ends the run and records stop time. |
 
 **How a run works:**
 
 1. User selects **network type** and **stop mode**, then presses **START** — same action as **EXPLORE** (`toggleRosAuto()` → `auto_on` on the Pi). START is disabled while a session is active or while e-stop is latched.
 2. **Command time** — latest Raspberry Pi clock (`time.time()` from MQTT) is captured when START is pressed.
 3. **Movement start** — official run start is when the Pi publishes a movement drive-status (e.g. `auto_creep_forward`, `moving_forward`, `auto_forward_clear`) on `yahboom/drive/status`.
-4. **Stop** — run ends automatically when the Pi reports a halt (`stopped`, `auto_soft_stop`, `auto_disabled`, `estop_active`, etc.), or when e-stop is engaged (manual, backend, or grid). Edge-aware VIT sends `auto_soft_stop` (not e-stop). There is no manual STOP button on the widget.
+4. **Stop** — run ends automatically when the Pi reports a halt (`stopped`, `auto_disabled`, `estop_active`, etc.), or when e-stop is engaged (manual, backend, or grid). Edge-aware VIT sends `stop`. There is no manual STOP button on the widget.
 5. User enters **stopping distance** (m) per row after each run.
 6. **Network type** and **stop mode** are stored per run and included in CSV export.
 
 **Edge-aware stop label (VIT):**
 
 - Trigger class is `bottle` (`EDGE_AWARE_STOP_LABEL` in `edgeAwareStopLabelEstop.ts`, matching `backend/app/services/vit/labels.json`).
-- The dashboard polls `GET /api/vit/status` every 500 ms (`useEdgeAwareStopLabelEstop`). When any decoder row for that label is **≥ 40%** confidence on a **new decode after START**, it sends `auto_soft_stop` via MQTT (halts the robot without latching e-stop).
+- The dashboard polls `GET /api/vit/status` every 500 ms (`useEdgeAwareStopLabelEstop`). When any decoder row for that label is **≥ 40%** confidence on a **new decode after START**, it sends `stop` via MQTT.
 - Stop-label soft-stop **only runs after START** (`setStopLabelEstopArmed(true, …)` seeds the current decode so pre-START detections are ignored). Toggling edge-aware mode on without pressing START does **not** send stop commands.
 - Requires VIT encoder and video pipeline running (see VIT Scene Decoder widget / top bar).
 
@@ -124,7 +124,7 @@ Stop-mode selection for the Stop-Time Test Bench:
 - **`GET /api/test_bench/stop_mode`** — returns `{ mode, edge_aware_enabled, min_confidence, cooldown_sec }`
 - **`POST /api/test_bench/stop_mode`** — body `{ "mode": "cache_aware_offloading" | "edge_aware" }`
 
-Implemented in `backend/app/routes/test_bench_routes.py` and `backend/app/services/vit/edge_aware_estop.py`. Edge-aware stop-label detection and `auto_soft_stop` are executed on the **dashboard client** (`edgeAwareStopLabelEstop.ts`); the backend stores which mode is active.
+Implemented in `backend/app/routes/test_bench_routes.py` and `backend/app/services/vit/edge_aware_estop.py`. Edge-aware stop-label detection and `stop` are executed on the **dashboard client** (`edgeAwareStopLabelEstop.ts`); the backend stores which mode is active.
 
 ## Scripts
 

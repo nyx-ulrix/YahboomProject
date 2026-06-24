@@ -123,7 +123,7 @@ export const LAYOUT_TEMPLATES: LayoutTemplate[] = [
 ];
 
 /** Template applied to fresh dashboards — always one of the stored views. */
-export const DEFAULT_TEMPLATE_ID = 'vit_view';
+export const DEFAULT_TEMPLATE_ID = 'stop_test';
 
 /** The default template object, resolved from the registry (falls back to the first). */
 export const DEFAULT_TEMPLATE: LayoutTemplate =

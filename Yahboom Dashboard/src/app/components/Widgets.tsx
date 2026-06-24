@@ -1563,7 +1563,6 @@ const NETWORK_OPTIONS = ['Wi-Fi', '5G', '4G/LTE', 'Ethernet', 'Other'] as const;
 /** Pi statuses that explicitly mean the robot has halted. */
 const DRIVE_STOP_STATUSES = new Set([
   'stopped',
-  'auto_soft_stop',
   'auto_disabled',
   'estop_active',
   'auto_all_blocked_front_and_rear',
@@ -1584,6 +1583,7 @@ function isMovementDriveStatus(status: string | undefined): boolean {
   if (DRIVE_STOP_STATUSES.has(status)) return false;
   if (DRIVE_PRE_MOVE_STATUSES.has(status)) return false;
   if (status.startsWith('blocked_by_estop')) return false;
+  if (status.includes('stop')) return false;
   return true;
 }
 
@@ -2202,7 +2202,7 @@ function StopTestBenchWidget() {
         </div>
         {stopMode === 'edge_aware' && (
           <p style={{ margin: '6px 0 0', fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.35 }}>
-            {'VIT "bottle" detection sends auto_soft_stop (no e-stop latch). Requires VIT and video running.'}
+            {'VIT "bottle" detection sends stop. Requires VIT and video running.'}
           </p>
         )}
         {stopMode === 'cache_aware_offloading' && (
