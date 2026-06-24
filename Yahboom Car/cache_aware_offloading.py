@@ -1,4 +1,4 @@
-
+# detector.py
 # Runs on the Yahboom Pi 5 alongside webrtc_server.py
 # Subscribes to CLIP embeddings, compares against a text label,
 # and publishes a stop command when similarity exceeds threshold.
@@ -25,8 +25,9 @@ TOPIC_COMMAND   = "yahboom/cmd"             # publish   send stop command
 TOPIC_DETECT    = "yahboom/detect/status"   # publish   detection events
 
 # Detection config
-DETECTION_LABEL     = "bottle"
+DETECTION_LABEL     = "a water bottle"
 DETECTION_THRESHOLD = 0.25   # cosine similarity threshold  tune this
+AUTO_OFF_COMMAND    =  "Auto_off"
 STOP_COMMAND        = "stop"
 
 # Cooldown: seconds to wait after a detection before detecting again.
@@ -179,14 +180,15 @@ def on_message(client, userdata, msg):
                 _last_detection_time = now
 
                 # Publish stop command to mqtt_ros_node.py
-                client.publish(TOPIC_COMMAND, STOP_COMMAND, qos=0)
+                client.publish(TOPIC_COMMAND, AUTO_OFF_COMMAND, STOP_COMMAND, qos=0)
 
                 # Publish detection event for logging / dashboard
                 detect_payload = json.dumps({
                     "label":      DETECTION_LABEL,
                     "similarity": round(similarity, 4),
                     "threshold":  DETECTION_THRESHOLD,
-                    "command":    STOP_COMMAND,
+                    "stop_command":    STOP_COMMAND,
+                    "auto_off_command": AUTO_OFF_COMMAND,
                     "dims":       embedding_dims,
                     "frame":      payload.get("frame", -1),
                     "timestamp":  now,
@@ -197,7 +199,7 @@ def on_message(client, userdata, msg):
                     f"[DETECT] *** WATER BOTTLE DETECTED *** "
                     f"similarity={similarity:.4f} | dims={embedding_dims} | "
                     f"frame={payload.get('frame', '?')} | "
-                    f"command='{STOP_COMMAND}' sent to '{TOPIC_COMMAND}'"
+                    f"command='{STOP_COMMAND}' and '{AUTO_OFF_COMMAND}' sent to '{TOPIC_COMMAND}'"
                 )
 
             else:
@@ -262,6 +264,7 @@ def main():
     print(f"[INFO] Detection label : '{DETECTION_LABEL}'")
     print(f"[INFO] Threshold       : {DETECTION_THRESHOLD}")
     print(f"[INFO] Stop command    : '{STOP_COMMAND}' '{TOPIC_COMMAND}'")
+    print(f"[INFO] Auto off command : '{AUTO_OFF_COMMAND}' '{TOPIC_COMMAND}'")
     print(f"[INFO] Cooldown        : {DETECTION_COOLDOWN_S}s")
 
     # Load model first text embedding computed on first message
