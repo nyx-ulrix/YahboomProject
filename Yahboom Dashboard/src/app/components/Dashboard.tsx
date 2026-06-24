@@ -4,18 +4,19 @@ import { TopBar } from './TopBar';
 import { DashboardGrid } from './DashboardGrid';
 import { WidgetPickerOverlay } from './WidgetPickerOverlay';
 import {
-  useClientAutoPilot, useConnectionSync, useDriveStatusPoll, useGlobalShortcuts,
-  useGridStatusPoll, useKeyboardMovement, useSafetyStatusPoll,
+  useConnectionSync, useDriveStatusPoll, useEdgeAwareStopLabelEstop, useGlobalShortcuts,
+  useGridStatusPoll, useKeyboardCamera, useKeyboardMovement, useSafetyStatusPoll,
 } from '../hooks';
 import { useMetricsStore } from '../store';
 
 export function Dashboard({ darkMode, toggleDark }: { darkMode: boolean; toggleDark: () => void }) {
   useConnectionSync();
+  useEdgeAwareStopLabelEstop();
   useSafetyStatusPoll();
   useGridStatusPoll();
   useDriveStatusPoll();
-  useClientAutoPilot();
   useKeyboardMovement();
+  useKeyboardCamera();
   useGlobalShortcuts();
 
   // Hint user about the picker shortcut on first mount

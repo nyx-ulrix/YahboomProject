@@ -1,16 +1,17 @@
 // Widget implementations and WIDGET_REGISTRY.
 // Components read from useMetricsStore; live values are synced via hooks.ts.
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Activity, Joystick, Network, Octagon, Play,
+  Activity, FlaskConical, Joystick, Network, Octagon, Play,
   Radar, ScanEye, Download, Trash2,
   Signal, Timer, Video, type LucideIcon,
 } from 'lucide-react';
 import { useMetricsStore, useSettingsStore } from '../store';
-import { useKeyboardCamera } from '../hooks';
 import type { WidgetDefinition, MetricsState } from '../types';
-import { sendCommand, sendCameraCommand, setEstopState, toggleClientExplore, toggleRosAuto, vecToCommand, vecToCameraCommand } from '../../lib/Controls';
+import { sendCommand, sendCameraCommand, setEstopState, toggleRosAuto, vecToCommand, vecToCameraCommand } from '../../lib/Controls';
+import { setEdgeAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/edgeAwareStopLabelEstop';
+import { clearTestBenchCache, loadTestBenchCache, saveTestBenchCache } from '../../lib/testBenchStorage';
 import { VideoFeedCore } from '../../lib/VideoFeed';
 import { Slider } from './ui/slider';
 
@@ -93,7 +94,6 @@ function SystemStatusWidget() {
   const ros2    = useMetricsStore((s: MetricsState) => s.ros2BridgeStatus);
   const latency = useMetricsStore((s: MetricsState) => s.latencyMs);
   const mode    = useMetricsStore((s: MetricsState) => s.mode);
-  const exploreActive = useMetricsStore((s: MetricsState) => s.exploreActive);
   const rosAutoRunning = useMetricsStore((s: MetricsState) => s.autoRunning);
   const estopActive = useMetricsStore((s: MetricsState) => s.estopActive);
   const safetyStatus = useMetricsStore((s: MetricsState) => s.safetyStatus);
@@ -111,7 +111,7 @@ function SystemStatusWidget() {
     { Icon: Signal,     color: mqttC,        label: 'MQTT Link',      value: mqtt,                                            dot: true          },
     { Icon: Network,    color: ros2C,         label: 'ROS2 Bridge',    value: ros2 ?? 'WIP',                                   dot: ros2 != null  },
     { Icon: Activity,   color: modeC,         label: 'Mode',           value: mode,                                            dot: true          },
-    { Icon: Play,       color: (exploreActive || rosAutoRunning) ? accents.green : 'var(--text-muted)', label: 'Auto Running', value: String(exploreActive || rosAutoRunning), dot: true },
+    { Icon: Play,       color: rosAutoRunning ? accents.green : 'var(--text-muted)', label: 'Auto Running', value: String(rosAutoRunning), dot: true },
     { Icon: Octagon,    color: estopC,        label: 'E-stop Active',  value: String(estopActive),                             dot: true          },
     { Icon: Timer,      color: accents.cyan,  label: 'Round-Trip',     value: latency != null ? `${latency} ms` : 'WIP',       dot: false         },
     { Icon: Radar,      color: accents.yellow, label: 'Safety Status', value: safetyStatus,                                    dot: false         },
@@ -354,10 +354,8 @@ export const movementJoystickDef: WidgetDefinition = {
 
 // Camera Joystick
 function CameraJoystickWidget() {
-  const [kbd, setKbd] = useState({ x: 0, y: 0 });
+  const kbd = useMetricsStore((s: MetricsState) => s.cameraKeyboardVec);
   const lastCmdRef = useRef<ReturnType<typeof vecToCameraCommand>>(null);
-  // Arrow-key input feeds externalVec so the thumb mirrors keyboard camera panning.
-  useKeyboardCamera(({ pan, tilt }) => setKbd({ x: pan, y: tilt }));
 
   return (
     <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -393,14 +391,7 @@ function StopButtonWidget() {
   const estopActive = useMetricsStore((s: MetricsState) => s.estopActive);
 
   const handleClick = () => {
-    const next = !estopActive;
-    if (next) {
-      sendCommand('estop_on', 'estop');
-      setEstopState(true);
-    } else {
-      sendCommand('estop_off');
-      setEstopState(false);
-    }
+    void setEstopState(!estopActive);
   };
 
   return (
@@ -494,91 +485,45 @@ export const eventLogDef: WidgetDefinition = {
   icon: 'Activity', pinned: false, component: EventLogWidget,
 };
 
-// Auto Movement Button
-function AutoModeButton({
-  kind,
-  labelOn,
-  labelOff,
-}: {
-  kind: 'explore' | 'ros';
-  labelOn: string;
-  labelOff: string;
-}) {
-  const estopActive = useMetricsStore((s: MetricsState) => s.estopActive);
-  const exploreActive = useMetricsStore((s: MetricsState) => s.exploreActive);
-  const rosAutoRunning = useMetricsStore((s: MetricsState) => s.autoRunning);
-
-  const active = kind === 'explore' ? exploreActive : rosAutoRunning;
-  const blocked = estopActive && !active;
-
-  const handleClick = () => {
-    if (kind === 'explore') toggleClientExplore();
-    else toggleRosAuto();
-  };
-
-  const title = blocked
-    ? 'E-stop active — blocked'
-    : kind === 'explore'
-      ? active
-        ? 'Stop client explore autopilot'
-        : 'Start client explore autopilot'
-      : active
-        ? 'Send auto_off'
-        : 'Send auto_on';
-
-  return (
-    <button
-      type="button"
-      onClick={handleClick}
-      disabled={blocked}
-      className="w-full h-full rounded-2xl flex items-center justify-center gap-2 transition-all"
-      style={{
-        minHeight: 48,
-        opacity: blocked ? 0.5 : 1,
-        cursor: blocked ? 'not-allowed' : 'pointer',
-        background: active
-          ? 'linear-gradient(135deg, var(--accent-purple), #4c1d95)'
-          : 'linear-gradient(135deg, var(--state-success), #14532d)',
-        color: '#fff',
-        fontWeight: 700,
-        fontSize: 13,
-        letterSpacing: '0.08em',
-        border: active
-          ? '2px solid var(--accent-purple)'
-          : '1px solid rgba(255,255,255,0.2)',
-        boxShadow: active
-          ? '0 0 24px rgba(139,92,246,0.55), inset 0 1px 0 rgba(255,255,255,0.2)'
-          : '0 8px 24px rgba(34,197,94,0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
-      }}
-      onMouseEnter={(e) => {
-        if (!blocked) e.currentTarget.style.transform = 'translateY(-2px)';
-      }}
-      onMouseLeave={(e) => (e.currentTarget.style.transform = 'translateY(0)')}
-      title={title}
-    >
-      {active ? labelOff : labelOn}
-    </button>
-  );
-}
-
-function AutoMovementButtonWidget() {
-  return (
-    <div className="h-full w-full flex items-center justify-center p-1">
-      <AutoModeButton kind="explore" labelOn="CLIENT AUTO" labelOff="CLIENT AUTO OFF" />
-    </div>
-  );
-}
-
-export const autoMovementButtonDef: WidgetDefinition = {
-  id: 'auto_movement_button_widget', name: 'Auto Movement Button', group: 'control',
-  sizeClass: 'M', defaultSize: { w: 2, h: 1, minW: 1, minH: 1 },
-  icon: 'Bot', pinned: false, component: AutoMovementButtonWidget,
-};
-
+// ROS Auto Button — sends auto_on / auto_off to the Pi.
 function RosAutoButtonWidget() {
+  const estopActive = useMetricsStore((s: MetricsState) => s.estopActive);
+  const rosAutoRunning = useMetricsStore((s: MetricsState) => s.autoRunning);
+  const blocked = estopActive && !rosAutoRunning;
+
   return (
     <div className="h-full w-full flex items-center justify-center p-1">
-      <AutoModeButton kind="ros" labelOn="EXPLORE" labelOff="STOP EXPLORING" />
+      <button
+        type="button"
+        onClick={() => toggleRosAuto()}
+        disabled={blocked}
+        className="w-full h-full rounded-2xl flex items-center justify-center gap-2 transition-all"
+        style={{
+          minHeight: 48,
+          opacity: blocked ? 0.5 : 1,
+          cursor: blocked ? 'not-allowed' : 'pointer',
+          background: rosAutoRunning
+            ? 'linear-gradient(135deg, var(--accent-purple), #4c1d95)'
+            : 'linear-gradient(135deg, var(--state-success), #14532d)',
+          color: '#fff',
+          fontWeight: 700,
+          fontSize: 13,
+          letterSpacing: '0.08em',
+          border: rosAutoRunning
+            ? '2px solid var(--accent-purple)'
+            : '1px solid rgba(255,255,255,0.2)',
+          boxShadow: rosAutoRunning
+            ? '0 0 24px rgba(139,92,246,0.55), inset 0 1px 0 rgba(255,255,255,0.2)'
+            : '0 8px 24px rgba(34,197,94,0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
+        }}
+        onMouseEnter={(e) => {
+          if (!blocked) e.currentTarget.style.transform = 'translateY(-2px)';
+        }}
+        onMouseLeave={(e) => (e.currentTarget.style.transform = 'translateY(0)')}
+        title={blocked ? 'E-stop active — blocked' : rosAutoRunning ? 'Send auto_off' : 'Send auto_on'}
+      >
+        {rosAutoRunning ? 'STOP EXPLORING' : 'EXPLORE'}
+      </button>
     </div>
   );
 }
@@ -1143,7 +1088,7 @@ function vitEmbedBytesToSliderIndex(bytes: number): number {
 function vitEmbedSliderIndexToBytes(index: number): number {
   const i = Math.round(index);
   const clamped = Math.max(0, Math.min(VIT_SLIDER_INDEX_MAX, i));
-  return VIT_EMBED_SIZE_OPTIONS[clamped] ?? 1024;
+  return VIT_EMBED_SIZE_OPTIONS[clamped] ?? 2048;
 }
 
 /** Tick / overlay position — equal thirds: 0%, 50%, 100%. */
@@ -1260,7 +1205,7 @@ function VitDecoderWidget() {
   const mqttLink = useMetricsStore((s: MetricsState) => s.mqttLinkStatus);
   // Max embedding size (bytes). Synced from the backend on first load only,
   // so dragging never fights the 500 ms poll.
-  const [maxEmbedBytes, setMaxEmbedBytes] = useState(1024);
+  const [maxEmbedBytes, setMaxEmbedBytes] = useState(2048);
   const fileSizeInitRef = useRef(false);
   const lastEmbedCommitRef = useRef<number | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -1577,6 +1522,846 @@ export const vitDecoderDef: WidgetDefinition = {
   icon: 'ScanEye', pinned: false, component: VitDecoderWidget,
 };
 
+// STOP-TIME TEST BENCH — measure how long the robot takes to stop after EXPLORE.
+// Command time is stamped on the Pi clock when START is pressed; the official run
+// start is when the Pi reports movement. Stop time comes from Pi drive-status MQTT.
+type StopBenchMode = 'cache_aware_offloading' | 'edge_aware';
+
+type StopModeApiResponse = {
+  mode?: StopBenchMode;
+  cache_script_running?: boolean;
+  status?: string;
+  message?: string;
+};
+
+const STOP_MODE_LABELS: Record<StopBenchMode, string> = {
+  cache_aware_offloading: 'Cache aware stop',
+  edge_aware: 'Edge aware stop',
+};
+
+type StopTestRun = {
+  id: number;
+  run: number;
+  commandSentAt: number;  // Pi epoch ms — explore command issued
+  startedAt: number;      // Pi epoch ms — robot started moving
+  stoppedAt: number;      // Pi epoch ms
+  durationMs: number;     // stoppedAt − startedAt
+  commandToMoveMs: number;
+  stoppingDistance: string;
+  networkType: string;
+  stopMode: StopBenchMode;
+};
+
+type DriveStatusPayload = {
+  status?: string;
+  robotTimestamp?: number | null;
+  timestamp?: number | null;
+  auto_mode?: boolean | null;
+};
+
+const NETWORK_OPTIONS = ['Wi-Fi', '5G', '4G/LTE', 'Ethernet', 'Other'] as const;
+/** Pi statuses that explicitly mean the robot has halted. */
+const DRIVE_STOP_STATUSES = new Set([
+  'stopped',
+  'auto_soft_stop',
+  'auto_disabled',
+  'estop_active',
+  'auto_all_blocked_front_and_rear',
+  'auto_waiting_for_scan',
+]);
+/** Not movement — but also not a run-ending stop (pre-move or post-estop-clear). */
+const DRIVE_PRE_MOVE_STATUSES = new Set([
+  'auto_enabled',
+  'estop_cleared',
+  'unknown',
+]);
+const ROBOT_TIME_POLL_MS = 100;
+const MOVEMENT_WAIT_MS = 30000;
+
+/** Pi drive-status values that mean the wheels are (or were just) in motion. */
+function isMovementDriveStatus(status: string | undefined): boolean {
+  if (!status) return false;
+  if (DRIVE_STOP_STATUSES.has(status)) return false;
+  if (DRIVE_PRE_MOVE_STATUSES.has(status)) return false;
+  if (status.startsWith('blocked_by_estop')) return false;
+  return true;
+}
+
+/** True when the Pi reports the robot is no longer driving (incl. unlisted halt strings). */
+function isStopDriveStatus(status: string | undefined): boolean {
+  if (!status || status === 'unknown') return false;
+  if (DRIVE_STOP_STATUSES.has(status)) return true;
+  if (status.startsWith('blocked_by_estop')) return true;
+  // Any other non-movement status after we've seen motion (e.g. future Pi statuses).
+  if (!isMovementDriveStatus(status) && !DRIVE_PRE_MOVE_STATUSES.has(status)) return true;
+  return false;
+}
+
+/** Pi `time.time()` seconds (or ms) → epoch ms. */
+function robotTimestampToMs(ts: unknown): number | null {
+  if (typeof ts !== 'number' || !Number.isFinite(ts) || ts <= 0) return null;
+  return ts > 1e12 ? ts : ts * 1000;
+}
+
+function robotMsFromPayload(data: Record<string, unknown>): number | null {
+  return robotTimestampToMs(data.robotTimestamp ?? data.timestamp);
+}
+
+async function fetchDriveStatus(): Promise<DriveStatusPayload | null> {
+  try {
+    const res = await fetch('/api/drive_status', { cache: 'no-store' });
+    if (!res.ok) return null;
+    return await res.json() as DriveStatusPayload;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchGridRobotMs(): Promise<number | null> {
+  try {
+    const res = await fetch('/api/grid_status', { cache: 'no-store' });
+    if (!res.ok) return null;
+    const data = await res.json() as Record<string, unknown>;
+    const fromField = robotMsFromPayload(data);
+    if (fromField != null) return fromField;
+    if (typeof data.raw === 'string' && data.raw.trim()) {
+      try {
+        const parsed = JSON.parse(data.raw) as Record<string, unknown>;
+        return robotMsFromPayload(parsed);
+      } catch { /* ignore */ }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchLatestRobotMs(): Promise<number | null> {
+  const drive = await fetchDriveStatus();
+  const fromDrive = drive ? robotMsFromPayload(drive as Record<string, unknown>) : null;
+  if (fromDrive != null) return fromDrive;
+  return fetchGridRobotMs();
+}
+
+async function fetchBackendEstopActive(): Promise<boolean> {
+  try {
+    const res = await fetch('/api/status', { cache: 'no-store' });
+    if (!res.ok) return false;
+    const data = await res.json() as { estop_active?: boolean };
+    return data.estop_active === true;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchGridEstopActive(): Promise<boolean> {
+  try {
+    const res = await fetch('/api/grid_status', { cache: 'no-store' });
+    if (!res.ok) return false;
+    const data = await res.json() as Record<string, unknown>;
+    if (data.estop === true || data.estop_active === true) return true;
+    if (typeof data.raw === 'string' && data.raw.trim()) {
+      try {
+        const parsed = JSON.parse(data.raw) as Record<string, unknown>;
+        return parsed.estop === true || parsed.estop_active === true;
+      } catch { /* ignore */ }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** Pick a stop timestamp that is never before the run movement start. */
+function resolveStopMs(startTs: number, piTs: number | null): number {
+  if (piTs != null && piTs >= startTs) return piTs;
+  return Math.max(startTs, piTs ?? Date.now());
+}
+
+/** Sync dashboard e-stop UI when the backend/Pi latch outside the widget. */
+function mirrorBackendEstop() {
+  const state = useMetricsStore.getState();
+  if (state.estopActive) return;
+  useMetricsStore.setState({
+    estopActive: true,
+    currentCommand: 'STOP',
+    missionStatus: 'E-STOP',
+    mode: 'manual',
+    autoMode: false,
+    autoRunning: false,
+    movementVec: null,
+  });
+}
+
+/** Quote a CSV field only when it contains a comma, quote, or newline. */
+function csvField(value: string | number): string {
+  const s = String(value ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** Seconds with 2 decimals, e.g. 1.74 s. */
+function fmtSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(2)}`;
+}
+
+function formatRobotIso(ms: number): string {
+  return new Date(ms).toISOString();
+}
+
+function StopTestBenchWidget() {
+  const estopActive = useMetricsStore((s: MetricsState) => s.estopActive);
+  const autoRunning = useMetricsStore((s: MetricsState) => s.autoRunning);
+  const gridEstop = useMetricsStore((s: MetricsState) => s.latestGrid?.estop_active);
+  const networkMode = useMetricsStore((s: MetricsState) => s.networkMode);
+
+  const cachedBench = useRef(loadTestBenchCache());
+  const userPickedNetworkRef = useRef(cachedBench.current.userPickedNetwork);
+  const [runs, setRuns] = useState<StopTestRun[]>(() => cachedBench.current.runs);
+  const [commandSentAt, setCommandSentAt] = useState<number | null>(null);
+  const [activeStart, setActiveStart] = useState<number | null>(null);
+  const [networkType, setNetworkType] = useState<string>(
+    () => cachedBench.current.networkType ?? networkMode ?? 'Wi-Fi',
+  );
+  const [stopMode, setStopMode] = useState<StopBenchMode>('edge_aware');
+  const [cacheScriptReady, setCacheScriptReady] = useState(true);
+  const [modeSwitching, setModeSwitching] = useState(false);
+  const [, setTick] = useState(0);
+
+  const commandSentAtRef = useRef<number | null>(null);
+  const activeStartRef = useRef<number | null>(null);
+  const armedRef = useRef(false);
+  const sessionActiveRef = useRef(false);
+  const lastPiMsRef = useRef<number | null>(null);
+  const lastPiWallMsRef = useRef<number | null>(null);
+  const movementDeadlineRef = useRef<number | null>(null);
+  const networkTypeRef = useRef(networkType);
+  const stopModeRef = useRef(stopMode);
+  useEffect(() => { networkTypeRef.current = networkType; }, [networkType]);
+  useEffect(() => { stopModeRef.current = stopMode; }, [stopMode]);
+
+  const applyStopModeApi = useCallback((data: StopModeApiResponse) => {
+    if (data.mode === 'cache_aware_offloading' || data.mode === 'edge_aware') {
+      setStopMode(data.mode);
+      setEdgeAwareStopEnabled(data.mode === 'edge_aware');
+    }
+    setCacheScriptReady(
+      data.mode === 'edge_aware' || data.cache_script_running === true,
+    );
+  }, []);
+
+  useEffect(() => {
+    saveTestBenchCache({ runs });
+  }, [runs]);
+
+  useEffect(() => {
+    saveTestBenchCache({ networkType, userPickedNetwork: userPickedNetworkRef.current });
+  }, [networkType]);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const res = await fetch('/api/test_bench/stop_mode', { cache: 'no-store' });
+        if (!res.ok || !alive) return;
+        const data = await res.json() as StopModeApiResponse;
+        applyStopModeApi(data);
+        if (data.mode === 'cache_aware_offloading' && !data.cache_script_running) {
+          setModeSwitching(true);
+          setCacheScriptReady(false);
+          const ensureRes = await fetch('/api/test_bench/cache_script/ensure', { method: 'POST' });
+          if (!alive) return;
+          const ensureData = await ensureRes.json() as StopModeApiResponse;
+          applyStopModeApi({ ...ensureData, mode: 'cache_aware_offloading' });
+          if (!ensureRes.ok || !ensureData.cache_script_running) {
+            useMetricsStore.getState().pushEvent(
+              'error',
+              ensureData.message ?? 'Cache-aware script failed to start on Pi',
+            );
+          }
+          setModeSwitching(false);
+        }
+      } catch { /* backend may be starting */ }
+    };
+    void load();
+    return () => { alive = false; };
+  }, [applyStopModeApi]);
+
+  const applyStopMode = async (mode: StopBenchMode) => {
+    if (modeSwitching || sessionActiveRef.current) return;
+    setModeSwitching(true);
+    setCacheScriptReady(mode === 'edge_aware');
+    try {
+      const res = await fetch('/api/test_bench/stop_mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+      const data = await res.json() as StopModeApiResponse;
+      if (!res.ok) {
+        useMetricsStore.getState().pushEvent(
+          'error',
+          data.message ?? 'Failed to update stop mode on Pi',
+        );
+        const cur = await fetch('/api/test_bench/stop_mode', { cache: 'no-store' });
+        if (cur.ok) applyStopModeApi(await cur.json() as StopModeApiResponse);
+        return;
+      }
+      applyStopModeApi({ ...data, mode });
+      if (data.message) {
+        useMetricsStore.getState().pushEvent('warning', data.message);
+      } else {
+        useMetricsStore.getState().pushEvent('info', `Stop mode: ${STOP_MODE_LABELS[mode]}`);
+      }
+    } catch {
+      useMetricsStore.getState().pushEvent('error', 'Failed to reach backend for stop mode');
+    } finally {
+      setModeSwitching(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!userPickedNetworkRef.current && networkMode) setNetworkType(networkMode);
+  }, [networkMode]);
+
+  const resetSession = useCallback(() => {
+    commandSentAtRef.current = null;
+    activeStartRef.current = null;
+    armedRef.current = false;
+    sessionActiveRef.current = false;
+    lastPiMsRef.current = null;
+    lastPiWallMsRef.current = null;
+    movementDeadlineRef.current = null;
+    setStopLabelEstopArmed(false);
+    setCommandSentAt(null);
+    setActiveStart(null);
+  }, []);
+
+  const endRun = useCallback((stoppedAt: number) => {
+    const startedAt = activeStartRef.current;
+    const cmdAt = commandSentAtRef.current;
+    if (startedAt == null || cmdAt == null) return;
+    resetSession();
+    setRuns((prev) => [
+      ...prev,
+      {
+        id: Date.now() + Math.random(),
+        run: prev.length + 1,
+        commandSentAt: cmdAt,
+        startedAt,
+        stoppedAt,
+        durationMs: Math.max(0, stoppedAt - startedAt),
+        commandToMoveMs: Math.max(0, startedAt - cmdAt),
+        stoppingDistance: '',
+        networkType: networkTypeRef.current,
+        stopMode: stopModeRef.current,
+      },
+    ]);
+  }, [resetSession]);
+
+  const tryEndRunWithPiTime = useCallback(async () => {
+    const startTs = activeStartRef.current;
+    if (startTs == null || !armedRef.current) return;
+    const stopTs = await fetchLatestRobotMs();
+    endRun(resolveStopMs(startTs, stopTs));
+  }, [endRun]);
+
+  const tryEndRunFromStopSignal = useCallback(async (drive: DriveStatusPayload | null) => {
+    const startTs = activeStartRef.current;
+    if (startTs == null || !armedRef.current) return;
+    const fromDrive = drive ? robotMsFromPayload(drive as Record<string, unknown>) : null;
+    const stopTs = fromDrive ?? await fetchLatestRobotMs();
+    endRun(resolveStopMs(startTs, stopTs));
+  }, [endRun]);
+
+  const cancelSession = useCallback((message: string) => {
+    resetSession();
+    if (useMetricsStore.getState().autoRunning) toggleRosAuto();
+    useMetricsStore.getState().pushEvent('warning', message);
+  }, [resetSession]);
+
+  const startTest = async () => {
+    if (sessionActiveRef.current) return;
+    if (useMetricsStore.getState().estopActive) {
+      useMetricsStore.getState().pushEvent('warning', 'Stop-time test blocked — clear E-stop first');
+      return;
+    }
+
+    const commandTs = await fetchLatestRobotMs();
+    if (commandTs == null) {
+      useMetricsStore.getState().pushEvent(
+        'warning',
+        'Stop-time test — no Pi clock available (is mqtt_ros_node connected?)',
+      );
+      return;
+    }
+
+    sessionActiveRef.current = true;
+    commandSentAtRef.current = commandTs;
+    lastPiMsRef.current = commandTs;
+    lastPiWallMsRef.current = Date.now();
+    movementDeadlineRef.current = Date.now() + MOVEMENT_WAIT_MS;
+
+    let ignoreDecodeKey: string | null = null;
+    try {
+      const vitRes = await fetch('/api/vit/status', { cache: 'no-store' });
+      if (vitRes.ok) {
+        const vit = await vitRes.json() as VitStatusForStopLabel;
+        ignoreDecodeKey = vitDecodeEventKey(vit);
+      }
+    } catch { /* VIT may be offline */ }
+
+    setStopLabelEstopArmed(true, ignoreDecodeKey);
+    setCommandSentAt(commandTs);
+    setTick((n) => n + 1);
+    toggleRosAuto();
+  };
+
+  // Single session poll — Pi time, movement start, stop detection, live timer tick.
+  useEffect(() => {
+    if (commandSentAt == null) return;
+    let alive = true;
+
+    const syncPiSample = (ts: number) => {
+      if (lastPiMsRef.current !== ts) {
+        lastPiMsRef.current = ts;
+        lastPiWallMsRef.current = Date.now();
+      }
+      setTick((n) => n + 1);
+    };
+
+    const poll = async () => {
+      if (!alive) return;
+
+      const ts = await fetchLatestRobotMs();
+      if (alive && ts != null) syncPiSample(ts);
+
+      const drive = await fetchDriveStatus();
+      if (!alive) return;
+
+      if (activeStartRef.current == null) {
+        const deadline = movementDeadlineRef.current;
+        if (deadline != null && Date.now() > deadline) {
+          cancelSession('Stop-time test — robot did not start moving in time');
+          return;
+        }
+
+        const backendEstop = await fetchBackendEstopActive();
+        const gridEstopNow = await fetchGridEstopActive();
+        if (backendEstop || gridEstopNow || useMetricsStore.getState().estopActive) {
+          if (backendEstop || gridEstopNow) mirrorBackendEstop();
+          cancelSession('Stop-time test — e-stop engaged before movement');
+          return;
+        }
+
+        if (drive?.status) {
+          const moveTs = robotMsFromPayload(drive as Record<string, unknown>);
+          const cmdAt = commandSentAtRef.current;
+          if (
+            moveTs != null
+            && cmdAt != null
+            && moveTs > cmdAt
+            && isMovementDriveStatus(drive.status)
+          ) {
+            activeStartRef.current = moveTs;
+            armedRef.current = true;
+            setActiveStart(moveTs);
+            syncPiSample(moveTs);
+          }
+        }
+        return;
+      }
+
+      if (!armedRef.current) return;
+
+      const backendEstop = await fetchBackendEstopActive();
+      const gridEstopNow = await fetchGridEstopActive();
+      const driveStop = drive?.status ? isStopDriveStatus(drive.status) : false;
+
+      if (backendEstop || gridEstopNow) {
+        mirrorBackendEstop();
+        await tryEndRunFromStopSignal(drive);
+        return;
+      }
+
+      if (drive?.status && driveStop) {
+        await tryEndRunFromStopSignal(drive);
+      }
+    };
+
+    const id = setInterval(() => { void poll(); }, ROBOT_TIME_POLL_MS);
+    void poll();
+    return () => { alive = false; clearInterval(id); };
+  }, [commandSentAt, cancelSession, tryEndRunFromStopSignal]);
+
+  // Fallback: dashboard estop, grid estop, or explore turned off elsewhere.
+  useEffect(() => {
+    if (activeStart == null || !armedRef.current) return;
+    if (!estopActive && !gridEstop && autoRunning) return;
+    void tryEndRunWithPiTime();
+  }, [activeStart, estopActive, gridEstop, autoRunning, tryEndRunWithPiTime]);
+
+  const updateRun = (id: number, patch: Partial<StopTestRun>) =>
+    setRuns((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+
+  const exportCsv = () => {
+    if (runs.length === 0) return;
+    const headers = [
+      'Run',
+      'Command Time (Pi)',
+      'Movement Start (Pi)',
+      'Stop Time (Pi)',
+      'Command-to-Move (ms)',
+      'Stop Duration (ms)',
+      'Stop Time (s)',
+      'Stopping Distance (m)',
+      'Network Type',
+      'Stop Mode',
+    ];
+    const lines = runs.map((r) => [
+      r.run,
+      formatRobotIso(r.commandSentAt),
+      formatRobotIso(r.startedAt),
+      formatRobotIso(r.stoppedAt),
+      r.commandToMoveMs,
+      r.durationMs,
+      fmtSeconds(r.durationMs),
+      csvField(r.stoppingDistance),
+      csvField(r.networkType),
+      csvField(STOP_MODE_LABELS[r.stopMode]),
+    ].join(','));
+    const csv = [headers.join(','), ...lines].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `stop_time_test_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const clearRuns = () => {
+    resetSession();
+    setRuns([]);
+    clearTestBenchCache();
+  };
+
+  const waitingForMovement = commandSentAt != null && activeStart == null;
+  const running = activeStart != null;
+  const sessionActive = commandSentAt != null;
+  const displayPiNow =
+    lastPiMsRef.current != null && lastPiWallMsRef.current != null
+      ? lastPiMsRef.current + (Date.now() - lastPiWallMsRef.current)
+      : null;
+  const elapsedAnchor = running ? activeStart : commandSentAt;
+  const elapsedMs = sessionActive && displayPiNow != null && elapsedAnchor != null
+    ? Math.max(0, displayPiNow - elapsedAnchor)
+    : 0;
+  const cacheStartBlocked = stopMode === 'cache_aware_offloading' && !cacheScriptReady;
+  const startBlocked = sessionActive || estopActive || modeSwitching || cacheStartBlocked;
+  const benchPillLabel = modeSwitching
+    ? 'SCRIPT…'
+    : waitingForMovement
+      ? 'WAITING'
+      : running
+        ? 'RUNNING'
+        : cacheStartBlocked
+          ? 'NO SCRIPT'
+          : 'IDLE';
+  const benchPillColor = modeSwitching
+    ? accents.cyan
+    : waitingForMovement
+      ? accents.yellow
+      : running
+        ? accents.green
+        : cacheStartBlocked
+          ? accents.red
+          : 'var(--text-muted)';
+  const benchPillBg = modeSwitching
+    ? 'rgba(6,182,212,0.18)'
+    : waitingForMovement
+      ? 'rgba(245,158,11,0.18)'
+      : running
+        ? 'rgba(34,197,94,0.18)'
+        : cacheStartBlocked
+          ? 'rgba(239,68,68,0.18)'
+          : 'var(--secondary)';
+  const inputStyle: React.CSSProperties = {
+    width: '100%', background: 'var(--bg-surface)', color: 'var(--text-primary)',
+    border: '1px solid var(--stroke-subtle)', borderRadius: 6,
+    padding: '3px 6px', fontSize: 11, outline: 'none',
+  };
+
+  return (
+    <div className="h-full flex flex-col gap-1.5 min-h-0">
+      {/* Header */}
+      <div className="flex-shrink-0 flex items-center justify-between gap-2 uppercase tracking-wider"
+        style={{ color: 'var(--text-muted)', fontSize: 9, lineHeight: 1.1 }}>
+        <div className="flex items-center gap-1 min-w-0">
+          <FlaskConical size={11} style={{ color: accents.cyan, flexShrink: 0 }} />
+          <span className="truncate">Stop-Time Test Bench</span>
+        </div>
+        <span className="pill" style={{
+          padding: '1px 6px', fontSize: 8, fontWeight: 700,
+          background: benchPillBg,
+          color: benchPillColor,
+        }}>
+          {benchPillLabel}
+        </span>
+      </div>
+
+      {/* Run configuration */}
+      <div className="flex-shrink-0 grid grid-cols-2 gap-1.5">
+        <label className="flex flex-col gap-0.5">
+          <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+            Network Type
+          </span>
+          <select
+            value={networkType}
+            onChange={(e) => { userPickedNetworkRef.current = true; setNetworkType(e.target.value); }}
+            style={inputStyle}
+          >
+            {NETWORK_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
+            {!NETWORK_OPTIONS.includes(networkType as typeof NETWORK_OPTIONS[number]) && (
+              <option value={networkType}>{networkType}</option>
+            )}
+          </select>
+        </label>
+        <div className="flex flex-col gap-0.5">
+          <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+            Detected
+          </span>
+          <div className="truncate" style={{
+            ...inputStyle, display: 'flex', alignItems: 'center',
+            color: 'var(--text-secondary)', fontFamily: 'monospace',
+          }}>
+            {networkMode ?? '—'}
+          </div>
+        </div>
+      </div>
+
+      {/* Stop mode toggle */}
+      <div className="flex-shrink-0 rounded-xl px-2.5 py-2"
+        style={{ background: 'rgba(0,0,0,0.12)', border: '1px solid var(--stroke-subtle)' }}>
+        <div className="flex items-center justify-between gap-2 mb-1.5">
+          <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+            Stop mode
+          </span>
+          <span className="pill truncate" style={{
+            padding: '1px 6px', fontSize: 8, fontWeight: 700, maxWidth: '55%',
+            background: stopMode === 'edge_aware' ? 'rgba(6,182,212,0.18)' : 'var(--secondary)',
+            color: stopMode === 'edge_aware' ? accents.cyan : 'var(--text-muted)',
+          }}>
+            {STOP_MODE_LABELS[stopMode]}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span style={{
+            fontSize: 9, fontWeight: stopMode === 'cache_aware_offloading' ? 700 : 500,
+            color: stopMode === 'cache_aware_offloading' ? 'var(--text-primary)' : 'var(--text-muted)',
+            lineHeight: 1.2, flex: 1,
+          }}>
+            Cache aware offloading
+          </span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={stopMode === 'edge_aware'}
+            aria-label="Toggle edge aware stop mode"
+            disabled={sessionActive || modeSwitching}
+            onClick={() => {
+              void applyStopMode(stopMode === 'edge_aware' ? 'cache_aware_offloading' : 'edge_aware');
+            }}
+            style={{
+              position: 'relative', flexShrink: 0,
+              width: 44, height: 24, borderRadius: 999,
+              border: '1px solid var(--stroke-subtle)',
+              background: stopMode === 'edge_aware' ? accents.cyan : 'var(--bg-surface)',
+              cursor: sessionActive || modeSwitching ? 'not-allowed' : 'pointer',
+              opacity: sessionActive || modeSwitching ? 0.5 : 1,
+              transition: 'background 0.15s ease',
+            }}
+          >
+            <span style={{
+              position: 'absolute', top: 2,
+              left: stopMode === 'edge_aware' ? 22 : 2,
+              width: 18, height: 18, borderRadius: '50%',
+              background: '#fff',
+              boxShadow: '0 1px 4px rgba(0,0,0,0.35)',
+              transition: 'left 0.15s ease',
+            }} />
+          </button>
+          <span style={{
+            fontSize: 9, fontWeight: stopMode === 'edge_aware' ? 700 : 500,
+            color: stopMode === 'edge_aware' ? accents.cyan : 'var(--text-muted)',
+            lineHeight: 1.2, flex: 1, textAlign: 'right',
+          }}>
+            Edge aware stop
+          </span>
+        </div>
+        {stopMode === 'edge_aware' && (
+          <p style={{ margin: '6px 0 0', fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.35 }}>
+            {'VIT "bottle" detection sends auto_soft_stop (no e-stop latch). Requires VIT and video running.'}
+          </p>
+        )}
+        {stopMode === 'cache_aware_offloading' && (
+          <p style={{ margin: '6px 0 0', fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.35 }}>
+            {modeSwitching
+              ? 'Starting cache_aware_offloading.py on the Pi…'
+              : cacheScriptReady
+                ? 'Pi script running (vit_env → cache_aware_offloading.py).'
+                : 'Waiting for cache_aware_offloading.py on the Pi — START is disabled.'}
+          </p>
+        )}
+      </div>
+
+      {/* Live timer + start/stop */}
+      <div className="flex-shrink-0 flex items-center gap-2 rounded-xl px-3 py-2"
+        style={{ background: 'rgba(0,0,0,0.18)', border: '1px solid var(--stroke-subtle)' }}>
+        <div className="flex flex-col min-w-0">
+          <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+            {running ? 'Stop elapsed (Pi)' : waitingForMovement ? 'Since command (Pi)' : 'Elapsed (Pi)'}
+          </span>
+          <span style={{
+            fontSize: 24, fontWeight: 800, fontFamily: 'monospace',
+            color: running ? accents.green : waitingForMovement ? accents.yellow : 'var(--text-primary)',
+            lineHeight: 1.1,
+          }}>
+            {fmtSeconds(elapsedMs)}<span style={{ fontSize: 12, marginLeft: 2 }}>s</span>
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={() => { void startTest(); }}
+          disabled={startBlocked}
+          className="ml-auto flex items-center justify-center gap-1.5 rounded-xl transition-all"
+          style={{
+            minWidth: 92, padding: '10px 14px',
+            fontWeight: 800, fontSize: 12, letterSpacing: '0.06em', color: '#fff',
+            cursor: startBlocked ? 'not-allowed' : 'pointer',
+            opacity: startBlocked ? 0.5 : 1,
+            background: 'linear-gradient(135deg, var(--state-success), #14532d)',
+            border: '1px solid rgba(255,255,255,0.2)',
+            boxShadow: '0 8px 24px rgba(34,197,94,0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
+          }}
+          title={
+            sessionActive
+              ? 'Test in progress — ends when the robot stops'
+              : modeSwitching
+                ? 'Stop mode switching — waiting for Pi script'
+                : cacheStartBlocked
+                  ? 'Cache-aware script must be running on the Pi before START'
+                  : estopActive
+                    ? 'E-stop active — clear it first'
+                    : 'Start a run (sends explore command)'
+          }
+        >
+          <Play size={13} fill="#fff" />
+          START
+        </button>
+      </div>
+
+      {/* Recorded runs */}
+      <div className="flex-1 min-h-0 overflow-y-auto rounded-xl"
+        style={{ background: 'rgba(0,0,0,0.18)', border: '1px solid var(--stroke-subtle)' }}>
+        {/* Column header */}
+        <div className="sticky top-0 grid items-center gap-1 px-2 py-1 uppercase tracking-wider"
+          style={{
+            gridTemplateColumns: '24px 56px 1fr 1fr', fontSize: 8, color: 'var(--text-muted)',
+            background: 'var(--bg-elevated)', borderBottom: '1px solid var(--stroke-subtle)',
+          }}>
+          <span>#</span>
+          <span>Stop (s)</span>
+          <span>Dist (m)</span>
+          <span>Network</span>
+        </div>
+
+        {runs.length === 0 ? (
+          <div className="flex items-center justify-center text-center px-3 py-6"
+            style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            Press START to begin a run. Stop time is measured from when the Pi reports movement.
+          </div>
+        ) : (
+          runs.map((r) => (
+            <div key={r.id} className="grid items-center gap-1 px-2 py-1 border-b"
+              style={{ gridTemplateColumns: '24px 56px 1fr 1fr', borderColor: 'var(--stroke-subtle)' }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', fontFamily: 'monospace' }}>
+                {r.run}
+              </span>
+              <span style={{ fontSize: 12, fontWeight: 800, color: accents.cyan, fontFamily: 'monospace' }}>
+                {fmtSeconds(r.durationMs)}
+              </span>
+              <input
+                type="number"
+                inputMode="decimal"
+                step="0.01"
+                placeholder="—"
+                value={r.stoppingDistance}
+                onChange={(e) => updateRun(r.id, { stoppingDistance: e.target.value })}
+                style={{ ...inputStyle, padding: '2px 5px', fontFamily: 'monospace' }}
+              />
+              <select
+                value={r.networkType}
+                onChange={(e) => updateRun(r.id, { networkType: e.target.value })}
+                style={{ ...inputStyle, padding: '2px 5px' }}
+              >
+                {NETWORK_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
+                {!NETWORK_OPTIONS.includes(r.networkType as typeof NETWORK_OPTIONS[number]) && (
+                  <option value={r.networkType}>{r.networkType}</option>
+                )}
+              </select>
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Footer controls */}
+      <div className="flex-shrink-0 flex items-center gap-2">
+        <span style={{ fontSize: 9, color: 'var(--text-muted)' }}>
+          {runs.length} run{runs.length === 1 ? '' : 's'}
+        </span>
+        <button
+          onClick={exportCsv}
+          disabled={runs.length === 0}
+          className="ml-auto flex items-center gap-1"
+          title={runs.length === 0 ? 'No runs to export yet' : 'Export all runs as CSV'}
+          style={{
+            padding: '3px 8px', borderRadius: 6, fontSize: 9, fontWeight: 700, letterSpacing: '0.06em',
+            border: '1px solid var(--accent-purple)',
+            background: 'rgba(139,92,246,0.16)', color: 'var(--accent-purple)',
+            cursor: runs.length === 0 ? 'not-allowed' : 'pointer',
+            opacity: runs.length === 0 ? 0.5 : 1,
+          }}
+        >
+          <Download size={11} />
+          EXPORT CSV
+        </button>
+        <button
+          onClick={clearRuns}
+          disabled={runs.length === 0 && !sessionActive}
+          title="Clear all recorded runs"
+          style={{
+            padding: '3px 8px', borderRadius: 6, fontSize: 9, fontWeight: 700, letterSpacing: '0.06em',
+            border: '1px solid var(--stroke-strong)',
+            background: 'var(--bg-surface)', color: 'var(--text-secondary)',
+            cursor: runs.length === 0 && !sessionActive ? 'not-allowed' : 'pointer',
+            opacity: runs.length === 0 && !sessionActive ? 0.5 : 1,
+          }}
+        >
+          <Trash2 size={11} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export const stopTestBenchDef: WidgetDefinition = {
+  id: 'stop_test_bench_widget', name: 'Stop-Time Test Bench', group: 'control',
+  sizeClass: 'L', defaultSize: { w: 3, h: 4, minW: 2, minH: 3 },
+  icon: 'FlaskConical', pinned: false, component: StopTestBenchWidget,
+};
+
 // Widget registry — consumed by the picker and addWidget.
 export const WIDGET_REGISTRY: WidgetDefinition[] = [
   videoFeedDef,
@@ -1587,8 +2372,8 @@ export const WIDGET_REGISTRY: WidgetDefinition[] = [
   movementJoystickDef,
   cameraJoystickDef,
   stopButtonDef,
-  autoMovementButtonDef,
   rosAutoButtonDef,
+  stopTestBenchDef,
   eventLogDef,
 ];
 

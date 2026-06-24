@@ -1,9 +1,14 @@
-// Custom hooks — backend polling, keyboard input, and client auto-pilot.
+// Custom hooks — backend polling and keyboard input.
 
 import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_BROKER_HOST, useMetricsStore, usePickerStore, useSettingsStore } from './store';
 import { sendCommand, sendCameraCommand, setEstopState, vecToCameraCommand, type BotCommand } from '../lib/Controls';
 import { connectBroker } from '../lib/Connections';
+import {
+  isEdgeAwareStopEnabled,
+  processVitStatusForStopLabelEstop,
+  setEdgeAwareStopEnabled,
+} from '../lib/edgeAwareStopLabelEstop';
 import type { LiveGridData } from './types';
 
 /** Start/stop webrtc_server.py on the Pi (video + VIT embeddings). */
@@ -126,16 +131,6 @@ export function usePiVitVideoServer() {
 // connection state into the shared stores. Because all devices talk to the
 // same Flask process, every browser stays in sync automatically: when one
 // device clicks Connect the rest will reflect it within ~3 seconds.
-const FRONT_CLEAR_DISTANCE = 0.90;
-const FRONT_BLOCK_DISTANCE = 0.65;
-const SIDE_CLEAR_DISTANCE = 0.65;
-const REVERSE_DURATION_MS = 700;
-const TURN_DURATION_MS = 1600;
-const CHECK_CLEAR_DURATION_MS = 400;
-const RECOVERY_TURN_DURATION_MS = 2200;
-const AUTO_DECISION_INTERVAL_MS = 200;
-const COMMAND_COOLDOWN_MS = 150;
-
 type SafetyPayload = {
   raw?: string;
   status?: string;
@@ -153,12 +148,8 @@ function hasToken(data: SafetyPayload, token: string) {
 }
 
 function isHardEstopStatus(data: SafetyPayload) {
-  if (hasToken(data, 'auto_blocked') || hasToken(data, 'estop_grace')) return false;
+  if (hasToken(data, 'estop_grace')) return false;
   return hasToken(data, 'estop=true') || hasToken(data, 'manual_estop_triggered');
-}
-
-function isAutoBlockedStatus(data: SafetyPayload) {
-  return hasToken(data, 'auto_blocked');
 }
 
 function isGraceStatus(data: SafetyPayload) {
@@ -252,11 +243,10 @@ function normalizeGridStatus(data: Record<string, unknown>): LiveGridData {
   };
 }
 
-function stopClientAuto() {
+function stopAutoMode() {
   useMetricsStore.setState({
     mode: 'manual',
     autoMode: false,
-    exploreActive: false,
     autoRunning: false,
     movementVec: null,
   });
@@ -316,18 +306,23 @@ export function useConnectionSync() {
           sendCommand('auto_off');
         }
 
+        const ignoreLatchUntil = useMetricsStore.getState().estopIgnoreLatchUntil;
+        let estopActive = status.estop_active ?? false;
+        if (estopActive && Date.now() < ignoreLatchUntil) {
+          estopActive = false;
+        }
+
         useMetricsStore.setState({
           connectionStatus: status.connected ? 'CONNECTED' : 'DISCONNECTED',
           mqttLinkStatus:   status.connected ? 'CONNECTED' : 'DISCONNECTED',
-          estopActive:      status.estop_active ?? false,
+          estopActive,
           streamRunning:    status.stream_running ?? false,
-          ...((status.estop_active ?? false)
+          ...(estopActive
             ? {
                 currentCommand: 'STOP' as const,
                 missionStatus: 'E-STOP' as const,
                 mode: 'manual' as const,
                 autoMode: false,
-                exploreActive: false,
                 autoRunning: false,
                 movementVec: null,
               }
@@ -376,37 +371,22 @@ export function useSafetyStatusPoll() {
         const raw = data.raw ?? '';
         const statusText = raw || data.status || 'unknown';
         const hardEstop = isHardEstopStatus(data);
-        const autoBlocked = isAutoBlockedStatus(data);
         const grace = isGraceStatus(data);
 
         useMetricsStore.setState({
           safetyStatus: statusText,
           safetyGraceStatus: grace ? statusText : null,
-          ...(autoBlocked ? { autoDecisionRequestedAt: Date.now() } : {}),
         });
 
         if (hardEstop) {
           if (useMetricsStore.getState().autoRunning) {
             sendCommand('auto_off');
           }
-          stopClientAuto();
-
-          useMetricsStore.setState({
-            estopActive: true,
-            currentCommand: 'STOP',
-            missionStatus: 'E-STOP',
-            mode: 'manual',
-            autoMode: false,
-            exploreActive: false,
-            autoRunning: false,
-            movementVec: null,
-          });
+          stopAutoMode();
 
           if (!lastEstopRef.current || raw !== lastRawRef.current) {
             useMetricsStore.getState().pushEvent('warning', `LiDAR E-stop triggered — ${raw}`);
           }
-        } else if (autoBlocked && raw !== lastRawRef.current) {
-          useMetricsStore.getState().pushEvent('warning', 'Auto blocked - client choosing turn');
         }
 
         lastEstopRef.current = hardEstop;
@@ -464,8 +444,15 @@ export function useDriveStatusPoll() {
           return;
         }
         if (!res.ok) return;
-        const data = await res.json() as { raw?: string; status?: string; state?: string };
-        useMetricsStore.setState({ driveStatus: data.raw || data.status || data.state || 'unknown' });
+        const data = await res.json() as {
+          raw?: string;
+          status?: string;
+          state?: string;
+          robotTimestamp?: number | null;
+        };
+        useMetricsStore.setState({
+          driveStatus: data.status || data.state || data.raw || 'unknown',
+        });
       } catch {
         useMetricsStore.setState({ driveStatus: 'unknown' });
       }
@@ -473,232 +460,6 @@ export function useDriveStatusPoll() {
 
     poll();
     const id = setInterval(poll, 1000);
-    return () => clearInterval(id);
-  }, []);
-}
-
-export function useClientAutoPilot() {
-  type AutoPilotState = 'IDLE' | 'FORWARD' | 'BLOCKED' | 'REVERSING' | 'TURNING' | 'CHECK_CLEAR' | 'RECOVERY';
-  type TurnDirection = 'left' | 'right';
-  type RecoveryPhase = 'reverse' | 'turn';
-
-  const autoStateRef = useRef<AutoPilotState>('IDLE');
-  const stateStartedAtRef = useRef(Date.now());
-  const blockedStartedAtRef = useRef<number | null>(null);
-  const turnAttemptsRef = useRef(0);
-  const lastTurnDirectionRef = useRef<TurnDirection>('left');
-  const recoveryPhaseRef = useRef<RecoveryPhase | null>(null);
-  const lastAutoCommandRef = useRef<BotCommand | null>(null);
-  const lastAutoCommandTimeRef = useRef(0);
-
-  useEffect(() => {
-    const logAuto = (message: string) => {
-      useMetricsStore.getState().pushEvent('info', message);
-    };
-
-    const setAutoState = (nextState: AutoPilotState) => {
-      if (autoStateRef.current === nextState) return;
-      autoStateRef.current = nextState;
-      stateStartedAtRef.current = Date.now();
-    };
-
-    const chooseTurnDirection = (): TurnDirection => {
-      const state = useMetricsStore.getState();
-      return (state.leftDistance ?? 0) > (state.rightDistance ?? 0) ? 'left' : 'right';
-    };
-
-    function sendAutoCommand(command: BotCommand) {
-      const now = Date.now();
-
-      if (
-        lastAutoCommandRef.current === command &&
-        now - lastAutoCommandTimeRef.current < 1000
-      ) {
-        return;
-      }
-
-      if (now - lastAutoCommandTimeRef.current < COMMAND_COOLDOWN_MS) {
-        return;
-      }
-
-      lastAutoCommandRef.current = command;
-      lastAutoCommandTimeRef.current = now;
-      sendCommand(command, 'auto');
-    }
-
-    const enterIdle = (resetCommandMemory = true) => {
-      setAutoState('IDLE');
-      blockedStartedAtRef.current = null;
-      turnAttemptsRef.current = 0;
-      recoveryPhaseRef.current = null;
-      if (resetCommandMemory) {
-        lastAutoCommandRef.current = null;
-        lastAutoCommandTimeRef.current = 0;
-      }
-    };
-
-    const enterForward = () => {
-      setAutoState('FORWARD');
-      blockedStartedAtRef.current = null;
-      turnAttemptsRef.current = 0;
-      recoveryPhaseRef.current = null;
-      logAuto('AUTO: front clear, moving forward');
-      sendAutoCommand('fwd');
-    };
-
-    const enterBlocked = () => {
-      const now = Date.now();
-      if (blockedStartedAtRef.current == null) blockedStartedAtRef.current = now;
-      turnAttemptsRef.current = 0;
-      setAutoState('BLOCKED');
-      recoveryPhaseRef.current = null;
-      logAuto('AUTO: obstacle detected, stopping');
-      sendAutoCommand('stop');
-    };
-
-    const enterTurning = (repeatLastDirection = false) => {
-      const direction = repeatLastDirection ? lastTurnDirectionRef.current : chooseTurnDirection();
-      lastTurnDirectionRef.current = direction;
-      turnAttemptsRef.current += 1;
-      setAutoState('TURNING');
-      recoveryPhaseRef.current = null;
-      logAuto(`AUTO: turning ${direction}`);
-      sendAutoCommand(direction);
-    };
-
-    const enterReversing = () => {
-      setAutoState('REVERSING');
-      recoveryPhaseRef.current = null;
-      logAuto('AUTO: reversing before turn');
-      sendAutoCommand('bck');
-    };
-
-    const enterCheckClear = () => {
-      setAutoState('CHECK_CLEAR');
-      recoveryPhaseRef.current = null;
-      sendAutoCommand('stop');
-    };
-
-    const enterRecovery = () => {
-      setAutoState('RECOVERY');
-      recoveryPhaseRef.current = 'reverse';
-      lastTurnDirectionRef.current = chooseTurnDirection();
-      blockedStartedAtRef.current = Date.now();
-      turnAttemptsRef.current = 0;
-      logAuto('AUTO: recovery mode');
-      sendAutoCommand('bck');
-    };
-
-    const decide = () => {
-      const state = useMetricsStore.getState();
-      const autoActive = state.exploreActive && !state.estopActive;
-
-      if (!autoActive) {
-        enterIdle();
-        return;
-      }
-
-      if (!state.latestGrid?.grid) {
-        sendAutoCommand('stop');
-        enterIdle(false);
-        return;
-      }
-
-      const now = Date.now();
-      const elapsed = now - stateStartedAtRef.current;
-      const front = state.frontDistance ?? 0;
-      const left = state.leftDistance ?? 0;
-      const right = state.rightDistance ?? 0;
-      const blockedFor = blockedStartedAtRef.current == null ? 0 : now - blockedStartedAtRef.current;
-
-      if (
-        autoStateRef.current !== 'RECOVERY' &&
-        blockedStartedAtRef.current != null &&
-        blockedFor > 5000
-      ) {
-        enterRecovery();
-        return;
-      }
-
-      if (autoStateRef.current === 'FORWARD' && front <= FRONT_BLOCK_DISTANCE) {
-        enterBlocked();
-        return;
-      }
-
-      if (autoStateRef.current === 'IDLE') {
-        if (front > FRONT_CLEAR_DISTANCE) {
-          enterForward();
-        } else if (front <= FRONT_BLOCK_DISTANCE) {
-          enterBlocked();
-        } else {
-          sendAutoCommand('stop');
-          enterCheckClear();
-        }
-        return;
-      }
-
-      if (autoStateRef.current === 'FORWARD') {
-        if (lastAutoCommandRef.current !== 'fwd') sendAutoCommand('fwd');
-        return;
-      }
-
-      if (autoStateRef.current === 'BLOCKED') {
-        if (left < SIDE_CLEAR_DISTANCE && right < SIDE_CLEAR_DISTANCE) {
-          enterReversing();
-        } else {
-          enterTurning();
-        }
-        return;
-      }
-
-      if (autoStateRef.current === 'REVERSING') {
-        if (elapsed < REVERSE_DURATION_MS) return;
-        sendAutoCommand('stop');
-        lastAutoCommandTimeRef.current = 0;
-        enterTurning();
-        return;
-      }
-
-      if (autoStateRef.current === 'TURNING') {
-        if (elapsed < TURN_DURATION_MS) return;
-        enterCheckClear();
-        return;
-      }
-
-      if (autoStateRef.current === 'CHECK_CLEAR') {
-        if (elapsed < CHECK_CLEAR_DURATION_MS) return;
-        if (front > FRONT_CLEAR_DISTANCE) {
-          enterForward();
-        } else if (turnAttemptsRef.current < 2) {
-          logAuto('AUTO: still blocked, turning again');
-          enterTurning(true);
-        } else {
-          enterRecovery();
-        }
-        return;
-      }
-
-      if (autoStateRef.current === 'RECOVERY') {
-        if (recoveryPhaseRef.current === 'reverse') {
-          if (elapsed < REVERSE_DURATION_MS) return;
-          sendAutoCommand('stop');
-          recoveryPhaseRef.current = 'turn';
-          stateStartedAtRef.current = now;
-          lastAutoCommandTimeRef.current = 0;
-          logAuto(`AUTO: turning ${lastTurnDirectionRef.current}`);
-          sendAutoCommand(lastTurnDirectionRef.current);
-          return;
-        }
-
-        if (recoveryPhaseRef.current === 'turn') {
-          if (elapsed < RECOVERY_TURN_DURATION_MS) return;
-          enterCheckClear();
-        }
-      }
-    };
-
-    const id = setInterval(decide, AUTO_DECISION_INTERVAL_MS);
-    decide();
     return () => clearInterval(id);
   }, []);
 }
@@ -776,8 +537,10 @@ export function useKeyboardMovement() {
 }
 
 export function useKeyboardCamera(onChange?: (v: { pan: number; tilt: number }) => void) {
-  const keysRef    = useRef<Set<string>>(new Set());
-  const lastCmdRef = useRef<ReturnType<typeof vecToCameraCommand>>(null);
+  const keysRef      = useRef<Set<string>>(new Set());
+  const lastCmdRef   = useRef<ReturnType<typeof vecToCameraCommand>>(null);
+  const onChangeRef  = useRef(onChange);
+  onChangeRef.current = onChange;
 
   useEffect(() => {
     const compute = () => {
@@ -788,7 +551,8 @@ export function useKeyboardCamera(onChange?: (v: { pan: number; tilt: number }) 
       if (k.has('ArrowDown'))  tilt -= 1;
       if (k.has('ArrowLeft'))  pan  -= 1;
       if (k.has('ArrowRight')) pan  += 1;
-      onChange?.({ pan, tilt });
+      useMetricsStore.setState({ cameraKeyboardVec: { x: pan, y: tilt } });
+      onChangeRef.current?.({ pan, tilt });
 
       const cmd = vecToCameraCommand(pan, tilt);
       if (cmd !== null && cmd !== lastCmdRef.current) {
@@ -818,7 +582,37 @@ export function useKeyboardCamera(onChange?: (v: { pan: number; tilt: number }) 
       window.removeEventListener('keydown', onDown);
       window.removeEventListener('keyup', onUp);
     };
-  }, [onChange]);
+  }, []);
+}
+
+/** Keep edge-aware flag in sync with backend; evaluate VIT decoder labels on each poll. */
+export function useEdgeAwareStopLabelEstop() {
+  useEffect(() => {
+    let alive = true;
+
+    const poll = async () => {
+      try {
+        const modeRes = await fetch('/api/test_bench/stop_mode', { cache: 'no-store' });
+        if (modeRes.ok) {
+          const modeData = await modeRes.json() as { mode?: string; edge_aware_enabled?: boolean };
+          const enabled = modeData.edge_aware_enabled === true || modeData.mode === 'edge_aware';
+          setEdgeAwareStopEnabled(enabled);
+        }
+        if (!isEdgeAwareStopEnabled()) return;
+
+        const vitRes = await fetch('/api/vit/status', { cache: 'no-store' });
+        if (!vitRes.ok || !alive) return;
+        const vit = await vitRes.json();
+        processVitStatusForStopLabelEstop(vit);
+      } catch {
+        /* backend unreachable */
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 500);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
 }
 
 export function useGlobalShortcuts() {
@@ -827,8 +621,7 @@ export function useGlobalShortcuts() {
       if (isInputFocused()) return;
       if (e.key === 'x' || e.key === 'X') {
         e.preventDefault();
-        sendCommand('estop_on', 'estop');
-        setEstopState(true);
+        void setEstopState(true);
       } else if (e.key === 'c' || e.key === 'C') {
         e.preventDefault();
         sendCameraCommand('crst');

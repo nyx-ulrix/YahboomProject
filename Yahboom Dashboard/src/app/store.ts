@@ -90,6 +90,23 @@ const LIDAR_VIEW_IPAD: LayoutItem[] = [
   { i: 'event_log_widget',            x: 0,  y: 3, w: 8, h: 3 },
 ];
 
+const STOP_DISTANCCE_TEST_LAPTOP: LayoutItem[] = [
+  { i: 'vit_decoder_widget',          x: 0,  y: 0, w: 4, h: 5 },
+  { i: 'video_feed_widget',           x: 4,  y: 0, w: 5, h: 5 },
+  { i: 'stop_test_bench_widget',      x: 10,  y: 0, w: 3, h: 4 },
+  { i: 'stop_button_widget',          x: 9,  y: 4, w: 3, h: 1 },
+  { i: 'event_log_widget',            x: 0,  y: 5, w: 12, h: 4 }
+];
+
+/** VIT View (iPad / narrow) — same structure, stacked for a narrower viewport. */
+const STOP_DISTANCCE_TEST_IPAD: LayoutItem[] = [
+  { i: 'vit_decoder_widget',          x: 0,  y: 0, w: 4, h: 5 },
+  { i: 'video_feed_widget',           x: 4,  y: 0, w: 5, h: 5 },
+  { i: 'stop_test_bench_widget',      x: 10,  y: 0, w: 3, h: 4 },
+  { i: 'stop_button_widget',          x: 9,  y: 4, w: 3, h: 1 },
+  { i: 'event_log_widget',            x: 0,  y: 5, w: 12, h: 4 }
+];
+
 /** A named layout preset with both breakpoint variants. */
 export interface LayoutTemplate {
   id: string;
@@ -102,6 +119,7 @@ export interface LayoutTemplate {
 export const LAYOUT_TEMPLATES: LayoutTemplate[] = [
   { id: 'vit_view',   name: 'VIT View',   laptop: VIT_VIEW_LAPTOP,   ipad: VIT_VIEW_IPAD },
   { id: 'lidar_view', name: 'LiDAR View', laptop: LIDAR_VIEW_LAPTOP, ipad: LIDAR_VIEW_IPAD },
+  { id: 'stop_test', name: 'Stop Test', laptop: STOP_DISTANCCE_TEST_LAPTOP, ipad: STOP_DISTANCCE_TEST_IPAD },
 ];
 
 /** Template applied to fresh dashboards — always one of the stored views. */
@@ -306,9 +324,9 @@ export const useMetricsStore = create<MetricsStore>((set) => ({
   latencyHistory: [],
   cpuHistory: [],
   estopActive: false,
+  estopIgnoreLatchUntil: 0,
   mode: 'manual',
   autoMode: false,
-  exploreActive: false,
   autoRunning: false,
   latestGrid: null,
   frontDistance: null,
@@ -317,8 +335,8 @@ export const useMetricsStore = create<MetricsStore>((set) => ({
   safetyStatus: 'unknown',
   safetyGraceStatus: null,
   driveStatus: 'unknown',
-  autoDecisionRequestedAt: null,
   movementVec: { x: 0, y: 0 },
+  cameraKeyboardVec: { x: 0, y: 0 },
   streamRunning: false,
 
   // --- Updaters ---

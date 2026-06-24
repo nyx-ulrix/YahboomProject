@@ -89,7 +89,7 @@ _ALLOWED_EMBED_SIZES = (512, 1024, 2048)
 _EMBED_SIZE_TO_COMMAND: dict[int, str] = {512: "embds1", 1024: "embds2", 2048: "embds3"}
 _EMBED_COMMANDS = frozenset(_EMBED_SIZE_TO_COMMAND.values())
 _EMBED_COMMAND_INTERVAL_SEC = float(os.getenv("VIT_EMBED_COMMAND_INTERVAL_SEC", "3"))
-_DEFAULT_MAX_FILE_KB = int(os.getenv("VIT_MAX_FILE_KB", "1024"))
+_DEFAULT_MAX_FILE_KB = int(os.getenv("VIT_MAX_FILE_KB", "2048"))
 # Treat encoder as live if MQTT embeddings/decodes arrived within this window (ms).
 _ENCODER_LIVE_MS = int(os.getenv("VIT_ENCODER_LIVE_MS", "8000"))
 
@@ -700,6 +700,12 @@ class VITService:
             })
             if _SESSION_MAX > 0 and len(self._session) > _SESSION_MAX:
                 self._session = self._session[-_SESSION_MAX:]
+
+        try:
+            from app.services.vit.edge_aware_estop import edge_aware_estop
+            edge_aware_estop.on_vit_results(results)
+        except Exception as exc:
+            log.debug("Edge-aware estop hook failed: %s", exc)
 
     def _encoder_live_locked(self) -> bool:
         """True when recent MQTT proves the encoder pipeline is producing data."""

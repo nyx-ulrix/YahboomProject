@@ -11,14 +11,18 @@ export async function setEstopState(active: boolean): Promise<void> {
   // Optimistic local update — UI responds immediately.
   useMetricsStore.setState({
     estopActive:    active,
+    estopIgnoreLatchUntil: active ? 0 : Date.now() + 3000,
     currentCommand: active ? 'STOP' : 'IDLE',
     missionStatus:  active ? 'E-STOP' : 'IDLE',
     mode:           'manual',
     autoMode:       active ? false : useMetricsStore.getState().autoMode,
     autoRunning:    active ? false : useMetricsStore.getState().autoRunning,
-    exploreActive:  active ? false : useMetricsStore.getState().exploreActive,
     movementVec:    active ? null : useMetricsStore.getState().movementVec,
   });
+  if (active) {
+    useMetricsStore.getState().pushEvent('warning', 'Emergency stop engaged');
+  }
+
   try {
     await fetch('/api/estop', {
       method: 'POST',
@@ -35,7 +39,7 @@ export type MovementCommand =
   | 'fwdleft' | 'fwdright' | 'bckleft' | 'bckright'
   | 'stop';
 
-export type AutoMoveCommand = 'auto_on' | 'auto_off';
+export type AutoMoveCommand = 'auto_on' | 'auto_off' | 'auto_soft_stop';
 
 export type EStopCommand = 'estop_on' | 'estop_off';
 
@@ -63,7 +67,7 @@ export type CameraCommand =
  *  'estop'   — the emergency-stop button or X-key shortcut (always honoured).
  */
 export type StopSource = 'release' | 'manual' | 'estop';
-export type CommandSource = StopSource | 'auto';
+export type CommandSource = StopSource;
 
 function commandState(command: BotCommand, source?: CommandSource) {
   if (command === 'auto_on') {
@@ -97,6 +101,13 @@ function commandState(command: BotCommand, source?: CommandSource) {
       movementVec: null,
     };
   }
+  if (command === 'auto_soft_stop') {
+    return {
+      currentCommand: 'STOP' as const,
+      missionStatus: 'STOPPED' as const,
+      movementVec: null,
+    };
+  }
   if (command === 'estop_on') {
     return {
       currentCommand: 'STOP' as const,
@@ -116,16 +127,6 @@ function commandState(command: BotCommand, source?: CommandSource) {
     };
   }
 
-  if (source === 'auto') {
-    return {
-      currentCommand: (command === 'stop' ? 'STOP' : command.toUpperCase()) as never,
-      missionStatus: 'AUTO MODE' as const,
-      mode: 'auto' as const,
-      autoMode: true,
-      movementVec: cmdToMovementVec(command === 'stop' ? null : command),
-    };
-  }
-
   return {
     currentCommand: (command === 'stop' ? 'STOP' : command.toUpperCase()) as never,
     missionStatus: command === 'stop' ? 'IDLE' as const : 'MANUAL CONTROL' as const,
@@ -137,12 +138,12 @@ function commandState(command: BotCommand, source?: CommandSource) {
 export function sendCommand(command: BotCommand, source?: CommandSource): void {
   const state = useMetricsStore.getState();
 
-  if (state.autoMode && isMovementCommand(command) && source !== 'auto') {
+  if (state.autoMode && isMovementCommand(command)) {
     return;
   }
 
   // Gate: stop may only be sent from an explicit release or an emergency stop.
-  if (command === 'stop' && source !== 'release' && source !== 'manual' && source !== 'estop' && source !== 'auto') return;
+  if (command === 'stop' && source !== 'release' && source !== 'manual' && source !== 'estop') return;
   if (command === 'stop' && source === 'release' && state.autoMode) return;
 
   // E-stop latch: block movement / auto_on while latched. Off/safety commands
@@ -150,6 +151,7 @@ export function sendCommand(command: BotCommand, source?: CommandSource): void {
   if (
     command !== 'stop'
     && command !== 'auto_off'
+    && command !== 'auto_soft_stop'
     && command !== 'estop_on'
     && command !== 'estop_off'
     && state.estopActive
@@ -275,31 +277,13 @@ export function vecToCommand(linear_x: number, angular_z: number): BotCommand {
   return 'stop';
 }
 
-/** Toggle client-side explore autopilot (no auto_on/auto_off MQTT). */
-export function toggleClientExplore(): void {
-  const state = useMetricsStore.getState();
-  if (state.exploreActive) {
-    useMetricsStore.setState({
-      exploreActive: false,
-      autoMode: false,
-      mode: 'manual',
-    });
-    sendCommand('stop', 'manual');
-    return;
-  }
-  if (state.estopActive) return;
-  useMetricsStore.setState({
-    exploreActive: true,
-    autoMode: true,
-    mode: 'auto',
-  });
-}
-
 /** Toggle robot ROS auto — sends auto_on or auto_off only. */
 export function toggleRosAuto(): void {
   const state = useMetricsStore.getState();
   if (state.autoRunning) {
     sendCommand('auto_off');
+    // Explicitly halt motion when exploration is turned off.
+    sendCommand('stop', 'manual');
     return;
   }
   if (state.estopActive) return;

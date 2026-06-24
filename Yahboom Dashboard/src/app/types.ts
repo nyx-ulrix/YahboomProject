@@ -88,11 +88,11 @@ export interface MetricsState {
   cpuHistory: number[];
   /** When true, sendCommand blocks all non-stop commands until explicitly cleared. */
   estopActive: boolean;
+  /** Ignore backend e-stop re-latch until this timestamp (ms) after manual resume. */
+  estopIgnoreLatchUntil: number;
   mode: ClientMode;
-  /** When true, release events do not publish stop because autonomous mode owns stopping. */
+  /** When true, release events do not publish stop because ROS auto mode owns stopping. */
   autoMode: boolean;
-  /** Client-side explore autopilot (dashboard backend movement logic). */
-  exploreActive: boolean;
   /** Robot ROS auto mode — set from auto_on/auto_off MQTT commands only. */
   autoRunning: boolean;
   latestGrid: LiveGridData | null;
@@ -102,13 +102,14 @@ export interface MetricsState {
   safetyStatus: string;
   safetyGraceStatus: string | null;
   driveStatus: string;
-  autoDecisionRequestedAt: number | null;
   /**
    * Normalised joystick vector for the last active movement command.
    * { x: 0, y: 0 } when stopped/idle, null when a safety stop clears the stick.
    * Written by sendCommand, useKeyboardMovement, and useConnectionSync.
    */
   movementVec: { x: number; y: number } | null;
+  /** Normalised arrow-key camera vector for joystick thumb mirroring. */
+  cameraKeyboardVec: { x: number; y: number };
   /** True while video_server.py is known to be running on the Pi. Synced from /api/status. */
   streamRunning: boolean;
 }
