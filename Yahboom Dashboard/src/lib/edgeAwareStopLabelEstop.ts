@@ -100,7 +100,7 @@ function triggerStopLabelStop(key: string): boolean {
 
   lastHandledKey = key;
   lastTriggerAt = now;
-  sendCommand('stop', 'manual');
+  sendCommand('stop', 'stop_label');
   useMetricsStore.getState().pushEvent('warning', `Edge-aware stop — ${EDGE_AWARE_STOP_LABEL} detected, stop sent`);
   return true;
 }

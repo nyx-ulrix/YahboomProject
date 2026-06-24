@@ -12,6 +12,7 @@ import type { WidgetDefinition, MetricsState } from '../types';
 import { sendCommand, sendCameraCommand, setEstopState, toggleRosAuto, vecToCommand, vecToCameraCommand } from '../../lib/Controls';
 import { setEdgeAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/edgeAwareStopLabelEstop';
 import { clearTestBenchCache, loadTestBenchCache, saveTestBenchCache } from '../../lib/testBenchStorage';
+import { setTestBenchManualStopHook, takeTestBenchStopIsStopLabel, takeTestBenchStopReason } from '../../lib/testBenchSession';
 import { VideoFeedCore } from '../../lib/VideoFeed';
 import { Slider } from './ui/slider';
 
@@ -1576,6 +1577,14 @@ const DRIVE_PRE_MOVE_STATUSES = new Set([
 ]);
 const ROBOT_TIME_POLL_MS = 100;
 const MOVEMENT_WAIT_MS = 30000;
+/** After a manual stop is sent, wait for Pi drive-status `stopped` before recording time. */
+const STOP_COMMAND_WAIT_MS = 8000;
+
+function isPiStopCommandStatus(status: string | undefined, acceptAutoDisabled = false): boolean {
+  if (status === 'stopped') return true;
+  if (acceptAutoDisabled && status === 'auto_disabled') return true;
+  return false;
+}
 
 /** Pi drive-status values that mean the wheels are (or were just) in motion. */
 function isMovementDriveStatus(status: string | undefined): boolean {
@@ -1587,11 +1596,18 @@ function isMovementDriveStatus(status: string | undefined): boolean {
   return true;
 }
 
+/** True when the Pi drive-status means e-stop (do not record as a completed test). */
+function isEstopDriveStatus(status: string | undefined): boolean {
+  if (!status) return false;
+  if (status === 'estop_active') return true;
+  return status.startsWith('blocked_by_estop');
+}
+
 /** True when the Pi reports the robot is no longer driving (incl. unlisted halt strings). */
 function isStopDriveStatus(status: string | undefined): boolean {
   if (!status || status === 'unknown') return false;
+  if (isEstopDriveStatus(status)) return false;
   if (DRIVE_STOP_STATUSES.has(status)) return true;
-  if (status.startsWith('blocked_by_estop')) return true;
   // Any other non-movement status after we've seen motion (e.g. future Pi statuses).
   if (!isMovementDriveStatus(status) && !DRIVE_PRE_MOVE_STATUSES.has(status)) return true;
   return false;
@@ -1710,7 +1726,6 @@ function formatRobotIso(ms: number): string {
 
 function StopTestBenchWidget() {
   const estopActive = useMetricsStore((s: MetricsState) => s.estopActive);
-  const autoRunning = useMetricsStore((s: MetricsState) => s.autoRunning);
   const gridEstop = useMetricsStore((s: MetricsState) => s.latestGrid?.estop_active);
   const networkMode = useMetricsStore((s: MetricsState) => s.networkMode);
 
@@ -1726,6 +1741,7 @@ function StopTestBenchWidget() {
   const [cacheScriptReady, setCacheScriptReady] = useState(true);
   const [modeSwitching, setModeSwitching] = useState(false);
   const [, setTick] = useState(0);
+  const [frozenElapsedMs, setFrozenElapsedMs] = useState<number | null>(null);
 
   const commandSentAtRef = useRef<number | null>(null);
   const activeStartRef = useRef<number | null>(null);
@@ -1734,10 +1750,39 @@ function StopTestBenchWidget() {
   const lastPiMsRef = useRef<number | null>(null);
   const lastPiWallMsRef = useRef<number | null>(null);
   const movementDeadlineRef = useRef<number | null>(null);
+  const stopCommandPendingRef = useRef(false);
+  const stopCommandPendingAtRef = useRef<number | null>(null);
+  const preMoveStopReasonRef = useRef<string | null>(null);
+  const firstStopTsRef = useRef<number | null>(null);
   const networkTypeRef = useRef(networkType);
   const stopModeRef = useRef(stopMode);
   useEffect(() => { networkTypeRef.current = networkType; }, [networkType]);
   useEffect(() => { stopModeRef.current = stopMode; }, [stopMode]);
+
+  const freezeTimerAtNow = useCallback(() => {
+    const anchor = activeStartRef.current ?? commandSentAtRef.current;
+    const piNow =
+      lastPiMsRef.current != null && lastPiWallMsRef.current != null
+        ? lastPiMsRef.current + (Date.now() - lastPiWallMsRef.current)
+        : lastPiMsRef.current;
+    if (anchor != null && piNow != null) {
+      setFrozenElapsedMs(Math.max(0, piNow - anchor));
+    }
+  }, []);
+
+  useEffect(() => {
+    setTestBenchManualStopHook(() => {
+      if (!sessionActiveRef.current) return;
+      stopCommandPendingRef.current = true;
+      stopCommandPendingAtRef.current = Date.now();
+      firstStopTsRef.current = null;
+      preMoveStopReasonRef.current = takeTestBenchStopReason() ?? null;
+      if (takeTestBenchStopIsStopLabel()) {
+        freezeTimerAtNow();
+      }
+    });
+    return () => setTestBenchManualStopHook(null);
+  }, [freezeTimerAtNow]);
 
   const applyStopModeApi = useCallback((data: StopModeApiResponse) => {
     if (data.mode === 'cache_aware_offloading' || data.mode === 'edge_aware') {
@@ -1824,6 +1869,7 @@ function StopTestBenchWidget() {
   }, [networkMode]);
 
   const resetSession = useCallback(() => {
+    const hadSession = sessionActiveRef.current;
     commandSentAtRef.current = null;
     activeStartRef.current = null;
     armedRef.current = false;
@@ -1831,9 +1877,21 @@ function StopTestBenchWidget() {
     lastPiMsRef.current = null;
     lastPiWallMsRef.current = null;
     movementDeadlineRef.current = null;
+    stopCommandPendingRef.current = false;
+    stopCommandPendingAtRef.current = null;
+    firstStopTsRef.current = null;
+    preMoveStopReasonRef.current = null;
+    setFrozenElapsedMs(null);
     setStopLabelEstopArmed(false);
     setCommandSentAt(null);
     setActiveStart(null);
+    // START always enables explore — release manual-drive lock when the session ends.
+    if (hadSession) {
+      const { autoRunning, autoMode } = useMetricsStore.getState();
+      if (autoRunning || autoMode) {
+        sendCommand('auto_off');
+      }
+    }
   }, []);
 
   const endRun = useCallback((stoppedAt: number) => {
@@ -1858,12 +1916,31 @@ function StopTestBenchWidget() {
     ]);
   }, [resetSession]);
 
-  const tryEndRunWithPiTime = useCallback(async () => {
+  const disableAutoRoam = useCallback(() => {
+    if (useMetricsStore.getState().autoRunning) {
+      sendCommand('auto_off');
+    }
+  }, []);
+
+  const tryEndRunOnPiStopCommand = useCallback(async (drive: DriveStatusPayload | null) => {
     const startTs = activeStartRef.current;
-    if (startTs == null || !armedRef.current) return;
-    const stopTs = await fetchLatestRobotMs();
-    endRun(resolveStopMs(startTs, stopTs));
-  }, [endRun]);
+    if (startTs == null || !armedRef.current) return false;
+    const acceptAutoDisabled = stopCommandPendingRef.current;
+    if (!drive?.status || !isPiStopCommandStatus(drive.status, acceptAutoDisabled)) return false;
+
+    const stopTs = robotMsFromPayload(drive as Record<string, unknown>);
+    if (stopTs == null) return false;
+
+    if (firstStopTsRef.current == null || stopTs < firstStopTsRef.current) {
+      firstStopTsRef.current = stopTs;
+    }
+
+    disableAutoRoam();
+    stopCommandPendingRef.current = false;
+    stopCommandPendingAtRef.current = null;
+    endRun(resolveStopMs(startTs, firstStopTsRef.current));
+    return true;
+  }, [disableAutoRoam, endRun]);
 
   const tryEndRunFromStopSignal = useCallback(async (drive: DriveStatusPayload | null) => {
     const startTs = activeStartRef.current;
@@ -1874,10 +1951,20 @@ function StopTestBenchWidget() {
   }, [endRun]);
 
   const cancelSession = useCallback((message: string) => {
+    if (!sessionActiveRef.current) return;
     resetSession();
-    if (useMetricsStore.getState().autoRunning) toggleRosAuto();
     useMetricsStore.getState().pushEvent('warning', message);
   }, [resetSession]);
+
+  const cancelSessionOnEstop = useCallback(() => {
+    cancelSession('Stop-time test — e-stop engaged (run not recorded)');
+  }, [cancelSession]);
+
+  const cancelPreMoveStop = useCallback((suffix?: string) => {
+    const base = preMoveStopReasonRef.current
+      ?? 'Stop-time test — stopped before movement started';
+    cancelSession(suffix ? `${base} (${suffix})` : base);
+  }, [cancelSession]);
 
   const startTest = async () => {
     if (sessionActiveRef.current) return;
@@ -1926,7 +2013,6 @@ function StopTestBenchWidget() {
         lastPiMsRef.current = ts;
         lastPiWallMsRef.current = Date.now();
       }
-      setTick((n) => n + 1);
     };
 
     const poll = async () => {
@@ -1934,11 +2020,31 @@ function StopTestBenchWidget() {
 
       const ts = await fetchLatestRobotMs();
       if (alive && ts != null) syncPiSample(ts);
+      if (!alive) return;
 
       const drive = await fetchDriveStatus();
       if (!alive) return;
 
       if (activeStartRef.current == null) {
+        if (stopCommandPendingRef.current) {
+          if (drive?.status && isPiStopCommandStatus(drive.status, true)) {
+            disableAutoRoam();
+            stopCommandPendingRef.current = false;
+            stopCommandPendingAtRef.current = null;
+            cancelPreMoveStop();
+            return;
+          }
+          const pendingAt = stopCommandPendingAtRef.current;
+          if (pendingAt != null && Date.now() - pendingAt > STOP_COMMAND_WAIT_MS) {
+            disableAutoRoam();
+            stopCommandPendingRef.current = false;
+            stopCommandPendingAtRef.current = null;
+            cancelPreMoveStop('timeout');
+            return;
+          }
+          return;
+        }
+
         const deadline = movementDeadlineRef.current;
         if (deadline != null && Date.now() > deadline) {
           cancelSession('Stop-time test — robot did not start moving in time');
@@ -1949,7 +2055,7 @@ function StopTestBenchWidget() {
         const gridEstopNow = await fetchGridEstopActive();
         if (backendEstop || gridEstopNow || useMetricsStore.getState().estopActive) {
           if (backendEstop || gridEstopNow) mirrorBackendEstop();
-          cancelSession('Stop-time test — e-stop engaged before movement');
+          cancelSessionOnEstop();
           return;
         }
 
@@ -1973,13 +2079,38 @@ function StopTestBenchWidget() {
 
       if (!armedRef.current) return;
 
+      if (
+        drive?.status
+        && isPiStopCommandStatus(drive.status, stopCommandPendingRef.current)
+      ) {
+        await tryEndRunOnPiStopCommand(drive);
+        return;
+      }
+
+      if (stopCommandPendingRef.current) {
+        const pendingAt = stopCommandPendingAtRef.current;
+        if (pendingAt != null && Date.now() - pendingAt > STOP_COMMAND_WAIT_MS) {
+          stopCommandPendingRef.current = false;
+          stopCommandPendingAtRef.current = null;
+          disableAutoRoam();
+          await tryEndRunFromStopSignal(drive);
+        }
+        return;
+      }
+
       const backendEstop = await fetchBackendEstopActive();
       const gridEstopNow = await fetchGridEstopActive();
       const driveStop = drive?.status ? isStopDriveStatus(drive.status) : false;
 
-      if (backendEstop || gridEstopNow) {
+      if (backendEstop || gridEstopNow || useMetricsStore.getState().estopActive) {
+        if (backendEstop || gridEstopNow) mirrorBackendEstop();
+        cancelSessionOnEstop();
+        return;
+      }
+
+      if (drive?.status && isEstopDriveStatus(drive.status)) {
         mirrorBackendEstop();
-        await tryEndRunFromStopSignal(drive);
+        cancelSessionOnEstop();
         return;
       }
 
@@ -1991,14 +2122,21 @@ function StopTestBenchWidget() {
     const id = setInterval(() => { void poll(); }, ROBOT_TIME_POLL_MS);
     void poll();
     return () => { alive = false; clearInterval(id); };
-  }, [commandSentAt, cancelSession, tryEndRunFromStopSignal]);
+  }, [cancelPreMoveStop, cancelSession, cancelSessionOnEstop, commandSentAt, disableAutoRoam, tryEndRunFromStopSignal, tryEndRunOnPiStopCommand]);
 
-  // Fallback: dashboard estop, grid estop, or explore turned off elsewhere.
+  // Re-render ~10×/s so the live Pi-clock extrapolation advances between MQTT samples.
   useEffect(() => {
-    if (activeStart == null || !armedRef.current) return;
-    if (!estopActive && !gridEstop && autoRunning) return;
-    void tryEndRunWithPiTime();
-  }, [activeStart, estopActive, gridEstop, autoRunning, tryEndRunWithPiTime]);
+    if (commandSentAt == null || frozenElapsedMs != null) return;
+    const id = setInterval(() => setTick((n) => n + 1), 100);
+    return () => clearInterval(id);
+  }, [commandSentAt, frozenElapsedMs]);
+
+  // E-stop during an active session cancels without recording (any phase).
+  useEffect(() => {
+    if (commandSentAt == null) return;
+    if (!estopActive && !gridEstop) return;
+    cancelSessionOnEstop();
+  }, [cancelSessionOnEstop, commandSentAt, estopActive, gridEstop]);
 
   const updateRun = (id: number, patch: Partial<StopTestRun>) =>
     setRuns((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
@@ -2047,46 +2185,55 @@ function StopTestBenchWidget() {
     clearTestBenchCache();
   };
 
-  const waitingForMovement = commandSentAt != null && activeStart == null;
-  const running = activeStart != null;
+  const waitingForMovement = commandSentAt != null && activeStart == null && frozenElapsedMs == null;
+  const running = activeStart != null && frozenElapsedMs == null;
+  const stopping = frozenElapsedMs != null;
   const sessionActive = commandSentAt != null;
   const displayPiNow =
     lastPiMsRef.current != null && lastPiWallMsRef.current != null
       ? lastPiMsRef.current + (Date.now() - lastPiWallMsRef.current)
       : null;
-  const elapsedAnchor = running ? activeStart : commandSentAt;
-  const elapsedMs = sessionActive && displayPiNow != null && elapsedAnchor != null
-    ? Math.max(0, displayPiNow - elapsedAnchor)
-    : 0;
+  const elapsedAnchor = activeStart ?? commandSentAt;
+  const elapsedMs = frozenElapsedMs != null
+    ? frozenElapsedMs
+    : sessionActive && displayPiNow != null && elapsedAnchor != null
+      ? Math.max(0, displayPiNow - elapsedAnchor)
+      : 0;
   const cacheStartBlocked = stopMode === 'cache_aware_offloading' && !cacheScriptReady;
   const startBlocked = sessionActive || estopActive || modeSwitching || cacheStartBlocked;
   const benchPillLabel = modeSwitching
     ? 'SCRIPT…'
-    : waitingForMovement
-      ? 'WAITING'
-      : running
-        ? 'RUNNING'
-        : cacheStartBlocked
-          ? 'NO SCRIPT'
-          : 'IDLE';
+    : stopping
+      ? 'STOPPING'
+      : waitingForMovement
+        ? 'WAITING'
+        : running
+          ? 'RUNNING'
+          : cacheStartBlocked
+            ? 'NO SCRIPT'
+            : 'IDLE';
   const benchPillColor = modeSwitching
     ? accents.cyan
-    : waitingForMovement
+    : stopping
       ? accents.yellow
-      : running
-        ? accents.green
-        : cacheStartBlocked
-          ? accents.red
-          : 'var(--text-muted)';
+      : waitingForMovement
+        ? accents.yellow
+        : running
+          ? accents.green
+          : cacheStartBlocked
+            ? accents.red
+            : 'var(--text-muted)';
   const benchPillBg = modeSwitching
     ? 'rgba(6,182,212,0.18)'
-    : waitingForMovement
-      ? 'rgba(245,158,11,0.18)'
-      : running
-        ? 'rgba(34,197,94,0.18)'
-        : cacheStartBlocked
-          ? 'rgba(239,68,68,0.18)'
-          : 'var(--secondary)';
+    : stopping
+      ? 'rgba(249,115,22,0.18)'
+      : waitingForMovement
+        ? 'rgba(245,158,11,0.18)'
+        : running
+          ? 'rgba(34,197,94,0.18)'
+          : cacheStartBlocked
+            ? 'rgba(239,68,68,0.18)'
+            : 'var(--secondary)';
   const inputStyle: React.CSSProperties = {
     width: '100%', background: 'var(--bg-surface)', color: 'var(--text-primary)',
     border: '1px solid var(--stroke-subtle)', borderRadius: 6,
@@ -2221,11 +2368,23 @@ function StopTestBenchWidget() {
         style={{ background: 'rgba(0,0,0,0.18)', border: '1px solid var(--stroke-subtle)' }}>
         <div className="flex flex-col min-w-0">
           <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
-            {running ? 'Stop elapsed (Pi)' : waitingForMovement ? 'Since command (Pi)' : 'Elapsed (Pi)'}
+            {stopping
+              ? 'Stopped at (Pi)'
+              : running
+                ? 'Stop elapsed (Pi)'
+                : waitingForMovement
+                  ? 'Since command (Pi)'
+                  : 'Elapsed (Pi)'}
           </span>
           <span style={{
             fontSize: 24, fontWeight: 800, fontFamily: 'monospace',
-            color: running ? accents.green : waitingForMovement ? accents.yellow : 'var(--text-primary)',
+            color: stopping
+              ? accents.yellow
+              : running
+                ? accents.green
+                : waitingForMovement
+                  ? accents.yellow
+                  : 'var(--text-primary)',
             lineHeight: 1.1,
           }}>
             {fmtSeconds(elapsedMs)}<span style={{ fontSize: 12, marginLeft: 2 }}>s</span>

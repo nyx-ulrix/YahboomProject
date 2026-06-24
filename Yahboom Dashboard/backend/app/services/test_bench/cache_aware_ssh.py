@@ -45,14 +45,37 @@ def _pgrep_pattern() -> str:
     return f"[{name[0]}]{name[1:]}"
 
 
+def _terminal_bin() -> str:
+    return PI_TERMINAL.split()[0]
+
+
 def _pkill_patterns() -> str:
     name = re.escape(_script_name())
-    title = re.escape(PI_CACHE_AWARE_TERMINAL_TITLE)
+    launcher = re.escape(PI_CACHE_LAUNCHER)
     return (
         f"pkill -f 'python3?.*{name}' 2>/dev/null; "
         f"pkill -f '{name}' 2>/dev/null; "
+        f"pkill -f '{launcher}' 2>/dev/null; "
+    )
+
+
+def _close_terminal_cmd(*, sleep_sec: float = 0.3) -> str:
+    """Kill cache-aware processes and close the Pi desktop terminal window."""
+    term = re.escape(_terminal_bin())
+    launcher = re.escape(PI_CACHE_LAUNCHER)
+    title = re.escape(PI_CACHE_AWARE_TERMINAL_TITLE)
+    home = _pi_home()
+    xauth = shlex.quote(f"{home}/.Xauthority")
+    title_q = shlex.quote(PI_CACHE_AWARE_TERMINAL_TITLE)
+    return (
+        f"{_pkill_patterns()}"
+        # lxterminal often omits -t from /proc/cmdline — match -e launcher instead.
+        f"pkill -f '{term}.*{launcher}' 2>/dev/null; "
+        f"pkill -f '{term} -e {shlex.quote(PI_CACHE_LAUNCHER)}' 2>/dev/null; "
+        f"pkill -f '{term}.*{title}' 2>/dev/null; "
         f"pkill -f '{title}' 2>/dev/null; "
-        f"pkill -f {shlex.quote(PI_CACHE_LAUNCHER)} 2>/dev/null; "
+        f"DISPLAY=:0 XAUTHORITY={xauth} wmctrl -c {title_q} 2>/dev/null; "
+        f"sleep {sleep_sec}; true"
     )
 
 
@@ -206,7 +229,7 @@ def start_cache_aware_script(*, wait: bool = True) -> dict:
         _log(f"Cache-aware script already running — {script_name}")
         return existing
 
-    _, stdout, _ = client.exec_command(f"{_pkill_patterns()}sleep 0.5; true", timeout=10)
+    _, stdout, _ = client.exec_command(_close_terminal_cmd(sleep_sec=0.5), timeout=10)
     stdout.channel.recv_exit_status()
     _open_terminal(client)
     time.sleep(1.0)
@@ -234,11 +257,11 @@ def stop_cache_aware_script() -> dict:
     script_name = _script_name()
     _invalidate_probe_cache()
     client = _ssh_client(host)
-    _, stdout, _ = client.exec_command(f"{_pkill_patterns()}sleep 0.3; true", timeout=10)
+    _, stdout, _ = client.exec_command(_close_terminal_cmd(), timeout=10)
     stdout.channel.recv_exit_status()
     probe = _probe_on_pi(client, host)
     client.close()
     _probe_cache["at"] = time.monotonic()
     _probe_cache["result"] = probe
-    _log(f"Cache-aware script stopped — {script_name} killed on Pi")
+    _log(f"Cache-aware script stopped — {script_name} killed and terminal closed on Pi")
     return probe

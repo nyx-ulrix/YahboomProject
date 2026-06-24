@@ -1,4 +1,5 @@
 import { useMetricsStore } from '../app/store';
+import { notifyTestBenchManualStop, notifyTestBenchStopLabelStop } from './testBenchSession';
 /**
  * Engage or release the emergency stop on both the local store and the shared
  * backend, so every connected client reflects the change within ~3 seconds.
@@ -66,7 +67,7 @@ export type CameraCommand =
  *  'manual'  — an explicit stop key/button action.
  *  'estop'   — the emergency-stop button or X-key shortcut (always honoured).
  */
-export type StopSource = 'release' | 'manual' | 'estop';
+export type StopSource = 'release' | 'manual' | 'estop' | 'stop_label';
 export type CommandSource = StopSource;
 
 function commandState(command: BotCommand, source?: CommandSource) {
@@ -128,6 +129,33 @@ function commandState(command: BotCommand, source?: CommandSource) {
   };
 }
 
+async function postBotCommand(command: BotCommand): Promise<void> {
+  const res = await fetch('/api/send_command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command }),
+  });
+  const data: { status: string; command: string; topic?: string; latency?: number; message?: string } =
+    await res.json();
+
+  if (!res.ok) {
+    useMetricsStore.getState().pushEvent(
+      'error',
+      `Command '${command}' rejected — ${data.message ?? res.statusText}`,
+    );
+    return;
+  }
+
+  const latencyStr = data.latency != null ? `${data.latency}ms` : '—';
+  useMetricsStore.getState().pushEvent(
+    'info',
+    `POST -> ${data.topic ?? 'yahboom/cmd'}: ${data.command ?? command} (${latencyStr} publish)`,
+  );
+  useMetricsStore.setState({
+    latencyMs: data.latency ?? useMetricsStore.getState().latencyMs,
+  });
+}
+
 export function sendCommand(command: BotCommand, source?: CommandSource): void {
   const state = useMetricsStore.getState();
 
@@ -136,7 +164,7 @@ export function sendCommand(command: BotCommand, source?: CommandSource): void {
   }
 
   // Gate: stop may only be sent from an explicit release or an emergency stop.
-  if (command === 'stop' && source !== 'release' && source !== 'manual' && source !== 'estop') return;
+  if (command === 'stop' && source !== 'release' && source !== 'manual' && source !== 'estop' && source !== 'stop_label') return;
   if (command === 'stop' && source === 'release' && state.autoMode) return;
 
   // E-stop latch: block movement / auto_on while latched. Off/safety commands
@@ -149,31 +177,43 @@ export function sendCommand(command: BotCommand, source?: CommandSource): void {
     && state.estopActive
   ) return;
 
+  // Edge-aware bottle stop — auto_off + stop in parallel; freeze test-bench timer.
+  if (command === 'stop' && source === 'stop_label') {
+    notifyTestBenchStopLabelStop();
+    useMetricsStore.setState({
+      ...commandState('auto_off'),
+      ...commandState('stop', 'stop_label'),
+    });
+    void (async () => {
+      try {
+        await Promise.all([postBotCommand('auto_off'), postBotCommand('stop')]);
+      } catch {
+        useMetricsStore.getState().pushEvent('error', 'Failed to send stop-label commands — backend unreachable');
+      }
+    })();
+    return;
+  }
+
+  // Manual stop also turns off explore/auto on the Pi (same as STOP EXPLORING).
+  if (command === 'stop' && source === 'manual' && state.autoRunning) {
+    sendCommand('auto_off');
+  }
+  if (command === 'stop' && source === 'manual') {
+    notifyTestBenchManualStop();
+  }
+
   // POST is fired immediately; joystick mirror updates after (not after await).
   void (async () => {
     try {
-      const res = await fetch('/api/send_command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command }),
-      });
-      const data: { status: string; command: string; topic?: string; latency?: number; message?: string } =
-        await res.json();
-
-      if (!res.ok) {
-        useMetricsStore.getState().pushEvent('error', `Command '${command}' rejected — ${data.message ?? res.statusText}`);
-        return;
-      }
-
+      await postBotCommand(command);
       useMetricsStore.setState({
         ...commandState(command, source),
-        latencyMs: data.latency ?? useMetricsStore.getState().latencyMs,
+        latencyMs: useMetricsStore.getState().latencyMs,
       });
 
-      const latencyStr = data.latency != null ? `${data.latency}ms` : '—';
-      useMetricsStore.getState().pushEvent('info', `POST -> ${data.topic ?? 'yahboom/cmd'}: ${data.command ?? command} (${latencyStr} publish)`);
-
       if (source === 'estop') {
+        const latencyMs = useMetricsStore.getState().latencyMs;
+        const latencyStr = latencyMs != null ? `${latencyMs}ms` : '—';
         useMetricsStore.getState().pushEvent('warning', `Emergency stop — robot halted (${latencyStr} publish)`);
       }
     } catch {

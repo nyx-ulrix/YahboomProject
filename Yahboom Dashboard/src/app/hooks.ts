@@ -9,7 +9,7 @@ import {
   processVitStatusForStopLabelEstop,
   setEdgeAwareStopEnabled,
 } from '../lib/edgeAwareStopLabelEstop';
-import type { LiveGridData } from './types';
+import type { LiveGridData, MetricsState } from './types';
 
 /** Start/stop webrtc_server.py on the Pi (video + VIT embeddings). */
 function streamUserError(message: string | undefined): string | null {
@@ -449,10 +449,17 @@ export function useDriveStatusPoll() {
           status?: string;
           state?: string;
           robotTimestamp?: number | null;
+          auto_mode?: boolean | null;
         };
-        useMetricsStore.setState({
+        const patch: Partial<Pick<MetricsState, 'driveStatus' | 'autoMode' | 'autoRunning'>> = {
           driveStatus: data.status || data.state || data.raw || 'unknown',
-        });
+        };
+        // Pi reported auto off — clear client latch so manual drive works again.
+        if (data.auto_mode === false) {
+          patch.autoMode = false;
+          patch.autoRunning = false;
+        }
+        useMetricsStore.setState(patch);
       } catch {
         useMetricsStore.setState({ driveStatus: 'unknown' });
       }
