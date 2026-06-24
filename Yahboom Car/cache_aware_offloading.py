@@ -260,7 +260,7 @@ def create_mqtt_client():
 def main():
     global mqtt_client
 
-    print("[INFO] Starting detector.py")
+    print("[INFO] Starting cache_aware_offloading.py")
     print(f"[INFO] Detection label : '{DETECTION_LABEL}'")
     print(f"[INFO] Threshold       : {DETECTION_THRESHOLD}")
     print(f"[INFO] Stop command    : '{STOP_COMMAND}' '{TOPIC_COMMAND}'")
