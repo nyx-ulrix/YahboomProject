@@ -1582,11 +1582,7 @@ type StopModeApiResponse = {
 function cacheBenchStartReady(data: StopModeApiResponse): boolean {
   if (data.mode === 'edge_aware') return true;
   if (!benchNeedsPiScript(data.mode ?? 'edge_aware')) return true;
-  if (data.cache_script_running !== true) return false;
-  if (data.cache_script_detection_ready === true) return true;
-  if (data.cache_script_detection_ready === false) return false;
-  // Older backend responses omitted detection_ready — unlock when the Pi script is up.
-  return true;
+  return data.cache_script_running === true && data.cache_script_detection_ready === true;
 }
 
 type StopTestRun = {
@@ -1946,7 +1942,7 @@ function StopTestBenchWidget() {
       if (benchNeedsPiScript(mode) && !data.cache_script_running) {
         useMetricsStore.getState().pushEvent(
           'warning',
-          data.message ?? 'Pi script did not start — switch to Edge and back to Cache/Hybrid to retry',
+          data.message ?? 'Pi cache-aware script did not start',
         );
       } else if (data.message) {
         useMetricsStore.getState().pushEvent('warning', data.message);
@@ -2529,7 +2525,7 @@ function StopTestBenchWidget() {
               : cacheScriptReady
                 ? 'Pi script + dashboard VIT both armed — first detector wins; run records which stopped.'
                 : cacheScriptRunning
-                  ? 'Waiting for bottle embedding (Pi log or MQTT) — VIT/video must be streaming.'
+                  ? 'Waiting for bottle embedding — ensure VIT and video are running.'
                   : 'Waiting for Pi script — START is disabled.'}
           </p>
         )}
@@ -2540,7 +2536,7 @@ function StopTestBenchWidget() {
               : cacheScriptReady
                 ? 'Pi script in lxterminal — stop from Pi only.'
                 : cacheScriptRunning
-                  ? 'Waiting for bottle embedding (Pi log or MQTT) — VIT/video must be streaming.'
+                  ? 'Waiting for bottle embedding — ensure VIT and video are running.'
                   : 'Waiting for cache_aware_offloading.py on the Pi — START is disabled.'}
           </p>
         )}
@@ -2593,7 +2589,7 @@ function StopTestBenchWidget() {
               : modeSwitching
                 ? 'Stop mode switching — waiting for Pi script'
                 : cacheWaitingEmbedding
-                  ? "Waiting for Pi bottle embedding (see Pi terminal log)"
+                  ? 'Waiting for bottle embedding on the Pi'
                   : cacheStartBlocked
                     ? 'Cache-aware script must be running on the Pi before START'
                   : estopActive

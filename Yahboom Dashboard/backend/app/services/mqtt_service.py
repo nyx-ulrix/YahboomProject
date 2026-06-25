@@ -385,12 +385,6 @@ class MQTTService:
             except Exception:
                 dims = None
             self.set_cache_aware_ready(ready=ready, dims=dims)
-            if ready:
-                self.log_event(
-                    "info",
-                    f"Cache-aware bottle embedding ready{f' @ {dims} dims' if dims else ''}",
-                    tag="cache-aware",
-                )
             return
 
         return
