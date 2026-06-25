@@ -14,6 +14,8 @@ TOPIC = os.getenv("MQTT_TOPIC", "yahboom/cmd")
 SAFETY_TOPIC = os.getenv("MQTT_SAFETY_TOPIC", "yahboom/safety/status")
 GRID_TOPIC = os.getenv("MQTT_GRID_TOPIC", "yahboom/grid")
 DRIVE_STATUS_TOPIC = os.getenv("MQTT_DRIVE_STATUS_TOPIC", "yahboom/drive/status")
+CACHE_AWARE_READY_TOPIC = os.getenv(
+    "MQTT_CACHE_AWARE_READY_TOPIC", "yahboom/cache_aware/ready")
 # Flask settings
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "3000"))
@@ -43,6 +45,8 @@ VIDEO_LINK_WAIT_SEC = int(os.getenv("VIDEO_LINK_WAIT_SEC", "15"))
 PROBE_CACHE_TTL_SEC = float(os.getenv("PROBE_CACHE_TTL_SEC", "4"))
 # Terminal emulator to open on the Pi's display (lxterminal for LXDE, xterm as fallback)
 PI_TERMINAL = os.getenv("PI_TERMINAL",          "lxterminal")
+# Force X display for SSH-launched terminals (e.g. ":1" for RealVNC); empty = auto-detect
+PI_DISPLAY = os.getenv("PI_DISPLAY", "").strip()
 
 # MQTT settings
 MQTT_TIMEOUT = int(os.getenv("MQTT_TIMEOUT", "60"))
@@ -82,6 +86,11 @@ PI_CACHE_AWARE_TERMINAL_TITLE = os.getenv(
     "PI_CACHE_AWARE_TERMINAL_TITLE", "Cache Aware Offloading")
 CACHE_SCRIPT_START_TIMEOUT_SEC = float(os.getenv("CACHE_SCRIPT_START_TIMEOUT_SEC", "30"))
 CACHE_SCRIPT_START_POLL_SEC = float(os.getenv("CACHE_SCRIPT_START_POLL_SEC", "1"))
+# Pi log line that unlocks test-bench START in cache / hybrid mode (see cache_aware_offloading.py).
+CACHE_SCRIPT_EMBEDDING_READY_SNIPPET = os.getenv(
+    "CACHE_SCRIPT_EMBEDDING_READY_SNIPPET",
+    "[DETECT] Text embedding ready: 'a water bottle'",
+)
 
 # VIT / MobileCLIP scene decoder MQTT topics (see vit_service.py)
 VIT_EMBEDDING_TOPIC = os.getenv(

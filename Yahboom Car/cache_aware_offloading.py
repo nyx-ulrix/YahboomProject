@@ -23,6 +23,7 @@ TOPIC_EMBEDDING = "yahboom/vit/embedding"   # subscribe  receive CLIP embeddings
 TOPIC_STATUS    = "yahboom/vit/status"      # subscribe  receive status updates
 TOPIC_COMMAND   = "yahboom/cmd"             # publish   send stop command
 TOPIC_DETECT    = "yahboom/detect/status"   # publish   detection events
+TOPIC_READY     = "yahboom/cache_aware/ready"  # publish retained embedding-ready flag
 
 # Detection config
 DETECTION_LABEL     = "a water bottle"
@@ -93,6 +94,15 @@ def compute_text_embedding(target_dims: int):
         _text_embedding_dims = target_dims
 
     print(f"[DETECT] Text embedding ready: '{DETECTION_LABEL}' @ {target_dims} dims")
+
+    client = mqtt_client
+    if client is not None:
+        ready_payload = json.dumps({
+            "ready": True,
+            "label": DETECTION_LABEL,
+            "dims": target_dims,
+        })
+        client.publish(TOPIC_READY, ready_payload, qos=1, retain=True)
 
 
 def get_text_embedding():

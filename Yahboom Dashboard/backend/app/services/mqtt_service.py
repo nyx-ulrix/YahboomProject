@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import time
 import json
 from config import (
-    BROKER_PORT, DRIVE_STATUS_TOPIC, GRID_TOPIC, TOPIC, MQTT_TIMEOUT, PUBLISH_TIMEOUT,
+    BROKER_PORT, CACHE_AWARE_READY_TOPIC, DRIVE_STATUS_TOPIC, GRID_TOPIC, TOPIC, MQTT_TIMEOUT, PUBLISH_TIMEOUT,
     SAFETY_TOPIC, EVENT_LOG_MAX, EVENT_LOG_MESSAGE_MAXLEN,
 )
 
@@ -35,23 +35,28 @@ class MQTTService:
         self.video_stream_url: str | None = None
         self._events: list[dict] = []
         self._event_id = 0
-        self.log_event('info', 'Backend started')
+        self.cache_aware_embedding_ready = False
+        self.cache_aware_ready_dims: int | None = None
+        self.log_event('info', 'Backend started', tag='system')
 
     # -------------------------------------------------------------------------
     # Event log
     # -------------------------------------------------------------------------
 
-    def log_event(self, level: str, message: str) -> None:
+    def log_event(self, level: str, message: str, *, tag: str | None = None) -> None:
         """Append a timestamped event; EVENT_LOG_MAX=0 means unlimited."""
         if EVENT_LOG_MESSAGE_MAXLEN > 0 and len(message) > EVENT_LOG_MESSAGE_MAXLEN:
             message = message[:EVENT_LOG_MESSAGE_MAXLEN] + "…"
         self._event_id += 1
-        self._events.append({
+        entry: dict = {
             'id':        self._event_id,
             'timestamp': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             'level':     level,
             'message':   message,
-        })
+        }
+        if tag:
+            entry['tag'] = tag
+        self._events.append(entry)
         if EVENT_LOG_MAX > 0 and len(self._events) > EVENT_LOG_MAX:
             self._events = self._events[-EVENT_LOG_MAX:]
 
@@ -71,18 +76,18 @@ class MQTTService:
     def set_estop(self, active: bool) -> None:
         self.estop_active = active
         if active:
-            self.log_event('warning', 'Emergency stop engaged')
+            self.log_event('warning', 'Emergency stop engaged', tag='estop')
             cmd = 'estop_on'
         else:
             self._ignore_estop_latch_until = time.time() + 2.5
-            self.log_event('info', 'Emergency stop released — control resumed')
+            self.log_event('info', 'Emergency stop released — control resumed', tag='estop')
             cmd = 'estop_off'
         if self.connected:
             try:
                 self.mqtt_client.publish(TOPIC, cmd)
-                self.log_event('info', f'MQTT -> {TOPIC}: {cmd}')
+                self.log_event('info', f'MQTT -> {TOPIC}: {cmd}', tag=TOPIC)
             except Exception as e:
-                self.log_event('error', f'E-stop MQTT publish failed: {e}')
+                self.log_event('error', f'E-stop MQTT publish failed: {e}', tag=TOPIC)
 
     # -------------------------------------------------------------------------
     # Connection
@@ -106,16 +111,17 @@ class MQTTService:
             self.mqtt_client.subscribe(SAFETY_TOPIC)
             self.mqtt_client.subscribe(GRID_TOPIC)
             self.mqtt_client.subscribe(DRIVE_STATUS_TOPIC)
+            self.mqtt_client.subscribe(CACHE_AWARE_READY_TOPIC)
             self.mqtt_client.loop_start()
             self.connected = True
             msg = f"Connected to MQTT broker at {self.broker_ip}:{BROKER_PORT}"
-            self.log_event('info', msg)
+            self.log_event('info', msg, tag='mqtt')
             return True, msg
 
         except Exception as e:
             self.connected = False
             msg = f"Connection failed: {str(e)}"
-            self.log_event('error', msg)
+            self.log_event('error', msg, tag='mqtt')
             return False, msg
 
     # -------------------------------------------------------------------------
@@ -128,6 +134,41 @@ class MQTTService:
         client.subscribe(SAFETY_TOPIC)
         client.subscribe(GRID_TOPIC)
         client.subscribe(DRIVE_STATUS_TOPIC)
+        client.subscribe(CACHE_AWARE_READY_TOPIC)
+
+    def _parse_cache_aware_ready(self, raw: str) -> bool:
+        text = raw.strip()
+        if not text:
+            return False
+        try:
+            obj = json.loads(text)
+        except Exception:
+            return False
+        if not isinstance(obj, dict):
+            return False
+        ready = obj.get("ready")
+        if ready is False:
+            return False
+        return ready is True or ready in (1, "1", "true", "yes")
+
+    def set_cache_aware_ready(self, *, ready: bool, dims: int | None = None) -> None:
+        self.cache_aware_embedding_ready = ready
+        self.cache_aware_ready_dims = dims if ready else None
+
+    def clear_cache_aware_ready(self) -> None:
+        """Clear local flag and retained MQTT ready message when Pi script stops."""
+        self.set_cache_aware_ready(ready=False)
+        if not self.connected or not self.broker_ip:
+            return
+        try:
+            self.mqtt_client.publish(
+                CACHE_AWARE_READY_TOPIC,
+                json.dumps({"ready": False}),
+                qos=1,
+                retain=True,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _robot_timestamp_seconds(obj: dict) -> float | None:
@@ -303,7 +344,7 @@ class MQTTService:
     def _on_message(self, _client, _userdata, message) -> None:
         raw = message.payload.decode(errors="replace")
         if message.topic == TOPIC:
-            self.log_event("info", f"MQTT <- {TOPIC}: {raw}")
+            self.log_event("info", f"MQTT <- {TOPIC}: {raw}", tag=TOPIC)
             if raw == "estop_on":
                 self.estop_active = True
             elif raw == "estop_off":
@@ -332,6 +373,24 @@ class MQTTService:
 
         if message.topic == DRIVE_STATUS_TOPIC:
             self.latest_drive_status = self._parse_drive_message(raw)
+            return
+
+        if message.topic == CACHE_AWARE_READY_TOPIC:
+            ready = self._parse_cache_aware_ready(raw)
+            dims = None
+            try:
+                obj = json.loads(raw.strip()) if raw.strip() else {}
+                if isinstance(obj, dict) and obj.get("dims") is not None:
+                    dims = int(obj["dims"])
+            except Exception:
+                dims = None
+            self.set_cache_aware_ready(ready=ready, dims=dims)
+            if ready:
+                self.log_event(
+                    "info",
+                    f"Cache-aware bottle embedding ready{f' @ {dims} dims' if dims else ''}",
+                    tag="cache-aware",
+                )
             return
 
         return

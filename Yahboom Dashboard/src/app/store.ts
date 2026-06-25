@@ -296,7 +296,7 @@ export const useLayoutStore = create<LayoutStore>()(
 
 export interface MetricsStore extends MetricsState {
   setMetric: <K extends keyof MetricsState>(key: K, value: MetricsState[K]) => void;
-  pushEvent: (level: 'info' | 'warning' | 'error', message: string) => void;
+  pushEvent: (level: 'info' | 'warning' | 'error', message: string, tag?: string) => void;
 }
 
 export const useMetricsStore = create<MetricsStore>((set) => ({
@@ -343,11 +343,17 @@ export const useMetricsStore = create<MetricsStore>((set) => ({
   setMetric: (key, value) => set({ [key]: value } as Partial<MetricsState>),
 
   /** Appends an event. */
-  pushEvent: (level, message) =>
+  pushEvent: (level, message, tag) =>
     set((s) => ({
       events: [
         ...s.events,
-        { id: Date.now() + Math.random(), timestamp: new Date().toISOString(), level, message },
+        {
+          id: Date.now() + Math.random(),
+          timestamp: new Date().toISOString(),
+          level,
+          message,
+          ...(tag ? { tag } : {}),
+        },
       ],
     })),
 }));

@@ -1,5 +1,5 @@
 import { useMetricsStore } from '../app/store';
-import { notifyTestBenchManualStop, notifyTestBenchStopLabelStop } from './testBenchSession';
+import { notifyTestBenchManualStop, notifyTestBenchStopLabelStop, skipAutoOffOnBenchStop } from './testBenchSession';
 /**
  * Engage or release the emergency stop on both the local store and the shared
  * backend, so every connected client reflects the change within ~3 seconds.
@@ -21,7 +21,7 @@ export async function setEstopState(active: boolean): Promise<void> {
     movementVec:    active ? null : useMetricsStore.getState().movementVec,
   });
   if (active) {
-    useMetricsStore.getState().pushEvent('warning', 'Emergency stop engaged');
+    useMetricsStore.getState().pushEvent('warning', 'Emergency stop engaged', 'estop');
   }
 
   try {
@@ -142,6 +142,7 @@ async function postBotCommand(command: BotCommand): Promise<void> {
     useMetricsStore.getState().pushEvent(
       'error',
       `Command '${command}' rejected — ${data.message ?? res.statusText}`,
+      data.topic ?? 'yahboom/cmd',
     );
     return;
   }
@@ -150,6 +151,7 @@ async function postBotCommand(command: BotCommand): Promise<void> {
   useMetricsStore.getState().pushEvent(
     'info',
     `POST -> ${data.topic ?? 'yahboom/cmd'}: ${data.command ?? command} (${latencyStr} publish)`,
+    data.topic ?? 'yahboom/cmd',
   );
   useMetricsStore.setState({
     latencyMs: data.latency ?? useMetricsStore.getState().latencyMs,
@@ -159,7 +161,29 @@ async function postBotCommand(command: BotCommand): Promise<void> {
 export function sendCommand(command: BotCommand, source?: CommandSource): void {
   const state = useMetricsStore.getState();
 
-  if (state.autoMode && isMovementCommand(command)) {
+  // Edge-aware bottle stop — auto_off + stop in parallel; freeze test-bench timer.
+  // Must run before the autoMode movement gate (explore is on during bench START).
+  if (command === 'stop' && source === 'stop_label') {
+    notifyTestBenchStopLabelStop();
+    useMetricsStore.setState({
+      ...commandState('auto_off'),
+      ...commandState('stop', 'stop_label'),
+    });
+    void (async () => {
+      try {
+        await Promise.all([postBotCommand('auto_off'), postBotCommand('stop')]);
+      } catch {
+        useMetricsStore.getState().pushEvent('error', 'Failed to send stop-label commands — backend unreachable', 'yahboom/cmd');
+      }
+    })();
+    return;
+  }
+
+  if (
+    state.autoMode
+    && isMovementCommand(command)
+    && !(command === 'stop' && (source === 'manual' || source === 'estop'))
+  ) {
     return;
   }
 
@@ -177,25 +201,8 @@ export function sendCommand(command: BotCommand, source?: CommandSource): void {
     && state.estopActive
   ) return;
 
-  // Edge-aware bottle stop — auto_off + stop in parallel; freeze test-bench timer.
-  if (command === 'stop' && source === 'stop_label') {
-    notifyTestBenchStopLabelStop();
-    useMetricsStore.setState({
-      ...commandState('auto_off'),
-      ...commandState('stop', 'stop_label'),
-    });
-    void (async () => {
-      try {
-        await Promise.all([postBotCommand('auto_off'), postBotCommand('stop')]);
-      } catch {
-        useMetricsStore.getState().pushEvent('error', 'Failed to send stop-label commands — backend unreachable');
-      }
-    })();
-    return;
-  }
-
   // Manual stop also turns off explore/auto on the Pi (same as STOP EXPLORING).
-  if (command === 'stop' && source === 'manual' && state.autoRunning) {
+  if (command === 'stop' && source === 'manual' && state.autoRunning && !skipAutoOffOnBenchStop()) {
     sendCommand('auto_off');
   }
   if (command === 'stop' && source === 'manual') {
@@ -214,10 +221,10 @@ export function sendCommand(command: BotCommand, source?: CommandSource): void {
       if (source === 'estop') {
         const latencyMs = useMetricsStore.getState().latencyMs;
         const latencyStr = latencyMs != null ? `${latencyMs}ms` : '—';
-        useMetricsStore.getState().pushEvent('warning', `Emergency stop — robot halted (${latencyStr} publish)`);
+        useMetricsStore.getState().pushEvent('warning', `Emergency stop — robot halted (${latencyStr} publish)`, 'yahboom/cmd');
       }
     } catch {
-      useMetricsStore.getState().pushEvent('error', 'Failed to send command — backend unreachable');
+      useMetricsStore.getState().pushEvent('error', 'Failed to send command — backend unreachable', 'yahboom/cmd');
     }
   })();
 
@@ -258,15 +265,15 @@ export async function sendCameraCommand(command: CameraCommand): Promise<void> {
       await res.json();
 
     if (!res.ok) {
-      useMetricsStore.getState().pushEvent('error', `Camera command '${command}' rejected — ${data.message ?? res.statusText}`);
+      useMetricsStore.getState().pushEvent('error', `Camera command '${command}' rejected — ${data.message ?? res.statusText}`, data.topic ?? 'yahboom/cmd');
       return;
     }
 
     useMetricsStore.setState({ latencyMs: data.latency ?? useMetricsStore.getState().latencyMs });
     const latencyStr = data.latency != null ? `${data.latency}ms` : '—';
-    useMetricsStore.getState().pushEvent('info', `POST -> ${data.topic ?? 'yahboom/cmd'}: ${data.command ?? command} (${latencyStr} publish)`);
+    useMetricsStore.getState().pushEvent('info', `POST -> ${data.topic ?? 'yahboom/cmd'}: ${data.command ?? command} (${latencyStr} publish)`, data.topic ?? 'yahboom/cmd');
   } catch {
-    useMetricsStore.getState().pushEvent('error', 'Failed to send camera command — backend unreachable');
+    useMetricsStore.getState().pushEvent('error', 'Failed to send camera command — backend unreachable', 'yahboom/cmd');
   }
 }
 

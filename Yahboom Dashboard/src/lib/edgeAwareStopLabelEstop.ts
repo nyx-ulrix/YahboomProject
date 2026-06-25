@@ -56,6 +56,7 @@ export function setStopLabelEstopArmed(armed: boolean, ignoreCurrentDecodeKey?: 
   stopLabelEstopArmed = armed;
   if (armed && !was) {
     lastHandledKey = ignoreCurrentDecodeKey ?? null;
+    lastTriggerAt = 0;
   }
 }
 
@@ -101,6 +102,6 @@ function triggerStopLabelStop(key: string): boolean {
   lastHandledKey = key;
   lastTriggerAt = now;
   sendCommand('stop', 'stop_label');
-  useMetricsStore.getState().pushEvent('warning', `Edge-aware stop — ${EDGE_AWARE_STOP_LABEL} detected, stop sent`);
+  useMetricsStore.getState().pushEvent('warning', `Edge-aware stop — ${EDGE_AWARE_STOP_LABEL} detected, stop sent`, 'yahboom/vit/status');
   return true;
 }

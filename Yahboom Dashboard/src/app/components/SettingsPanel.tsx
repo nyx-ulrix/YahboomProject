@@ -34,7 +34,7 @@ export function SettingsPanel() {
   const onConnect = async () => {
     setBusy(true);
     setBrokerIp(draftIp);
-    useMetricsStore.getState().pushEvent('info', `Connecting to broker at ${draftIp}…`);
+    useMetricsStore.getState().pushEvent('info', `Connecting to broker at ${draftIp}…`, 'mqtt');
     await connectBroker(draftIp);
     setBusy(false);
   };

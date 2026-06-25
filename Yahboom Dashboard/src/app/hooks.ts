@@ -60,6 +60,8 @@ export function usePiVitVideoServer() {
         error?: string;
         status?: string;
         terminal_opened?: boolean;
+        launch_mode?: 'terminal' | 'headless';
+        message?: string;
       };
       const terminalOpened = data.terminal_opened === true;
       if (!res.ok && !terminalOpened) {
@@ -73,6 +75,13 @@ export function usePiVitVideoServer() {
       useMetricsStore.setState({ streamRunning: data.running ?? true });
       if (data.video_url) {
         useSettingsStore.getState().setVideoStreamUrl(data.video_url);
+      }
+      if (data.launch_mode === 'headless' || data.message) {
+        useMetricsStore.getState().pushEvent(
+          'info',
+          data.message ?? 'Started on Pi in background (no desktop — log at /tmp/yahboom_video_server.log)',
+          'video',
+        );
       }
       // Keep START disabled while the Pi finishes booting the server.
       // Unlock early if /api/status flips streamRunning=true.
@@ -120,6 +129,7 @@ export function usePiVitVideoServer() {
     brokerIp,
     isRunning,
     isBusy,
+    startLocked,
     label,
     error,
     start,
@@ -385,7 +395,7 @@ export function useSafetyStatusPoll() {
           stopAutoMode();
 
           if (!lastEstopRef.current || raw !== lastRawRef.current) {
-            useMetricsStore.getState().pushEvent('warning', `LiDAR E-stop triggered — ${raw}`);
+            useMetricsStore.getState().pushEvent('warning', `LiDAR E-stop triggered — ${raw}`, 'yahboom/safety/status');
           }
         }
 
@@ -602,7 +612,9 @@ export function useEdgeAwareStopLabelEstop() {
         const modeRes = await fetch('/api/test_bench/stop_mode', { cache: 'no-store' });
         if (modeRes.ok) {
           const modeData = await modeRes.json() as { mode?: string; edge_aware_enabled?: boolean };
-          const enabled = modeData.edge_aware_enabled === true || modeData.mode === 'edge_aware';
+          const enabled = modeData.edge_aware_enabled === true
+            || modeData.mode === 'edge_aware'
+            || modeData.mode === 'hybrid';
           setEdgeAwareStopEnabled(enabled);
         }
         if (!isEdgeAwareStopEnabled()) return;

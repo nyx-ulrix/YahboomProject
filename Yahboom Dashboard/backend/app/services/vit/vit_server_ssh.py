@@ -16,6 +16,7 @@ from pathlib import PurePosixPath
 import paramiko
 
 from app.services.mqtt_service import mqtt_service
+from app.services.pi_remote_launch import start_interactive_or_headless
 from config import (
     DEFAULT_BROKER_IP,
     PI_SSH_USER,
@@ -32,6 +33,7 @@ from config import (
 _probe_cache: dict = {"at": 0.0, "result": None}
 
 PI_VIT_LAUNCHER = "/tmp/yahboom_vit_sender.sh"
+PI_VIT_HEADLESS_LAUNCHER = "/tmp/yahboom_vit_sender_headless.sh"
 PI_VIT_TERMINAL_TITLE = "VIT Sender"
 
 
@@ -58,6 +60,8 @@ def _vit_pkill_patterns() -> str:
     return (
         f"pkill -f 'python3?.*{name}' 2>/dev/null; "
         f"pkill -f '{name}' 2>/dev/null; "
+        f"pkill -f {shlex.quote(PI_VIT_LAUNCHER)} 2>/dev/null; "
+        f"pkill -f {shlex.quote(PI_VIT_HEADLESS_LAUNCHER)} 2>/dev/null; "
     )
 
 
@@ -102,21 +106,15 @@ def _ssh_client(host: str) -> paramiko.SSHClient:
 
 def _vit_debug(message: str, level: str = "info") -> None:
     print(f"[vit-server] {message}", flush=True)
-    mqtt_service.log_event(level, message)
+    mqtt_service.log_event(level, message, tag="vit-ssh")
 
 
-def _pi_terminal_start_vit(client: paramiko.SSHClient) -> None:
-    """
-    Open a terminal on the Pi desktop and run:
-      source ~/vit_env/bin/activate
-      python3 robot_sender.py
-    """
+def _launch_vit_on_pi(client: paramiko.SSHClient) -> str:
+    """Start VIT encoder in lxterminal or headless. Returns mode string."""
     home, workdir, script, log = _pi_vit_paths()
     venv_activate = _expand_pi_path(PI_VIT_VENV, home)
-    launcher = PI_VIT_LAUNCHER
     script_name = _vit_script_name()
-
-    launcher_body = (
+    terminal_body = (
         "#!/bin/bash\n"
         f"cd {shlex.quote(workdir)}\n"
         f"truncate -s 0 {shlex.quote(log)} 2>/dev/null\n"
@@ -124,34 +122,28 @@ def _pi_terminal_start_vit(client: paramiko.SSHClient) -> None:
         f"env PYTHONUNBUFFERED=1 python3 {shlex.quote(script)} 2>&1 | tee -a {shlex.quote(log)}\n"
         "exec bash\n"
     )
-    write_cmd = (
-        f"cat > {shlex.quote(launcher)} << 'YAHBOOM_EOF'\n"
-        f"{launcher_body}"
-        "YAHBOOM_EOF\n"
-        f"chmod +x {shlex.quote(launcher)}"
+    headless_body = (
+        "#!/bin/bash\n"
+        f"cd {shlex.quote(workdir)}\n"
+        f"source {shlex.quote(venv_activate)}\n"
+        f"exec env PYTHONUNBUFFERED=1 python3 {shlex.quote(script)}\n"
     )
-    _, stdout, stderr = client.exec_command(write_cmd, timeout=10)
-    if stdout.channel.recv_exit_status() != 0:
-        err = stderr.read().decode(errors="replace").strip()
-        raise RuntimeError(f"Failed to write VIT launcher on Pi{': ' + err if err else ''}")
-
-    xauth = home + "/.Xauthority"
-    open_terminal = (
-        f"DISPLAY=:0 XAUTHORITY={shlex.quote(xauth)} "
-        f"nohup {PI_TERMINAL} -t {shlex.quote(PI_VIT_TERMINAL_TITLE)} "
-        f"-e {shlex.quote(launcher)} "
-        f"</dev/null >/dev/null 2>&1 & echo OPENED"
+    mode = start_interactive_or_headless(
+        client,
+        home=home,
+        title=PI_VIT_TERMINAL_TITLE,
+        launcher_path=PI_VIT_LAUNCHER,
+        headless_launcher_path=PI_VIT_HEADLESS_LAUNCHER,
+        terminal_launcher_body=terminal_body,
+        headless_launcher_body=headless_body,
+        log_path=log,
+        label="vit_encoder",
     )
-    _, stdout, stderr = client.exec_command(open_terminal, timeout=10)
-    exit_status = stdout.channel.recv_exit_status()
-    out = stdout.read()
-    if exit_status != 0 or b"OPENED" not in out:
-        err = stderr.read().decode(errors="replace").strip()
-        raise RuntimeError(
-            f"Failed to open VIT terminal on Pi (exit {exit_status})"
-            + (f": {err}" if err else "")
-        )
-    _vit_debug(f"Opened Pi terminal — running {script_name} (log {log})")
+    if mode == "headless":
+        _vit_debug(f"Started headless — {script_name} (log {log})")
+    else:
+        _vit_debug(f"Opened Pi terminal — running {script_name} (log {log})")
+    return mode
 
 
 def _probe_on_pi(client: paramiko.SSHClient, host: str) -> dict:
@@ -245,7 +237,7 @@ def start_vit_server() -> dict:
         timeout=10,
     )
     stdout.channel.recv_exit_status()
-    _pi_terminal_start_vit(client)
+    _launch_vit_on_pi(client)
     time.sleep(1.0)
     probe = _probe_on_pi(client, host)
     client.close()
@@ -269,10 +261,7 @@ def stop_vit_server() -> dict:
     _invalidate_probe_cache()
     client = _ssh_client(host)
     _, stdout, _ = client.exec_command(
-        f"{_vit_pkill_patterns()}"
-        "pkill -f 'yahboom_vit_sender' 2>/dev/null; "
-        f"pkill -f {shlex.quote(PI_VIT_TERMINAL_TITLE)} 2>/dev/null; "
-        "sleep 0.3; true",
+        f"{_vit_pkill_patterns()}sleep 0.3; true",
         timeout=10,
     )
     stdout.channel.recv_exit_status()

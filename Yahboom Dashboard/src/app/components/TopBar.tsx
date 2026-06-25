@@ -128,7 +128,7 @@ export function TopBar({ darkMode, toggleDark }: { darkMode: boolean; toggleDark
 }
 
 function PiVitVideoServerButton() {
-  const { brokerIp, isRunning, isBusy, label, error, start, stop } = usePiVitVideoServer();
+  const { brokerIp, isRunning, isBusy, startLocked, label, error, start, stop } = usePiVitVideoServer();
   const green = 'var(--state-success)';
   const red = 'var(--state-error)';
   const muted = 'var(--text-muted)';
@@ -151,7 +151,7 @@ function PiVitVideoServerButton() {
             return;
           }
           // Block double-click before React re-renders disabled state.
-          if (!isRunning && startBlocked) {
+          if (!isRunning && startLocked) {
             e.preventDefault();
           }
         }}

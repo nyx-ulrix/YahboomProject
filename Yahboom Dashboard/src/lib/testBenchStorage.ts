@@ -2,7 +2,9 @@
 
 const STORAGE_KEY = 'yahboom_test_bench_v1';
 
-export type StopBenchMode = 'cache_aware_offloading' | 'edge_aware';
+export type StopBenchMode = 'cache_aware_offloading' | 'hybrid' | 'edge_aware';
+
+export type StopSource = 'cache_pi' | 'edge_dashboard' | 'manual';
 
 export type PersistedStopTestRun = {
   id: number;
@@ -15,6 +17,7 @@ export type PersistedStopTestRun = {
   stoppingDistance: string;
   networkType: string;
   stopMode: StopBenchMode;
+  stopSource?: StopSource;
 };
 
 export type TestBenchCache = {
@@ -30,7 +33,11 @@ const EMPTY_CACHE: TestBenchCache = {
 };
 
 function isStopBenchMode(value: unknown): value is StopBenchMode {
-  return value === 'cache_aware_offloading' || value === 'edge_aware';
+  return value === 'cache_aware_offloading' || value === 'hybrid' || value === 'edge_aware';
+}
+
+function isStopSource(value: unknown): value is StopSource {
+  return value === 'cache_pi' || value === 'edge_dashboard' || value === 'manual';
 }
 
 function isPersistedRun(value: unknown): value is PersistedStopTestRun {
@@ -47,6 +54,7 @@ function isPersistedRun(value: unknown): value is PersistedStopTestRun {
     && typeof r.stoppingDistance === 'string'
     && typeof r.networkType === 'string'
     && isStopBenchMode(r.stopMode)
+    && (r.stopSource === undefined || isStopSource(r.stopSource))
   );
 }
 
@@ -95,4 +103,51 @@ export function clearTestBenchCache(): void {
   } catch {
     /* ignore */
   }
+}
+
+export const STOP_SOURCE_LABELS: Record<StopSource, string> = {
+  cache_pi: 'Pi script · bottle',
+  edge_dashboard: 'Dashboard VIT · bottle',
+  manual: 'Manual stop',
+};
+
+export const STOP_MODE_LABELS: Record<StopBenchMode, string> = {
+  cache_aware_offloading: 'Cache aware',
+  hybrid: 'Hybrid',
+  edge_aware: 'Edge aware',
+};
+
+export const STOP_BENCH_MODES: StopBenchMode[] = [
+  'cache_aware_offloading',
+  'hybrid',
+  'edge_aware',
+];
+
+export const DEFAULT_STOP_BENCH_MODE: StopBenchMode = 'edge_aware';
+
+const STOP_MODE_PREF_KEY = 'yahboom_stop_bench_mode';
+
+export function loadStopModePreference(): StopBenchMode {
+  try {
+    const raw = localStorage.getItem(STOP_MODE_PREF_KEY);
+    return isStopBenchMode(raw) ? raw : DEFAULT_STOP_BENCH_MODE;
+  } catch {
+    return DEFAULT_STOP_BENCH_MODE;
+  }
+}
+
+export function saveStopModePreference(mode: StopBenchMode): void {
+  try {
+    localStorage.setItem(STOP_MODE_PREF_KEY, mode);
+  } catch {
+    /* private mode / quota — ignore */
+  }
+}
+
+export function benchNeedsPiScript(mode: StopBenchMode): boolean {
+  return mode === 'cache_aware_offloading' || mode === 'hybrid';
+}
+
+export function benchHasDashboardBottleStop(mode: StopBenchMode): boolean {
+  return mode === 'edge_aware' || mode === 'hybrid';
 }

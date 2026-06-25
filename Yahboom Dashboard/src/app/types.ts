@@ -82,7 +82,7 @@ export interface MetricsState {
   ros2BridgeStatus: 'ACTIVE' | 'INACTIVE' | 'ERROR' | null;
   mqttLinkStatus: 'CONNECTED' | 'DISCONNECTED' | 'ERROR';
   cameraSensorStatus: 'OK' | 'NO SIGNAL' | 'ERROR' | null;
-  events: Array<{ id: number; timestamp: string; level: 'info' | 'warning' | 'error'; message: string }>;
+  events: Array<{ id: number; timestamp: string; level: 'info' | 'warning' | 'error'; message: string; tag?: string }>;
   /** Rolling 30-sample history arrays, used by sparkline charts. */
   latencyHistory: number[];
   cpuHistory: number[];

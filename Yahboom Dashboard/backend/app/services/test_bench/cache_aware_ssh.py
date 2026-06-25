@@ -16,7 +16,13 @@ from pathlib import PurePosixPath
 import paramiko
 
 from app.services.mqtt_service import mqtt_service
+from app.services.pi_remote_launch import (
+    gui_session_available,
+    start_lxterminal,
+    write_launcher,
+)
 from config import (
+    CACHE_SCRIPT_EMBEDDING_READY_SNIPPET,
     CACHE_SCRIPT_START_POLL_SEC,
     CACHE_SCRIPT_START_TIMEOUT_SEC,
     DEFAULT_BROKER_IP,
@@ -34,6 +40,25 @@ from config import (
 _probe_cache: dict = {"at": 0.0, "result": None}
 
 PI_CACHE_LAUNCHER = "/tmp/yahboom_cache_aware.sh"
+PI_CACHE_HEADLESS_LAUNCHER = "/tmp/yahboom_cache_aware_headless.sh"
+PI_CACHE_LOG_VIEWER = "/tmp/yahboom_cache_aware_viewer.sh"
+
+
+def _probe_meta(
+    host: str,
+    *,
+    running: bool,
+    launch_mode: str | None = None,
+    detection_ready: bool = False,
+) -> dict:
+    _, _, _, log = _pi_paths()
+    return {
+        "running": running,
+        "detection_ready": detection_ready,
+        "host": host,
+        "log_path": log,
+        **({"launch_mode": launch_mode} if launch_mode else {}),
+    }
 
 
 def _script_name() -> str:
@@ -56,6 +81,8 @@ def _pkill_patterns() -> str:
         f"pkill -f 'python3?.*{name}' 2>/dev/null; "
         f"pkill -f '{name}' 2>/dev/null; "
         f"pkill -f '{launcher}' 2>/dev/null; "
+        f"pkill -f '{re.escape(PI_CACHE_HEADLESS_LAUNCHER)}' 2>/dev/null; "
+        f"pkill -f '{re.escape(PI_CACHE_LOG_VIEWER)}' 2>/dev/null; "
     )
 
 
@@ -119,63 +146,139 @@ def _ssh_client(host: str) -> paramiko.SSHClient:
 
 def _log(message: str, level: str = "info") -> None:
     print(f"[cache-aware] {message}", flush=True)
-    mqtt_service.log_event(level, message)
+    mqtt_service.log_event(level, message, tag="cache-aware")
 
 
-def _open_terminal(client: paramiko.SSHClient) -> None:
+def _launcher_body() -> tuple[str, str]:
     home, workdir, script, log = _pi_paths()
     venv_activate = _expand_pi_path(PI_VIT_VENV, home)
-    launcher = PI_CACHE_LAUNCHER
-    script_name = _script_name()
-
-    launcher_body = (
+    body = (
         "#!/bin/bash\n"
         f"cd {shlex.quote(workdir)}\n"
         f"truncate -s 0 {shlex.quote(log)} 2>/dev/null\n"
         f"source {shlex.quote(venv_activate)}\n"
-        f"env PYTHONUNBUFFERED=1 python3 {shlex.quote(script)} 2>&1 | tee -a {shlex.quote(log)}\n"
+        f"env PYTHONUNBUFFERED=1 stdbuf -oL -eL python3 {shlex.quote(script)} 2>&1 | tee -a {shlex.quote(log)}\n"
         "exec bash\n"
     )
-    write_cmd = (
-        f"cat > {shlex.quote(launcher)} << 'YAHBOOM_EOF'\n"
-        f"{launcher_body}"
-        "YAHBOOM_EOF\n"
-        f"chmod +x {shlex.quote(launcher)}"
-    )
-    _, stdout, stderr = client.exec_command(write_cmd, timeout=10)
-    if stdout.channel.recv_exit_status() != 0:
-        err = stderr.read().decode(errors="replace").strip()
-        raise RuntimeError(f"Failed to write cache-aware launcher on Pi{': ' + err if err else ''}")
+    return home, body
 
-    xauth = home + "/.Xauthority"
-    open_terminal = (
-        f"DISPLAY=:0 XAUTHORITY={shlex.quote(xauth)} "
-        f"nohup {PI_TERMINAL} -t {shlex.quote(PI_CACHE_AWARE_TERMINAL_TITLE)} "
-        f"-e {shlex.quote(launcher)} "
-        f"</dev/null >/dev/null 2>&1 & echo OPENED"
+
+def _cache_terminal_open(client: paramiko.SSHClient) -> bool:
+    """True if lxterminal is already open for cache-aware script or log viewer."""
+    term = re.escape(_terminal_bin())
+    for pattern in (re.escape(PI_CACHE_LAUNCHER), re.escape(PI_CACHE_LOG_VIEWER)):
+        cmd = f"pgrep -f '{term}.*{pattern}' >/dev/null 2>&1 && echo YES || echo NO"
+        _, stdout, _ = client.exec_command(cmd, timeout=5)
+        if b"YES" in stdout.read():
+            return True
+    title = re.escape(PI_CACHE_AWARE_TERMINAL_TITLE)
+    _, stdout, _ = client.exec_command(
+        f"pgrep -f '{term}.*{title}' >/dev/null 2>&1 && echo YES || echo NO",
+        timeout=5,
     )
-    _, stdout, stderr = client.exec_command(open_terminal, timeout=10)
-    exit_status = stdout.channel.recv_exit_status()
-    out = stdout.read()
-    if exit_status != 0 or b"OPENED" not in out:
-        err = stderr.read().decode(errors="replace").strip()
+    return b"YES" in stdout.read()
+
+
+def _open_pi_log_terminal(client: paramiko.SSHClient) -> bool:
+    """Open one lxterminal tailing the script log — does not start or restart the script."""
+    if _cache_terminal_open(client):
+        return False
+    home, _, _, log = _pi_paths()
+    if not gui_session_available(client, home):
+        return False
+    viewer_body = (
+        "#!/bin/bash\n"
+        f"touch {shlex.quote(log)}\n"
+        f"tail -n 80 -f {shlex.quote(log)}\n"
+        "exec bash\n"
+    )
+    write_launcher(client, PI_CACHE_LOG_VIEWER, viewer_body)
+    start_lxterminal(
+        client,
+        home=home,
+        title=PI_CACHE_AWARE_TERMINAL_TITLE,
+        launcher_path=PI_CACHE_LOG_VIEWER,
+        label="cache_aware_log",
+    )
+    _log(f"Opened Pi log terminal — tailing {log}")
+    return True
+
+
+def _start_in_pi_terminal(client: paramiko.SSHClient) -> str:
+    """Open lxterminal on the Pi running cache_aware_offloading.py. Returns session id."""
+    if _cache_terminal_open(client):
+        return "existing"
+    home, body = _launcher_body()
+    _, _, _, log = _pi_paths()
+    if not gui_session_available(client, home):
         raise RuntimeError(
-            f"Failed to open cache-aware terminal on Pi (exit {exit_status})"
-            + (f": {err}" if err else "")
+            "Pi desktop session not available (no Wayland/X11). "
+            "Log in via RealVNC or HDMI so lxterminal can open for cache_aware_offloading.py."
         )
-    _log(f"Opened Pi terminal — running {script_name} (log {log})")
+    write_launcher(client, PI_CACHE_LAUNCHER, body)
+    used = start_lxterminal(
+        client,
+        home=home,
+        title=PI_CACHE_AWARE_TERMINAL_TITLE,
+        launcher_path=PI_CACHE_LAUNCHER,
+        label="cache_aware_offloading",
+    )
+    _log(f"Opened Pi terminal ({used}) — running {_script_name()} (log {log})")
+    return used
+
+
+def _script_is_running(client: paramiko.SSHClient) -> bool:
+    """True when cache_aware_offloading.py is running on the Pi."""
+    name = re.escape(_script_name())
+    probe_cmd = (
+        f"( pgrep -af '{name}' 2>/dev/null | grep -v pgrep | grep -q . && echo RUNNING=yes ) "
+        f"|| ( pgrep -f '[p]ython3?.*{name}' >/dev/null 2>&1 && echo RUNNING=yes ) "
+        f"|| ( pgrep -f '{name}' >/dev/null 2>&1 && echo RUNNING=yes ) "
+        f"|| echo RUNNING=no"
+    )
+    _, stdout, _ = client.exec_command(probe_cmd, timeout=8)
+    return b"RUNNING=yes" in stdout.read()
+
+
+def _mqtt_embedding_ready() -> bool:
+    return bool(getattr(mqtt_service, "cache_aware_embedding_ready", False))
+
+
+def _embedding_detection_ready(client: paramiko.SSHClient, *, running: bool) -> bool:
+    if not running:
+        return False
+    if _log_has_embedding_ready(client):
+        return True
+    return _mqtt_embedding_ready()
+
+
+def _log_has_embedding_ready(client: paramiko.SSHClient) -> bool:
+    """True when the Pi log file contains the bottle text-embedding ready line."""
+    _, _, _, log = _pi_paths()
+    log_q = shlex.quote(log)
+    snippet = shlex.quote(CACHE_SCRIPT_EMBEDDING_READY_SNIPPET)
+    primary = (
+        f"test -f {log_q} && grep -Fq {snippet} {log_q} 2>/dev/null "
+        f"&& echo READY=yes || echo READY=no"
+    )
+    _, stdout, _ = client.exec_command(primary, timeout=8)
+    if b"READY=yes" in stdout.read():
+        return True
+    # Fallback: line may include a different @ N dims suffix than the configured snippet.
+    fallback = (
+        f"test -f {log_q} && "
+        f"tail -n 400 {log_q} 2>/dev/null | "
+        f"grep -a -F '[DETECT] Text embedding ready' | grep -a -F 'water bottle' | "
+        f"grep -q . && echo READY=yes || echo READY=no"
+    )
+    _, stdout2, _ = client.exec_command(fallback, timeout=8)
+    return b"READY=yes" in stdout2.read()
 
 
 def _probe_on_pi(client: paramiko.SSHClient, host: str) -> dict:
-    token = re.escape(_script_name())
-    probe_cmd = (
-        f"( pgrep -f '[p]ython3?.*{token}' >/dev/null 2>&1 "
-        f"|| pgrep -f '{token}' >/dev/null 2>&1 ) && echo RUNNING=yes || echo RUNNING=no"
-    )
-    _, stdout, _ = client.exec_command(probe_cmd, timeout=8)
-    raw = stdout.read().decode(errors="replace")
-    running = "RUNNING=yes" in raw
-    return {"running": running, "host": host}
+    running = _script_is_running(client)
+    detection_ready = _embedding_detection_ready(client, running=running)
+    return _probe_meta(host, running=running, detection_ready=detection_ready)
 
 
 def _invalidate_probe_cache() -> None:
@@ -193,10 +296,13 @@ def probe_cache_aware_script(*, force: bool = False) -> dict:
     ):
         return _probe_cache["result"]
 
-    result: dict = {"running": False, "host": host}
+    result: dict = _probe_meta(host, running=False)
     try:
         client = _ssh_client(host)
         result = _probe_on_pi(client, host)
+        cached_mode = (_probe_cache.get("result") or {}).get("launch_mode")
+        if result.get("running") and cached_mode:
+            result["launch_mode"] = cached_mode
         client.close()
     except Exception:
         pass
@@ -215,27 +321,63 @@ def _wait_until_running(client: paramiko.SSHClient, host: str) -> bool:
 
 
 def start_cache_aware_script(*, wait: bool = True) -> dict:
-    """SSH into the Pi, open terminal running cache_aware_offloading.py."""
+    """SSH into the Pi, open terminal running cache_aware_offloading.py (one terminal per call)."""
     host = _resolved_host()
     script_name = _script_name()
     _invalidate_probe_cache()
     client = _ssh_client(host)
+    home = _pi_home()
 
     existing = _probe_on_pi(client, host)
     if existing.get("running"):
+        if gui_session_available(client, home) and not _cache_terminal_open(client):
+            _open_pi_log_terminal(client)
+        if _cache_terminal_open(client):
+            existing["launch_mode"] = "terminal"
         client.close()
         _probe_cache["at"] = time.monotonic()
         _probe_cache["result"] = existing
         _log(f"Cache-aware script already running — {script_name}")
         return existing
 
+    if _cache_terminal_open(client):
+        running = (
+            _wait_until_running(client, host)
+            if wait
+            else _script_is_running(client)
+        )
+        detection_ready = _embedding_detection_ready(client, running=bool(running))
+        probe = _probe_meta(
+            host,
+            running=bool(running),
+            launch_mode="terminal",
+            detection_ready=detection_ready,
+        )
+        client.close()
+        _probe_cache["at"] = time.monotonic()
+        _probe_cache["result"] = probe
+        if not running:
+            _log(
+                f"Cache-aware terminal open — waiting for {script_name} (no second terminal opened)",
+                level="warning",
+            )
+        return probe
+
     _, stdout, _ = client.exec_command(_close_terminal_cmd(sleep_sec=0.5), timeout=10)
     stdout.channel.recv_exit_status()
-    _open_terminal(client)
+    mqtt_service.clear_cache_aware_ready()
+    _start_in_pi_terminal(client)
+    launch_mode = "terminal"
     time.sleep(1.0)
 
-    running = _wait_until_running(client, host) if wait else _probe_on_pi(client, host).get("running", False)
-    probe = {"running": bool(running), "host": host}
+    running = _wait_until_running(client, host) if wait else _script_is_running(client)
+    detection_ready = _embedding_detection_ready(client, running=bool(running))
+    probe = _probe_meta(
+        host,
+        running=bool(running),
+        launch_mode=launch_mode,
+        detection_ready=detection_ready,
+    )
     client.close()
     _probe_cache["at"] = time.monotonic()
     _probe_cache["result"] = probe
@@ -244,8 +386,8 @@ def start_cache_aware_script(*, wait: bool = True) -> dict:
         _log(f"Cache-aware script started — {script_name} running on Pi")
     else:
         _log(
-            f"Cache-aware script launch requested — {script_name} not detected within "
-            f"{CACHE_SCRIPT_START_TIMEOUT_SEC:.0f}s",
+            f"Cache-aware script launch attempted — {script_name} not detected within "
+            f"{CACHE_SCRIPT_START_TIMEOUT_SEC:.0f}s (no auto-retry; switch mode to retry)",
             level="warning",
         )
     return probe
@@ -256,6 +398,7 @@ def stop_cache_aware_script() -> dict:
     host = _resolved_host()
     script_name = _script_name()
     _invalidate_probe_cache()
+    mqtt_service.clear_cache_aware_ready()
     client = _ssh_client(host)
     _, stdout, _ = client.exec_command(_close_terminal_cmd(), timeout=10)
     stdout.channel.recv_exit_status()

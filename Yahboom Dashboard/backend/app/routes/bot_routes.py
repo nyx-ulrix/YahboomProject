@@ -80,7 +80,7 @@ def send_command():
         if PUBLISH_TIMEOUT > 0:
             result.wait_for_publish(timeout=PUBLISH_TIMEOUT)
         latency = (time.time() - start_time) * 1000
-        mqtt_service.log_event("info", f"MQTT -> {TOPIC}: {command}")
+        mqtt_service.log_event("info", f"MQTT -> {TOPIC}: {command}", tag=TOPIC)
         try:
             from slam_service import slam_service
             slam_service.slam.apply_command(command)
@@ -97,7 +97,7 @@ def send_command():
 
     except Exception as e:
         mqtt_service.connected = False
-        mqtt_service.log_event('error', f"Publish failed: {str(e)}")
+        mqtt_service.log_event('error', f"Publish failed: {str(e)}", tag=TOPIC)
         return jsonify({
             "status": "error",
             "command": command,

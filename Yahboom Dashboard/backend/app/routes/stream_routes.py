@@ -17,6 +17,7 @@ from pathlib import PurePosixPath
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 import paramiko
 from app.services.mqtt_service import mqtt_service
+from app.services.pi_remote_launch import start_interactive_or_headless
 from app.services.video_relay import video_relay
 from config import (
     DEFAULT_BROKER_IP,
@@ -74,23 +75,19 @@ def _pi_webrtc_paths() -> tuple[str, str, str, str]:
 
 
 PI_WEBRTC_LAUNCHER = "/tmp/yahboom_webrtc.sh"
+PI_WEBRTC_HEADLESS_LAUNCHER = "/tmp/yahboom_webrtc_headless.sh"
 PI_WEBRTC_TERMINAL_TITLE = "WebRTC Server"
 
 
-def _pi_terminal_start_webrtc(host: str) -> None:
+def _pi_start_webrtc(host: str) -> str:
     """
-    Open a terminal window on the Pi desktop and run:
-      source ~/vit_env/bin/activate
-      python3 webrtc_server.py
-
-    Uses two short SSH sessions (write launcher, open terminal) so Windows
-    Paramiko does not EINVAL on a long-lived channel.
+    Start webrtc_server.py on the Pi (lxterminal when X is up, else headless).
+    Returns 'terminal' or 'headless'.
     """
     home, workdir, script, log = _pi_webrtc_paths()
     venv_activate = _expand_pi_path(PI_VIDEO_VENV, home)
-    launcher = PI_WEBRTC_LAUNCHER
 
-    launcher_body = (
+    terminal_body = (
         "#!/bin/bash\n"
         f"cd {shlex.quote(workdir)}\n"
         f"truncate -s 0 {shlex.quote(log)} 2>/dev/null\n"
@@ -98,40 +95,32 @@ def _pi_terminal_start_webrtc(host: str) -> None:
         f"env PYTHONUNBUFFERED=1 python3 {shlex.quote(script)} 2>&1 | tee -a {shlex.quote(log)}\n"
         "exec bash\n"
     )
-    write_cmd = (
-        f"cat > {shlex.quote(launcher)} << 'YAHBOOM_EOF'\n"
-        f"{launcher_body}"
-        "YAHBOOM_EOF\n"
-        f"chmod +x {shlex.quote(launcher)}"
+    headless_body = (
+        "#!/bin/bash\n"
+        f"cd {shlex.quote(workdir)}\n"
+        f"source {shlex.quote(venv_activate)}\n"
+        f"exec env PYTHONUNBUFFERED=1 python3 {shlex.quote(script)}\n"
     )
 
-    def write_launcher(client: paramiko.SSHClient) -> None:
-        code, _, err = _ssh_exec(client, write_cmd, timeout=10)
-        if code != 0:
-            err_text = err.decode(errors="replace").strip()
-            raise RuntimeError(
-                f"Failed to write launcher script on Pi{': ' + err_text if err_text else ''}"
-            )
+    def run(client: paramiko.SSHClient) -> str:
+        return start_interactive_or_headless(
+            client,
+            home=home,
+            title=PI_WEBRTC_TERMINAL_TITLE,
+            launcher_path=PI_WEBRTC_LAUNCHER,
+            headless_launcher_path=PI_WEBRTC_HEADLESS_LAUNCHER,
+            terminal_launcher_body=terminal_body,
+            headless_launcher_body=headless_body,
+            log_path=log,
+            label="webrtc_server",
+        )
 
-    xauth = home + "/.Xauthority"
-    open_terminal_cmd = (
-        f"DISPLAY=:0 XAUTHORITY={shlex.quote(xauth)} "
-        f"nohup {PI_TERMINAL} -t {shlex.quote(PI_WEBRTC_TERMINAL_TITLE)} -e {shlex.quote(launcher)} "
-        f"</dev/null >/dev/null 2>&1 & echo OPENED"
-    )
-
-    def open_terminal(client: paramiko.SSHClient) -> None:
-        code, out, err = _ssh_exec(client, open_terminal_cmd, timeout=10)
-        if code != 0 or b"OPENED" not in out:
-            err_text = err.decode(errors="replace").strip()
-            raise RuntimeError(
-                f"Failed to open terminal on Pi (exit {code})"
-                + (f": {err_text}" if err_text else "")
-            )
-
-    _with_ssh(host, write_launcher)
-    _with_ssh(host, open_terminal)
-    _video_debug(f"Opened Pi terminal — running webrtc_server.py (log {log})")
+    mode = _with_ssh(host, run)
+    if mode == "headless":
+        _video_debug(f"Started headless — webrtc_server.py (log {log})")
+    else:
+        _video_debug(f"Opened Pi terminal — running webrtc_server.py (log {log})")
+    return mode
 
 
 def _ssh_client(host: str) -> paramiko.SSHClient:
@@ -303,7 +292,7 @@ def _wait_for_dashboard_link(host: str, timeout: float | None = None) -> str | N
 def _video_debug(message: str, level: str = "info") -> None:
     """Print to Flask console and append to the shared event log."""
     print(f"[video] {message}", flush=True)
-    mqtt_service.log_event(level, message)
+    mqtt_service.log_event(level, message, tag="video")
 
 
 def probe_video_stream(*, force: bool = False) -> dict:
@@ -490,8 +479,8 @@ def run_start_stream() -> tuple[dict, int]:
                 timeout=10,
             ),
         )
-        _pi_terminal_start_webrtc(host)
-        terminal_opened = True
+        launch_mode = _pi_start_webrtc(host)
+        terminal_opened = launch_mode == "terminal"
         _mark_server_present(host)
 
         threading.Thread(
@@ -501,15 +490,23 @@ def run_start_stream() -> tuple[dict, int]:
             name="stream-start",
         ).start()
 
-        return {
+        _, _, _, log_path = _pi_webrtc_paths()
+        payload: dict = {
             "status": "stream started",
             "host": host,
             "video_url": mqtt_service.video_stream_url,
             "upstream_url": None,
             "running": False,
             "server_present": True,
-            "terminal_opened": True,
-        }, 200
+            "launch_mode": launch_mode,
+            "terminal_opened": terminal_opened,
+        }
+        if launch_mode == "headless":
+            payload["message"] = (
+                f"Pi has no desktop session — webrtc_server.py started in background "
+                f"(log {log_path})"
+            )
+        return payload, 200
     except Exception as exc:
         if terminal_opened:
             _mark_server_present(host)
@@ -520,7 +517,7 @@ def run_start_stream() -> tuple[dict, int]:
                 name="stream-start",
             ).start()
             _video_debug(
-                "Camera server terminal opened — stream may still be starting",
+                "Camera server launch completed — stream may still be starting",
                 level="warning",
             )
             return {
@@ -530,6 +527,7 @@ def run_start_stream() -> tuple[dict, int]:
                 "upstream_url": mqtt_service.video_upstream_url,
                 "running": False,
                 "server_present": True,
+                "launch_mode": "terminal",
                 "terminal_opened": True,
             }, 200
         return {
@@ -570,6 +568,7 @@ def run_stop_stream() -> tuple[dict, int]:
                 "pkill -f 'python3?.*webrtc_server\\.py' 2>/dev/null; "
                 "pkill -f 'webrtc_server\\.py' 2>/dev/null; "
                 f"pkill -f {shlex.quote(PI_WEBRTC_LAUNCHER)} 2>/dev/null; "
+                f"pkill -f {shlex.quote(PI_WEBRTC_HEADLESS_LAUNCHER)} 2>/dev/null; "
                 f"pkill -f {shlex.quote(PI_WEBRTC_TERMINAL_TITLE)} 2>/dev/null; "
                 "sleep 0.3; true",
                 timeout=10,

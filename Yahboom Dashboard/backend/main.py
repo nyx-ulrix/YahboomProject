@@ -50,9 +50,24 @@ def _ensure_dependencies() -> None:
 
 _ensure_dependencies()
 
+import socket
+
 from app import create_app
 from config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG
 
+
+def _port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
 if __name__ == "__main__":
+    if _port_in_use(FLASK_PORT):
+        print(
+            f"Port {FLASK_PORT} is already in use — another backend is still running.\n"
+            "Stop the other Dashboard: Backend terminal, then start again.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     app = create_app()
     app.run(host=FLASK_HOST, port=FLASK_PORT, debug=FLASK_DEBUG, threaded=True)

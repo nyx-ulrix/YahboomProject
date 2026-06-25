@@ -787,6 +787,7 @@ class VITService:
                 ms.log_event(
                     "warning",
                     f"MQTT broker not connected — skipped {_COMMAND_TOPIC}: {command}",
+                    tag=_COMMAND_TOPIC,
                 )
                 return
 
@@ -794,10 +795,10 @@ class VITService:
             result = ms.mqtt_client.publish(_COMMAND_TOPIC, command)
             if PUBLISH_TIMEOUT > 0:
                 result.wait_for_publish(timeout=PUBLISH_TIMEOUT)
-            ms.log_event("info", f"MQTT -> {_COMMAND_TOPIC}: {command}")
+            ms.log_event("info", f"MQTT -> {_COMMAND_TOPIC}: {command}", tag=_COMMAND_TOPIC)
         except Exception as exc:
             ms.connected = False
-            ms.log_event("error", f"Publish failed: {exc}")
+            ms.log_event("error", f"Publish failed: {exc}", tag=_COMMAND_TOPIC)
 
     def _stop_embedding_command_loop(self) -> None:
         self._embed_cmd_stop.set()
