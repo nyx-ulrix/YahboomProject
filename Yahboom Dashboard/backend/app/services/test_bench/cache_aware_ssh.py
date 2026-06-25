@@ -145,6 +145,8 @@ def _ssh_client(host: str) -> paramiko.SSHClient:
 
 
 def _log(message: str, level: str = "info") -> None:
+    if level not in ("warning", "error"):
+        return
     print(f"[cache-aware] {message}", flush=True)
     mqtt_service.log_event(level, message, tag="cache-aware")
 
@@ -200,7 +202,6 @@ def _open_pi_log_terminal(client: paramiko.SSHClient) -> bool:
         launcher_path=PI_CACHE_LOG_VIEWER,
         label="cache_aware_log",
     )
-    _log(f"Opened Pi log terminal — tailing {log}")
     return True
 
 
@@ -209,7 +210,6 @@ def _start_in_pi_terminal(client: paramiko.SSHClient) -> str:
     if _cache_terminal_open(client):
         return "existing"
     home, body = _launcher_body()
-    _, _, _, log = _pi_paths()
     if not gui_session_available(client, home):
         raise RuntimeError(
             "Pi desktop session not available (no Wayland/X11). "
@@ -223,7 +223,6 @@ def _start_in_pi_terminal(client: paramiko.SSHClient) -> str:
         launcher_path=PI_CACHE_LAUNCHER,
         label="cache_aware_offloading",
     )
-    _log(f"Opened Pi terminal ({used}) — running {_script_name()} (log {log})")
     return used
 
 
@@ -337,7 +336,6 @@ def start_cache_aware_script(*, wait: bool = True) -> dict:
         client.close()
         _probe_cache["at"] = time.monotonic()
         _probe_cache["result"] = existing
-        _log(f"Cache-aware script already running — {script_name}")
         return existing
 
     if _cache_terminal_open(client):
@@ -358,7 +356,7 @@ def start_cache_aware_script(*, wait: bool = True) -> dict:
         _probe_cache["result"] = probe
         if not running:
             _log(
-                f"Cache-aware terminal open — waiting for {script_name} (no second terminal opened)",
+                f"Cache-aware terminal open — waiting for {script_name}",
                 level="warning",
             )
         return probe
@@ -381,13 +379,9 @@ def start_cache_aware_script(*, wait: bool = True) -> dict:
     client.close()
     _probe_cache["at"] = time.monotonic()
     _probe_cache["result"] = probe
-
-    if running:
-        _log(f"Cache-aware script started — {script_name} running on Pi")
-    else:
+    if not running:
         _log(
-            f"Cache-aware script launch attempted — {script_name} not detected within "
-            f"{CACHE_SCRIPT_START_TIMEOUT_SEC:.0f}s (no auto-retry; switch mode to retry)",
+            f"Cache-aware script not detected within {CACHE_SCRIPT_START_TIMEOUT_SEC:.0f}s",
             level="warning",
         )
     return probe
@@ -396,7 +390,6 @@ def start_cache_aware_script(*, wait: bool = True) -> dict:
 def stop_cache_aware_script() -> dict:
     """SSH into the Pi, kill cache_aware_offloading.py and close its terminal."""
     host = _resolved_host()
-    script_name = _script_name()
     _invalidate_probe_cache()
     mqtt_service.clear_cache_aware_ready()
     client = _ssh_client(host)
@@ -406,5 +399,4 @@ def stop_cache_aware_script() -> dict:
     client.close()
     _probe_cache["at"] = time.monotonic()
     _probe_cache["result"] = probe
-    _log(f"Cache-aware script stopped — {script_name} killed and terminal closed on Pi")
     return probe

@@ -13,7 +13,7 @@ Web dashboard for controlling and monitoring a Yahboom robot. The frontend is a 
 npm run setup
 ```
 
-This installs frontend dependencies and sets up the Python backend.
+This installs frontend dependencies and sets up the Python backend (`backend/.venv`).
 
 ## Run locally
 
@@ -31,12 +31,21 @@ npm run dev
 
 The frontend proxies `/api/*` to the backend. Open the URL shown in the Vite terminal.
 
+**Important:** Run only one backend instance. If port 3000 is already in use, `main.py` exits with an error — stop the other terminal first.
+
 ## Environment
 
 A `.env` file in the project root configures both frontend and backend. Common variables:
 
-- `VITE_API_URL` — backend URL for the Vite proxy (default `http://localhost:3000`)
-- `MQTT_BROKER_IP` / `FLASK_PORT` — broker and Flask listen port
+| Variable | Purpose |
+|----------|---------|
+| `VITE_API_URL` | Backend URL for the Vite proxy (default `http://localhost:3000`) |
+| `MQTT_BROKER_IP` | Raspberry Pi MQTT broker |
+| `FLASK_PORT` | Flask listen port (default `3000`) |
+| `PI_CACHE_AWARE_SCRIPT_PATH` | Path on Pi to `cache_aware_offloading.py` |
+| `PI_CACHE_AWARE_LOG` | Pi log file for cache-aware script (default `/tmp/yahboom_cache_aware.log`) |
+| `CACHE_SCRIPT_EMBEDDING_READY_SNIPPET` | Log substring that unlocks START in cache/hybrid mode |
+| `MQTT_CACHE_AWARE_READY_TOPIC` | Retained MQTT topic for embedding-ready (default `yahboom/cache_aware/ready`) |
 
 ## Build
 
@@ -51,87 +60,95 @@ Widgets are added from the picker (**P**). Key control widgets:
 | Widget | Purpose |
 |--------|---------|
 | **ROS Auto Button** | Sends `auto_on` / `auto_off` to the Pi (`toggleRosAuto()`). Label: **EXPLORE** / **STOP EXPLORING**. |
-| **Stop-Time Test Bench** | Measures stop time after explore. Cache-aware or edge-aware (VIT stop label) modes; Pi timestamps; CSV export. |
+| **Stop-Time Test Bench** | Measures stop time after explore. Three stop modes; Pi timestamps; CSV export. |
 | **Emergency Stop**, **Movement Joystick**, **Camera Joystick**, **System Status**, **Local LiDAR Grid**, **Persistent SLAM Map**, **VIT Scene Decoder**, **Event Log**, **Video Feed** | Standard monitoring and control. |
 
 ### Stop-Time Test Bench
 
-Located in `src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode and edge-aware e-stop logic live in `src/lib/edgeAwareStopLabelEstop.ts`; VIT polling runs via `useEdgeAwareStopLabelEstop()` in `src/app/hooks.ts`.
+Located in `src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode logic: `backend/app/routes/test_bench_routes.py`, `backend/app/services/vit/edge_aware_estop.py`, `backend/app/services/test_bench/cache_aware_ssh.py`. Edge-aware bottle stop on the client: `src/lib/edgeAwareStopLabelEstop.ts` via `useEdgeAwareStopLabelEstop()` in `src/app/hooks.ts`.
 
 **Purpose:** Run repeated stop-time experiments, compare stop modes, and export results as CSV.
 
-**Stop modes** (toggle on the widget; persisted on the backend via `GET`/`POST /api/test_bench/stop_mode`):
+#### Stop modes (3-position slider)
 
-| Mode | Label in UI | Behaviour |
-|------|-------------|-----------|
-| `cache_aware_offloading` | Cache aware stop | Default. Stop is detected from Pi drive-status only (same as before edge-aware was added). |
-| `edge_aware` | Edge aware stop | VIT scene decoder sends `stop` when the configured **stop label** is detected (see below). Pi drive-status still ends the run and records stop time. |
+Default: **Edge** (right). Preference is saved in browser `localStorage` (`yahboom_stop_bench_mode`).
 
-**How a run works:**
+| Mode | API value | Behaviour |
+|------|-----------|-----------|
+| **Cache** (left) | `cache_aware_offloading` | Pi runs `cache_aware_offloading.py` in lxterminal. Bottle stop is detected on the Pi (CLIP embeddings via MQTT). Dashboard does **not** send `auto_off` on stop. |
+| **Hybrid** (center) | `hybrid` | Pi script **and** dashboard VIT bottle stop are both armed. **First trigger wins**; run records which path stopped (`Pi script · bottle` vs `Dashboard VIT · bottle`). |
+| **Edge** (right, default) | `edge_aware` | Dashboard VIT scene decoder sends `auto_off` + `stop` when the **bottle** label is detected (≥ 40% after START). Pi cache script is **stopped** when this mode is selected. |
 
-1. User selects **network type** and **stop mode**, then presses **START** — same action as **EXPLORE** (`toggleRosAuto()` → `auto_on` on the Pi). START is disabled while a session is active or while e-stop is latched.
-2. **Command time** — latest Raspberry Pi clock (`time.time()` from MQTT) is captured when START is pressed.
-3. **Movement start** — official run start is when the Pi publishes a movement drive-status (e.g. `auto_creep_forward`, `moving_forward`, `auto_forward_clear`) on `yahboom/drive/status`.
-4. **Stop** — run ends automatically when the Pi reports a halt (`stopped`, `auto_disabled`, `estop_active`, etc.), or when e-stop is engaged (manual, backend, or grid). Edge-aware VIT sends `stop`. There is no manual STOP button on the widget.
-5. User enters **stopping distance** (m) per row after each run.
-6. **Network type** and **stop mode** are stored per run and included in CSV export.
+Changing to Cache or Hybrid starts the Pi script once (one lxterminal per slider change). Switching between Cache and Hybrid does **not** restart the script. Switching to Edge kills the Pi script and closes its terminal.
 
-**Edge-aware stop label (VIT):**
+#### START button gating
 
-- Trigger class is `bottle` (`EDGE_AWARE_STOP_LABEL` in `edgeAwareStopLabelEstop.ts`, matching `backend/app/services/vit/labels.json`).
-- The dashboard polls `GET /api/vit/status` every 500 ms (`useEdgeAwareStopLabelEstop`). When any decoder row for that label is **≥ 40%** confidence on a **new decode after START**, it sends `stop` via MQTT.
-- Stop-label soft-stop **only runs after START** (`setStopLabelEstopArmed(true, …)` seeds the current decode so pre-START detections are ignored). Toggling edge-aware mode on without pressing START does **not** send stop commands.
-- Requires VIT encoder and video pipeline running (see VIT Scene Decoder widget / top bar).
+START is disabled when:
 
-**Timing:**
+- A test session is already active
+- E-stop is latched
+- Stop mode is switching (`SCRIPT…` pill)
+- **Cache or Hybrid:** Pi script is not running, or bottle embedding is not ready
 
-- **Recorded runs** — all saved timestamps (`commandSentAt`, `startedAt`, `stoppedAt`, durations) use the **Pi clock** from MQTT (`robotTimestamp` / `timestamp` on drive-status and grid payloads), sampled at the moment each event is detected. The browser clock is not used for stored results.
-- **Live timer** — one session poll loop (~100 ms) handles movement detection, stop detection, and the on-screen counter. Between Pi MQTT messages the display extrapolates from the last Pi sample (`lastPiTimestamp + wall-clock delta`) so the counter keeps ticking; extrapolation is display-only and is not written to CSV.
+For Cache/Hybrid, START unlocks when the backend reports both:
 
-**Session poll APIs:** `GET /api/drive_status`, `GET /api/grid_status`, `GET /api/status` (backend e-stop), during an active run.
+- `cache_script_running: true` — `cache_aware_offloading.py` process on the Pi
+- `cache_script_detection_ready: true` — `[DETECT] Text embedding ready: 'a water bottle'…` in the Pi log **or** retained MQTT on `yahboom/cache_aware/ready`
 
-**CSV columns:** Run, Command Time (Pi), Movement Start (Pi), Stop Time (Pi), Command-to-Move (ms), Stop Duration (ms), Stop Time (s), Stopping Distance (m), Network Type, **Stop Mode**.
+VIT encoder and video must be running so the Pi script receives embeddings. Status pill shows **WARMUP** while the script is up but embedding is not ready yet.
 
-**Backend:** `backend/app/routes/test_bench_routes.py` — stop-mode selection; `backend/app/services/vit/edge_aware_estop.py` — server-side mode flag (bottle e-stop is handled on the dashboard client).
+#### How a run works
+
+1. Select **network type** and **stop mode**, then press **START** — sends `auto_on` (same as **EXPLORE**).
+2. **Command time** — Pi clock when START is pressed.
+3. **Movement start** — when the Pi publishes a movement drive-status on `yahboom/drive/status`.
+4. **Stop** — Pi drive-status halt, e-stop, or bottle detection (Pi script and/or dashboard VIT per mode).
+5. Enter **stopping distance** (m) per row after each run.
+
+#### Edge-aware stop label (dashboard VIT)
+
+- Trigger class: `bottle` (`EDGE_AWARE_STOP_LABEL` in `edgeAwareStopLabelEstop.ts`).
+- Polls `GET /api/vit/status` every 500 ms. On a **new** decode after START with ≥ 40% confidence, sends `auto_off` + `stop`.
+- Armed only after START (pre-START detections are ignored).
+
+#### Timing and CSV
+
+- Stored timestamps use the **Pi clock** from MQTT, not the browser.
+- Live timer extrapolates between Pi samples (display only).
+- **CSV columns:** Run, Command Time (Pi), Movement Start (Pi), Stop Time (Pi), Command-to-Move (ms), Stop Duration (ms), Stop Time (s), Stopping Distance (m), Network Type, Stop Mode, Stopped by.
 
 ### Autonomous mode (Pi only)
 
-The dashboard no longer runs client-side explore autopilot. Previously, a **CLIENT AUTO** widget and `useClientAutoPilot()` sent movement commands from the browser based on LiDAR grid data. That has been **removed**.
+Autonomous driving is **only** via the Pi: press **EXPLORE** or send `auto_on` to `yahboom/cmd`. The Pi’s `auto_movement_logic()` in `mqtt_ros_node.py` handles obstacle avoidance.
 
-Autonomous driving is **only** via the Pi: press **EXPLORE** (ROS Auto Button) or send `auto_on` to `yahboom/cmd`. The Pi’s `auto_movement_logic()` in `mqtt_ros_node.py` handles obstacle avoidance.
-
-**Removed code (for reference):**
-
-- Widget: `auto_movement_button_widget` (CLIENT AUTO)
-- Hook: `useClientAutoPilot()` in `src/app/hooks.ts`
-- Function: `toggleClientExplore()` in `src/lib/Controls.tsx`
-- Store field: `exploreActive`
+Client-side explore autopilot (`CLIENT AUTO` widget, `useClientAutoPilot()`, `toggleClientExplore()`) has been removed.
 
 ### Backend: drive status API
 
-The Flask backend subscribes to `yahboom/drive/status` and exposes:
-
-- **`GET /api/drive_status`** — latest JSON from the Pi: `status`, `robotTimestamp` (Pi `time.time()` seconds), `auto_mode`, `estop`, etc.
-
-Configured via `MQTT_DRIVE_STATUS_TOPIC` in `backend/config.py` (default `yahboom/drive/status`). Implemented in `backend/app/services/mqtt_service.py` (`_parse_drive_message`, `get_drive_status`).
-
-Grid MQTT payloads also pass through `robotTimestamp` and `auto_mode` on **`GET /api/grid_status`**.
+- **`GET /api/drive_status`** — latest Pi drive JSON: `status`, `robotTimestamp`, `auto_mode`, `estop`, etc.
+- Topic: `yahboom/drive/status` (`MQTT_DRIVE_STATUS_TOPIC` in `config.py`).
 
 ### Backend: test bench API
 
-Stop-mode selection for the Stop-Time Test Bench:
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/test_bench/stop_mode` | Current mode and Pi script status. Use `?force=1` to bypass probe cache. |
+| `POST` | `/api/test_bench/stop_mode` | Body `{ "mode": "cache_aware_offloading" \| "hybrid" \| "edge_aware" }` — set mode and start/stop Pi script. |
 
-- **`GET /api/test_bench/stop_mode`** — returns `{ mode, edge_aware_enabled, min_confidence, cooldown_sec }`
-- **`POST /api/test_bench/stop_mode`** — body `{ "mode": "cache_aware_offloading" | "edge_aware" }`
+**GET response fields (cache/hybrid):**
 
-Implemented in `backend/app/routes/test_bench_routes.py` and `backend/app/services/vit/edge_aware_estop.py`. Edge-aware stop-label detection and `stop` are executed on the **dashboard client** (`edgeAwareStopLabelEstop.ts`); the backend stores which mode is active.
+- `mode`, `edge_aware_enabled`, `needs_pi_cache_script`
+- `cache_script_running`, `cache_script_detection_ready`
+- `cache_script_log`, `cache_script_launch_mode` (when applicable)
+
+Implemented in `backend/app/routes/test_bench_routes.py`, `backend/app/services/vit/edge_aware_estop.py`, `backend/app/services/test_bench/cache_aware_ssh.py`.
 
 ## Scripts
 
 | Script | Description |
 |--------|-------------|
 | `npm run dev` | Vite development server |
-| `npm run dev:backend` | Flask backend |
+| `npm run dev:backend` | Flask backend (`backend/.venv`) |
 | `npm run build` | Production frontend bundle |
 | `npm run setup` | Install frontend + backend deps |
 | `npm run setup:backend` | Backend setup only |

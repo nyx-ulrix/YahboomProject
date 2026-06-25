@@ -112,20 +112,3 @@ def set_stop_mode():
         payload["message"] = message
     code = 200 if cache_running or mode == STOP_MODE_EDGE else 503
     return jsonify(payload), code
-
-
-@test_bench_bp.route("/cache_script/ensure", methods=["POST"])
-def ensure_cache_script():
-    """Probe Pi cache script status — does not start or open terminals (use stop_mode POST)."""
-    if not edge_aware_estop.needs_pi_cache_script:
-        return jsonify({
-            "status": "ok",
-            "skipped": True,
-            **_stop_mode_payload(probe={}, cache_script_running=False),
-        })
-
-    probe = probe_cache_aware_script(force=True)
-    return jsonify({
-        "status": "ok",
-        **_stop_mode_payload(probe=probe),
-    }), 200
