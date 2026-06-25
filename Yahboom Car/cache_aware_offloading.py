@@ -1,4 +1,4 @@
-# detector.py
+# cache_aware_offloading.py
 # Runs on the Yahboom Pi 5 alongside webrtc_server.py
 # Subscribes to CLIP embeddings, compares against a text label,
 # and publishes a stop command when similarity exceeds threshold.
@@ -95,6 +95,7 @@ def compute_text_embedding(target_dims: int):
 
     print(f"[DETECT] Text embedding ready: '{DETECTION_LABEL}' @ {target_dims} dims")
 
+
     client = mqtt_client
     if client is not None:
         ready_payload = json.dumps({
@@ -103,7 +104,6 @@ def compute_text_embedding(target_dims: int):
             "dims": target_dims,
         })
         client.publish(TOPIC_READY, ready_payload, qos=1, retain=True)
-
 
 def get_text_embedding():
     with text_lock:
@@ -190,7 +190,9 @@ def on_message(client, userdata, msg):
                 _last_detection_time = now
 
                 # Publish stop command to mqtt_ros_node.py
-                client.publish(TOPIC_COMMAND, AUTO_OFF_COMMAND, STOP_COMMAND, qos=0)
+                result = client.publish(TOPIC_COMMAND, "stop", qos=1) 
+                result.wait_for_publish() # blocks until broker ACKs stop 
+                client.publish(TOPIC_COMMAND, "auto_off", qos=1)
 
                 # Publish detection event for logging / dashboard
                 detect_payload = json.dumps({
@@ -198,7 +200,7 @@ def on_message(client, userdata, msg):
                     "similarity": round(similarity, 4),
                     "threshold":  DETECTION_THRESHOLD,
                     "stop_command":    STOP_COMMAND,
-                    "auto_off_command": AUTO_OFF_COMMAND,
+                    "Auto_off_command": AUTO_OFF_COMMAND,
                     "dims":       embedding_dims,
                     "frame":      payload.get("frame", -1),
                     "timestamp":  now,
@@ -209,7 +211,7 @@ def on_message(client, userdata, msg):
                     f"[DETECT] *** WATER BOTTLE DETECTED *** "
                     f"similarity={similarity:.4f} | dims={embedding_dims} | "
                     f"frame={payload.get('frame', '?')} | "
-                    f"command='{STOP_COMMAND}' and '{AUTO_OFF_COMMAND}' sent to '{TOPIC_COMMAND}'"
+                    f"command='{STOP_COMMAND}' and '{AUTO_OFF_COMMAND}'sent to '{TOPIC_COMMAND}'"
                 )
 
             else:
