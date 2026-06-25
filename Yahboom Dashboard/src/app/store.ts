@@ -40,7 +40,7 @@ export interface LayoutStore {
   reset: (breakpoint?: LayoutBreakpoint) => void;
 }
 
-// Layout templates — switchable presets from the TopBar (VIT View is default).
+// Layout templates — switchable presets from the TopBar (Stop Test is default).
 
 /** VIT View (laptop) — decoder left, video center, controls right, event log bottom. */
 const VIT_VIEW_LAPTOP: LayoutItem[] = [
@@ -117,9 +117,9 @@ export interface LayoutTemplate {
 
 /** Registry of switchable layout templates (shown in the TopBar dropdown). */
 export const LAYOUT_TEMPLATES: LayoutTemplate[] = [
+  { id: 'stop_test', name: 'Stop Test', laptop: STOP_DISTANCCE_TEST_LAPTOP, ipad: STOP_DISTANCCE_TEST_IPAD },
   { id: 'vit_view',   name: 'VIT View',   laptop: VIT_VIEW_LAPTOP,   ipad: VIT_VIEW_IPAD },
   { id: 'lidar_view', name: 'LiDAR View', laptop: LIDAR_VIEW_LAPTOP, ipad: LIDAR_VIEW_IPAD },
-  { id: 'stop_test', name: 'Stop Test', laptop: STOP_DISTANCCE_TEST_LAPTOP, ipad: STOP_DISTANCCE_TEST_IPAD },
 ];
 
 /** Template applied to fresh dashboards — always one of the stored views. */
@@ -134,7 +134,7 @@ export const DEFAULT_TEMPLATE: LayoutTemplate =
 export const IPAD_DEFAULT_LAYOUT: LayoutItem[] = DEFAULT_TEMPLATE.ipad;
 export const LAPTOP_DEFAULT_LAYOUT: LayoutItem[] = DEFAULT_TEMPLATE.laptop;
 
-const LAYOUT_PERSIST_VERSION = 27;
+const LAYOUT_PERSIST_VERSION = 28;
 
 type PersistedLayoutState = Partial<LayoutStore> & { layout?: LayoutItem[] };
 
@@ -258,11 +258,13 @@ export const useLayoutStore = create<LayoutStore>()(
                 laptopLayout: defaultLayout,
                 activeWidgetIds: layoutWidgetIds(defaultLayout),
                 lockedIds: [],
+                activeTemplateId: DEFAULT_TEMPLATE_ID,
               }
             : {
                 ipadLayout: defaultLayout,
                 activeWidgetIds: layoutWidgetIds(defaultLayout),
                 lockedIds: [],
+                activeTemplateId: DEFAULT_TEMPLATE_ID,
               }
         );
       },
@@ -276,6 +278,22 @@ export const useLayoutStore = create<LayoutStore>()(
         }
 
         const old = persistedState as PersistedLayoutState;
+
+        // v28 — Stop Test is the default dashboard layout.
+        if (version < 28) {
+          const bp = initialBreakpoint();
+          const layout = bp === 'laptop' ? LAPTOP_DEFAULT_LAYOUT : IPAD_DEFAULT_LAYOUT;
+          return {
+            ...old,
+            laptopLayout: LAPTOP_DEFAULT_LAYOUT,
+            ipadLayout: IPAD_DEFAULT_LAYOUT,
+            activeTemplateId: DEFAULT_TEMPLATE_ID,
+            activeBreakpoint: bp,
+            activeWidgetIds: layoutWidgetIds(layout),
+            lockedIds: [],
+          } satisfies Partial<LayoutStore>;
+        }
+
         if (old.layout && !old.laptopLayout) {
           return {
             laptopLayout: LAPTOP_DEFAULT_LAYOUT,
@@ -386,9 +404,9 @@ export const useAuthStore = create<AuthStore>((set) => ({
   signOut: () => set({ user: null }),
 }));
 
-// View routing — dashboard, AI agent, and controller pages.
+// View routing — dashboard and controller pages.
 
-type View = 'dashboard' | 'ai_agent' | 'controller';
+type View = 'dashboard' | 'controller';
 
 export interface ViewStore {
   view: View;

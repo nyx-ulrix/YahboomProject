@@ -351,8 +351,7 @@ class VITService:
         self._last_status_at: str | None = None
         self._last_decode_error: str | None = None
 
-        # Pi-side robot_sender.py process (SSH start/stop via /api/vit/start_server).
-        self.vit_server_running = False
+        # webrtc_server.py on the Pi is started manually; stream_running comes from HTTP probe.
 
         labels = _load_labels()
         self._decoder = MobileClipDecoder(labels) if _ENABLE_MODEL else None
@@ -709,19 +708,28 @@ class VITService:
 
     def _encoder_live_locked(self) -> bool:
         """True when recent MQTT proves the encoder pipeline is producing data."""
-        try:
-            from app.services.mqtt_service import mqtt_service as ms
-            server_on = bool(ms.stream_running or self.vit_server_running)
-        except Exception:
-            server_on = bool(self.vit_server_running)
         for ts in (self._last_embedding_at, self._last_decode_at, self._last_status_at):
             age = _iso_age_ms(ts)
             if age is not None and age < _ENCODER_LIVE_MS:
                 return True
-        # Server running but between embedding bursts — avoid "server off" flicker.
+        try:
+            from app.services.mqtt_service import mqtt_service as ms
+            server_on = bool(ms.stream_running)
+        except Exception:
+            server_on = False
         if server_on and self._embeddings_received > 0:
             return True
         return False
+
+    def _stream_or_encoder_live(self) -> bool:
+        """True when video is up (HTTP probe) or MQTT shows recent encoder activity."""
+        try:
+            from app.services.mqtt_service import mqtt_service as ms
+            if ms.stream_running:
+                return True
+        except Exception:
+            pass
+        return self._encoder_live_locked()
 
     # ── Public API (used by Flask routes) ─────────────────────────────────────
 
@@ -750,7 +758,7 @@ class VITService:
                 "last_status_at": self._last_status_at,
                 "last_decode_error": self._sanitize_decode_error(self._last_decode_error),
             }
-        server_on = stream_on or self.vit_server_running
+        server_on = stream_on or encoder_live
         return {
             "connected": self._broker_link_up(),
             "broker_ip": self._broker_ip,
@@ -816,7 +824,7 @@ class VITService:
         """Re-publish embds1/2/3 every 3s until ack or server stop (first send is sync)."""
         try:
             while not self._embed_cmd_stop.wait(timeout=_EMBED_COMMAND_INTERVAL_SEC):
-                if not self.vit_server_running:
+                if not self._stream_or_encoder_live():
                     break
                 with self._lock:
                     if (

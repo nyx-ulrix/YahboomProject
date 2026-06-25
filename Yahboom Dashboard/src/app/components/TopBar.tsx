@@ -1,16 +1,14 @@
 // Pinned top bar: nav pills, theme toggle, settings, plus inline status row.
 import { useState } from 'react';
-import { Antenna, Check, Gamepad2, LayoutGrid, LayoutTemplate, Moon, Play, Radio, Settings, Square, Sun, Timer } from 'lucide-react';
-import { LAYOUT_TEMPLATES, useLayoutStore, useMetricsStore, usePickerStore, useSettingsStore, useViewStore } from '../store';
-import type { LayoutStore, SettingsStore, ViewStore } from '../store';
+import { Check, Gamepad2, LayoutGrid, LayoutTemplate, Moon, Radio, Sun, Timer } from 'lucide-react';
+import { LAYOUT_TEMPLATES, useLayoutStore, useMetricsStore, usePickerStore, useViewStore } from '../store';
+import type { LayoutStore, ViewStore } from '../store';
 import type { MetricsState } from '../types';
-import { usePiVitVideoServer } from '../hooks';
+import { RobotConnectionBar } from './RobotConnectionBar';
 
 export function TopBar({ darkMode, toggleDark }: { darkMode: boolean; toggleDark: () => void }) {
   const connectionStatus = useMetricsStore((s: MetricsState) => s.connectionStatus);
-  const networkMode = useMetricsStore((s: MetricsState) => s.networkMode);
   const latencyMs = useMetricsStore((s: MetricsState) => s.latencyMs);
-  const openSettings = useSettingsStore((s: SettingsStore) => s.setOpen);
   const togglePicker = usePickerStore((s) => s.toggle);
   const view = useViewStore((s: ViewStore) => s.view);
   const setView = useViewStore((s: ViewStore) => s.setView);
@@ -23,12 +21,10 @@ export function TopBar({ darkMode, toggleDark }: { darkMode: boolean; toggleDark
     // with it — letting the later-painted grid cover dropdowns like the layout
     // template menu. Stays below the z-50 modals (settings / widget picker).
     <div className="flex flex-col gap-3" style={{ position: 'relative', zIndex: 40 }}>
-      {/* Row 1: nav + utilities */}
       <div className="flex items-center gap-4">
-        <nav className="flex items-center gap-1">
+        <nav className="flex items-center gap-1 flex-wrap">
           {([
             { label: 'Dashboard', id: 'dashboard' as const },
-            { label: 'AI Agent', id: 'ai_agent' as const },
           ]).map(({ label, id }) => {
             const active = view === id;
             return (
@@ -61,11 +57,10 @@ export function TopBar({ darkMode, toggleDark }: { darkMode: boolean; toggleDark
             <Gamepad2 size={13} />
             Controller
           </button>
+          <RobotConnectionBar />
         </nav>
 
         <div className="flex-1" />
-
-        <PiVitVideoServerButton />
 
         <div className="flex items-center gap-2">
           <TemplateMenu />
@@ -85,14 +80,6 @@ export function TopBar({ darkMode, toggleDark }: { darkMode: boolean; toggleDark
           >
             {darkMode ? <Sun size={15} style={{ color: 'var(--accent-gold)' }} /> : <Moon size={15} style={{ color: 'var(--accent-purple)' }} />}
           </button>
-          <button
-            onClick={() => openSettings(true)}
-            className="w-9 h-9 rounded-xl flex items-center justify-center transition-all hover:scale-105"
-            style={{ background: 'var(--bg-surface)', border: '1px solid var(--stroke-subtle)' }}
-            title="Settings"
-          >
-            <Settings size={15} style={{ color: 'var(--text-secondary)' }} />
-          </button>
         </div>
       </div>
 
@@ -103,11 +90,6 @@ export function TopBar({ darkMode, toggleDark }: { darkMode: boolean; toggleDark
           <span style={{ color: 'var(--text-muted)' }}>Connection:</span>
           <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{connectionStatus}</span>
           <span className="w-1.5 h-1.5 rounded-full" style={{ background: connColor, boxShadow: `0 0 8px ${connColor}` }} />
-        </div>
-        <div className="flex items-center gap-1.5" style={{ fontSize: 12 }}>
-          <Antenna size={12} style={{ color: 'var(--accent-cyan)' }} />
-          <span style={{ color: 'var(--text-muted)' }}>Network:</span>
-          <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{networkMode ?? '--'}</span>
         </div>
         <div className="flex items-center gap-1.5" style={{ fontSize: 12 }}>
           <Timer size={12} style={{ color: 'var(--accent-cyan)' }} />
@@ -124,76 +106,6 @@ export function TopBar({ darkMode, toggleDark }: { darkMode: boolean; toggleDark
         </div>
       </div>
     </div>  
-  );
-}
-
-function PiVitVideoServerButton() {
-  const { brokerIp, isRunning, isBusy, startLocked, label, error, start, stop } = usePiVitVideoServer();
-  const green = 'var(--state-success)';
-  const red = 'var(--state-error)';
-  const muted = 'var(--text-muted)';
-  const disabled = !brokerIp || isBusy;
-  const busyStyle = isBusy;
-
-  const onPress = () => {
-    if (disabled) return;
-    if (isRunning) void stop();
-    else void start();
-  };
-
-  return (
-    <div className="flex flex-col items-end gap-0.5">
-      <button
-        type="button"
-        onPointerDown={(e) => {
-          if (disabled) {
-            e.preventDefault();
-            return;
-          }
-          // Block double-click before React re-renders disabled state.
-          if (!isRunning && startLocked) {
-            e.preventDefault();
-          }
-        }}
-        onClick={onPress}
-        disabled={disabled}
-        className="flex items-center gap-1.5 pill"
-        title={
-          !brokerIp
-            ? 'Connect to a robot in Settings first'
-            : isBusy
-              ? 'Waiting for video and VIT stream…'
-              : undefined
-        }
-        style={{
-          padding: '4px 12px',
-          fontSize: 11,
-          fontWeight: 700,
-          letterSpacing: '0.05em',
-          border: '1px solid',
-          cursor: disabled ? 'not-allowed' : 'pointer',
-          opacity: disabled ? 0.5 : 1,
-          background: busyStyle
-            ? 'rgba(148,163,184,0.12)'
-            : isRunning
-              ? 'rgba(244,63,94,0.15)'
-              : 'rgba(34,197,94,0.15)',
-          borderColor: busyStyle ? muted : isRunning ? red : green,
-          color: busyStyle ? muted : isRunning ? red : green,
-          transition: 'all 0.15s',
-        }}
-      >
-        {!isBusy && (isRunning
-          ? <Square size={11} fill="currentColor" />
-          : <Play size={11} fill="currentColor" />)}
-        {label}
-      </button>
-      {error && (
-        <span style={{ fontSize: 10, color: red, maxWidth: 280, textAlign: 'right' }}>
-          {error}
-        </span>
-      )}
-    </div>
   );
 }
 

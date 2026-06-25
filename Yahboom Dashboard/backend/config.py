@@ -21,17 +21,11 @@ FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "3000"))
 FLASK_DEBUG = os.getenv("FLASK_DEBUG", "false").lower() in ("true", "1", "yes")
 
-# Raspberry Pi SSH settings (used to start/stop webrtc_server.py remotely)
+# Raspberry Pi SSH settings (used for cache_aware_offloading.py on the test bench)
 PI_SSH_USER = os.getenv("PI_SSH_USER",          "pi")
 PI_SSH_PASSWORD = os.getenv("PI_SSH_PASSWORD",      "raspberry")
 # optional: path to private key file
 PI_SSH_KEY_PATH = os.getenv("PI_SSH_KEY_PATH",      "")
-PI_VIDEO_VENV = os.getenv("PI_VIDEO_VENV", "~/vit_env/bin/activate")
-PI_VIDEO_SERVER_PATH = os.getenv(
-    "PI_VIDEO_SERVER_PATH", "webrtc_server.py")
-# Pi-side log file (stdout/stderr via tee) — parsed for [DASHBOARD LINK] lines
-PI_VIDEO_SERVER_LOG = os.getenv(
-    "PI_VIDEO_SERVER_LOG", "/tmp/yahboom_video_server.log")
 VIDEO_SERVER_PORT = int(os.getenv("VIDEO_SERVER_PORT", "8080"))
 # WebRTC server prints a base URL; leave empty so /video_feed is not appended.
 VIDEO_FEED_PATH = os.getenv("VIDEO_FEED_PATH", "")
@@ -41,7 +35,6 @@ VIDEO_USE_MJPEG_RELAY = os.getenv("VIDEO_USE_MJPEG_RELAY", "false").lower() in (
 )
 # Clients load video from this backend route (hub); Pi URL is upstream only.
 PUBLIC_VIDEO_FEED_PATH = os.getenv("PUBLIC_VIDEO_FEED_PATH", "/api/video_feed")
-VIDEO_LINK_WAIT_SEC = int(os.getenv("VIDEO_LINK_WAIT_SEC", "15"))
 PROBE_CACHE_TTL_SEC = float(os.getenv("PROBE_CACHE_TTL_SEC", "4"))
 # Terminal emulator to open on the Pi's display (lxterminal for LXDE, xterm as fallback)
 PI_TERMINAL = os.getenv("PI_TERMINAL",          "lxterminal")
@@ -68,14 +61,8 @@ CAMERA_COMMANDS = {
 AUTO_COMMANDS = {"auto_on", "auto_off"}
 ESTOP_COMMANDS = {"estop_on", "estop_off"}
 
-# VIT encoder on the Pi (robot_sender.py) — separate SSH from the video server
+# VIT encoder venv on the Pi (shared with cache_aware_offloading.py)
 PI_VIT_VENV = os.getenv("PI_VIT_VENV", "~/vit_env/bin/activate")
-PI_VIT_SERVER_PATH = os.getenv("PI_VIT_SERVER_PATH", "robot_sender.py")
-PI_VIT_SERVER_LOG = os.getenv(
-    "PI_VIT_SERVER_LOG", "/tmp/yahboom_vit_server.log")
-# How often to SSH-pgrep the VIT encoder and refresh vit_server_running (seconds).
-VIT_PROBE_INTERVAL_SEC = float(os.getenv("VIT_PROBE_INTERVAL_SEC", "2"))
-VIT_PROBE_CACHE_TTL_SEC = float(os.getenv("VIT_PROBE_CACHE_TTL_SEC", "2"))
 
 # Cache-aware offloading script on the Pi (test bench — cache aware stop mode)
 PI_CACHE_AWARE_SCRIPT_PATH = os.getenv(

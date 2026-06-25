@@ -1164,7 +1164,7 @@ function vitDecoderPill(input: {
     return { label: 'NO BROKER — CONNECT IN SETTINGS', color: accents.yellow, dotActive: false };
   }
   if (!encoderLive && !serverRunning) {
-    return { label: 'SERVER OFF — START VIT AND VIDEO', color: muted, dotActive: false };
+    return { label: 'SERVER OFF — START ON PI', color: muted, dotActive: false };
   }
   if (!serverRunning && encoderLive) {
     return { label: 'PI ENCODER LIVE (MANUAL START)', color: accents.cyan, dotActive: true };
@@ -1215,10 +1215,10 @@ function vitDetectionHint(input: {
   const { serverRunning, encoderLive, linkUp, modelReady, activity, latestLabel } = input;
 
   if (!linkUp) {
-    return 'MQTT broker disconnected — connect to the Pi in Settings';
+    return 'MQTT broker disconnected — connect to the robot at the top of the page';
   }
   if (!encoderLive && !serverRunning) {
-    return 'Use START VIT AND VIDEO in the top bar to launch webrtc_server.py';
+    return 'Start webrtc_server.py on the Pi for video and VIT embeddings';
   }
   if (serverRunning && !encoderLive) {
     return 'Server started — waiting for embeddings on yahboom/vit/embedding…';
@@ -1456,7 +1456,7 @@ function VitDecoderWidget() {
         {(displayLatest?.results ?? []).length === 0 && (
           <div className="flex-1 flex items-center justify-center text-center px-2" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             {!encoderLive
-              ? 'Use START VIT AND VIDEO in the top bar to run webrtc_server.py'
+              ? 'Start webrtc_server.py on the Pi for video and VIT embeddings'
               : !displayLatest
                 ? 'Embeddings arriving — decoded labels will appear here'
                 : 'No detections in this session yet'}

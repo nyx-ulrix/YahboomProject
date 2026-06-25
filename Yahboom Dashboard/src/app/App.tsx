@@ -4,9 +4,7 @@ import { useEffect, useState } from 'react';
 import { useViewStore } from './store';
 import type { ViewStore } from './store';
 import { Dashboard } from './components/Dashboard';
-import { AiAgentPage } from './components/AiAgentPage';
 import { ControllerPage } from './components/ControllerPage';
-import { SettingsPanel } from './components/SettingsPanel';
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
@@ -22,12 +20,9 @@ export default function App() {
   const view = useViewStore((s: ViewStore) => s.view);
   return (
     <>
-      {view === 'ai_agent'
-        ? <AiAgentPage darkMode={darkMode} toggleDark={toggleDark} />
-        : view === 'controller'
-          ? <ControllerPage darkMode={darkMode} toggleDark={toggleDark} />
-          : <Dashboard darkMode={darkMode} toggleDark={toggleDark} />}
-      <SettingsPanel />
+      {view === 'controller'
+        ? <ControllerPage darkMode={darkMode} toggleDark={toggleDark} />
+        : <Dashboard darkMode={darkMode} toggleDark={toggleDark} />}
     </>
   );
 }

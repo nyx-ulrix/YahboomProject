@@ -3,10 +3,10 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Activity, Camera, Gamepad2, Joystick,
-  Moon, Octagon, Settings, Signal, Sun, Timer,
+  Moon, Octagon, Signal, Sun, Timer,
 } from 'lucide-react';
-import { useMetricsStore, useSettingsStore, useViewStore } from '../store';
-import type { SettingsStore, ViewStore } from '../store';
+import { useMetricsStore, useViewStore } from '../store';
+import type { ViewStore } from '../store';
 import type { MetricsState } from '../types';
 import {
   useConnectionSync, useDriveStatusPoll, useEdgeAwareStopLabelEstop, useGlobalShortcuts,
@@ -330,7 +330,6 @@ export function ControllerPage({
   darkMode, toggleDark,
 }: { darkMode: boolean; toggleDark: () => void }) {
   const setView = useViewStore((s: ViewStore) => s.setView);
-  const openSettings = useSettingsStore((s: SettingsStore) => s.setOpen);
   const view = useViewStore((s: ViewStore) => s.view);
   const kbdCam = useMetricsStore((s: MetricsState) => s.cameraKeyboardVec);
   const [camCmd, setCamCmd]   = useState<CameraCommand | null>(null);
@@ -367,7 +366,6 @@ export function ControllerPage({
         <nav className="flex items-center gap-1">
           {([
             { label: 'Dashboard', id: 'dashboard' as const },
-            { label: 'AI Agent', id: 'ai_agent' as const },
           ]).map(({ label, id }) => (
             <button
               key={id}
@@ -411,13 +409,6 @@ export function ControllerPage({
           {darkMode
             ? <Sun size={13} style={{ color: 'var(--accent-gold)' }} />
             : <Moon size={13} style={{ color: 'var(--accent-purple)' }} />}
-        </button>
-        <button
-          onClick={() => openSettings(true)}
-          className="w-8 h-8 rounded-xl flex items-center justify-center"
-          style={{ background: 'var(--bg-elevated)', border: '1px solid var(--stroke-subtle)' }}
-        >
-          <Settings size={13} style={{ color: 'var(--text-secondary)' }} />
         </button>
       </header>
 
