@@ -33,6 +33,33 @@ The frontend proxies `/api/*` to the backend. Open the URL shown in the Vite ter
 
 **Important:** Run only one backend instance. If port 3000 is already in use, `main.py` exits with an error — stop the other terminal first.
 
+## Navigation and robot connection
+
+The top bar has **Dashboard** and **Controller** view tabs. Robot MQTT connection is inline on the same row:
+
+- **IP / hostname** — hidden by default; click the **eye** icon to show or hide the field
+- **Connect** — calls `POST /api/connect` with the entered broker address (saved in browser `localStorage`)
+- **Status dot** — green when connected (hover for the active broker host)
+
+The backend also auto-connects to `MQTT_BROKER_IP` on startup. The settings modal has been removed; connection controls live only in the top bar.
+
+## Default layout
+
+The default dashboard layout is **Stop Test** (VIT decoder, video feed, Stop-Time Test Bench, stop button, event log). Switch layouts from the template menu in the top bar (**VIT View**, **LiDAR View**, **Stop Test**).
+
+## Video and VIT on the Pi
+
+The dashboard does **not** SSH-start `webrtc_server.py` or a separate VIT encoder. Start video on the Pi manually (SSH, VNC, or HDMI), for example:
+
+```bash
+source ~/vit_env/bin/activate
+python3 webrtc_server.py
+```
+
+The backend detects a running stream with an **HTTP probe** to port `8080` (`VIDEO_SERVER_PORT`) and exposes WebRTC via `/api/webrtc/offer`. VIT scene decoding uses MQTT embeddings from the running server (`vit_service.py`).
+
+**Removed API routes:** `POST /api/start_stream`, `POST /api/stop_stream`, `POST /api/vit/start_server`, `POST /api/vit/stop_server`.
+
 ## Environment
 
 A `.env` file in the project root configures both frontend and backend. Common variables:
@@ -40,8 +67,12 @@ A `.env` file in the project root configures both frontend and backend. Common v
 | Variable | Purpose |
 |----------|---------|
 | `VITE_API_URL` | Backend URL for the Vite proxy (default `http://localhost:3000`) |
-| `MQTT_BROKER_IP` | Raspberry Pi MQTT broker |
+| `MQTT_BROKER_IP` | Default Raspberry Pi MQTT broker (also used for startup auto-connect) |
 | `FLASK_PORT` | Flask listen port (default `3000`) |
+| `VIDEO_SERVER_PORT` | Pi WebRTC server port for HTTP health probe (default `8080`) |
+| `VIDEO_PROBE_INTERVAL_SEC` | How often the backend probes Pi video (default `12`) |
+| `PI_SSH_USER` / `PI_SSH_PASSWORD` / `PI_SSH_KEY_PATH` | SSH to Pi for **cache-aware test bench** only |
+| `PI_VIT_VENV` | Pi venv path for `cache_aware_offloading.py` (default `~/vit_env/bin/activate`) |
 | `PI_CACHE_AWARE_SCRIPT_PATH` | Path on Pi to `cache_aware_offloading.py` |
 | `PI_CACHE_AWARE_LOG` | Pi log file for cache-aware script (default `/tmp/yahboom_cache_aware.log`) |
 | `CACHE_SCRIPT_EMBEDDING_READY_SNIPPET` | Log substring that unlocks START in cache/hybrid mode |
@@ -95,7 +126,7 @@ For Cache/Hybrid, START unlocks when the backend reports both:
 - `cache_script_running: true` — `cache_aware_offloading.py` process on the Pi
 - `cache_script_detection_ready: true` — `[DETECT] Text embedding ready: 'a water bottle'…` in the Pi log **or** retained MQTT on `yahboom/cache_aware/ready`
 
-VIT encoder and video must be running so the Pi script receives embeddings. Status pill shows **WARMUP** while the script is up but embedding is not ready yet.
+VIT encoder and video must be running on the Pi (`webrtc_server.py`) so the Pi script receives embeddings. Status pill shows **WARMUP** while the script is up but embedding is not ready yet.
 
 #### How a run works
 
@@ -142,6 +173,18 @@ Client-side explore autopilot (`CLIENT AUTO` widget, `useClientAutoPilot()`, `to
 - `cache_script_log`, `cache_script_launch_mode` (when applicable)
 
 Implemented in `backend/app/routes/test_bench_routes.py`, `backend/app/services/vit/edge_aware_estop.py`, `backend/app/services/test_bench/cache_aware_ssh.py`.
+
+### Video and VIT API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/stream_status` | Pi video state (`?force=1` for live HTTP probe) |
+| `POST` | `/api/webrtc/offer` | WebRTC SDP proxy to Pi `webrtc_server.py` |
+| `GET` | `/api/video_feed` | MJPEG relay (when `VIDEO_USE_MJPEG_RELAY=true`) |
+| `GET` | `/api/vit/status` | VIT decoder status, latest labels, encoder activity |
+| `POST` | `/api/vit/config` | Set embedding size (512 / 1024 / 2048 B) |
+| `POST` | `/api/vit/clear` | Clear VIT session history |
+| `GET` | `/api/vit/export` | Download session CSV |
 
 ## Scripts
 

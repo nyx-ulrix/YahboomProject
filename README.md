@@ -61,6 +61,18 @@ The dashboard **no longer** runs browser-based explore autopilot:
 
 Manual joystick, keyboard, and Pi autonomous mode are unchanged.
 
+### Dashboard UI and connection (2026)
+
+| Change | Details |
+|--------|---------|
+| **Robot connection** | IP field and **Connect** live in the top bar next to Dashboard / Controller (`RobotConnectionBar.tsx`). Hidden by default — eye toggle shows the hostname field. Settings modal removed. |
+| **Default layout** | **Stop Test** template is the default dashboard layout (`DEFAULT_TEMPLATE_ID` in `store.ts`). |
+| **Video / VIT control** | No dashboard button or SSH to start/stop `webrtc_server.py`. Start on the Pi manually; backend uses HTTP probe on port 8080. |
+| **Removed** | AI Agent page; top-bar **START VIT AND VIDEO** button; `POST /api/start_stream`, `/api/stop_stream`, `/api/vit/start_server`, `/api/vit/stop_server`; `vit_server_ssh.py`. |
+| **SSH retained** | Test bench only — `cache_aware_ssh.py` starts/stops `cache_aware_offloading.py` on the Pi. |
+
+Files: [RobotConnectionBar.tsx](Yahboom%20Dashboard/src/app/components/RobotConnectionBar.tsx), [TopBar.tsx](Yahboom%20Dashboard/src/app/components/TopBar.tsx), [stream_routes.py](Yahboom%20Dashboard/backend/app/routes/stream_routes.py).
+
 ---
 
 ## Yahboom Car
@@ -343,10 +355,10 @@ The page displays live camera feed and connection status. The system auto-connec
 | MQTT drive status relay          | Subscribe to `yahboom/drive/status`, parse Pi `timestamp` as `robotTimestamp`, expose via REST for widgets and stop-time experiments.                         | [backend/app/services/mqtt_service.py](Yahboom%20Dashboard/backend/app/services/mqtt_service.py): `_parse_drive_message()`, `get_drive_status()`; [backend/app/routes/bot_routes.py](Yahboom%20Dashboard/backend/app/routes/bot_routes.py): `GET /api/drive_status` |
 | Stop-Time Test Bench widget      | Pi-clock stop timing; cache / hybrid / edge stop modes; Pi `cache_aware_offloading.py` SSH control; VIT bottle stop; CSV export with stop source. | [Widgets.tsx](Yahboom%20Dashboard/src/app/components/Widgets.tsx); [cache_aware_ssh.py](Yahboom%20Dashboard/backend/app/services/test_bench/cache_aware_ssh.py); [test_bench_routes.py](Yahboom%20Dashboard/backend/app/routes/test_bench_routes.py); [edgeAwareStopLabelEstop.ts](Yahboom%20Dashboard/src/lib/edgeAwareStopLabelEstop.ts) |
 | Backend server startup           | Create and start Flask app, load config, manage background services (SLAM, VIT relay). Provides REST API endpoints.                                           | [backend/main.py](Yahboom%20Dashboard/backend/main.py): `create_app()` and top-level run block — see [client_backend_README.md](client_backend_README.md)                                                                                                     |
-| Configuration                    | Centralised settings for MQTT topics, Flask host/port, VIT, SLAM and Raspberry Pi SSH/video settings. Configured via `.env` file.                             | [backend/config.py](Yahboom%20Dashboard/backend/config.py) — referenced in [client_backend_README.md](client_backend_README.md)                                                                                                                               |
+| Configuration                    | Centralised settings for MQTT topics, Flask host/port, VIT, SLAM, Pi SSH (test bench), and video HTTP probe. Configured via `.env` file.                      | [backend/config.py](Yahboom%20Dashboard/backend/config.py) — referenced in [client_backend_README.md](client_backend_README.md)                                                                                                                               |
 | SLAM mapping service             | Subscribe to scan/grid/cmd topics, feed data to SLAM core, write `slam_map.json`, provide API endpoints returning map/status. Real-time 2D occupancy mapping. | [backend/slam_service.py](Yahboom%20Dashboard/backend/slam_service.py): `SlamService` methods `connect()`, `_on_message()`, `_writer_loop()`, `get_map()`, `get_status()`; CartographerSLAM class methods like `process_raw_scan()`, `_update()`, `to_dict()` |
-| API routes                       | Expose map and SLAM status to frontend, handle VIT streaming endpoints and other dashboard routes. REST API for frontend.                                     | [backend/app/routes/stream_routes.py](Yahboom%20Dashboard/backend/app/routes/stream_routes.py) (and other routes in `routes/`)                                                                                                                                |
-| VIT service & embedding handling | Receive VIT embeddings, store/parse them for search/labels, expose embeddings endpoints for AI scene understanding.                                           | [backend/app/services/vit/vit_service.py](Yahboom%20Dashboard/backend/app/services/vit/vit_service.py) and [backend/app/services/vit/vit_server_ssh.py](Yahboom%20Dashboard/backend/app/services/vit/vit_server_ssh.py)                                       |
+| API routes                       | Expose map and SLAM status to frontend, video stream status (HTTP probe), WebRTC proxy, VIT routes, test bench. REST API for frontend.                        | [backend/app/routes/stream_routes.py](Yahboom%20Dashboard/backend/app/routes/stream_routes.py) (and other routes in `routes/`)                                                                                                                                |
+| VIT service & embedding handling | Receive VIT embeddings over MQTT, decode with MobileCLIP, expose status and CSV export. Encoder health from MQTT activity and video HTTP probe — no SSH.      | [backend/app/services/vit/vit_service.py](Yahboom%20Dashboard/backend/app/services/vit/vit_service.py)                                                                                                                                                          |
 
 ---
 
@@ -828,7 +840,7 @@ Enable Flask debug mode
 
 ### Raspberry Pi SSH Settings
 
-Used for remote script control on Raspberry Pi.
+Used only for **Stop-Time Test Bench** cache/hybrid mode (`cache_aware_ssh.py` — start/stop `cache_aware_offloading.py` in an `lxterminal` on the Pi). Video and VIT are **not** started over SSH from the dashboard.
 
 #### `PI_SSH_USER`
 
@@ -860,39 +872,33 @@ Optional SSH private key path (overrides password login)
 
 ---
 
+#### `PI_TERMINAL`
+
+Terminal emulator for cache-aware script on the Pi desktop (default `lxterminal`).
+
+**Env variable**: `PI_TERMINAL`
+
+---
+
+#### `PI_DISPLAY`
+
+Force X11 display for SSH-launched terminals (e.g. `:1` for RealVNC). Empty = auto-detect.
+
+**Env variable**: `PI_DISPLAY`
+
+---
+
+#### `PI_VIT_VENV`
+
+Virtual environment activate path on the Pi for `cache_aware_offloading.py` (default `~/vit_env/bin/activate`).
+
+**Env variable**: `PI_VIT_VENV`
+
+---
+
 ### Video Server Settings
 
-Control WebRTC video server on Raspberry Pi.
-
-#### `PI_VIDEO_VENV`
-
-Virtual environment path for video server
-
-**Default**: `~/vit_env/bin/activate`
-
-**Env variable**: `PI_VIDEO_VENV`
-
----
-
-#### `PI_VIDEO_SERVER_PATH`
-
-Path to WebRTC server script on Pi
-
-**Default**: `webrtc_server.py`
-
-**Env variable**: `PI_VIDEO_SERVER_PATH`
-
----
-
-#### `PI_VIDEO_SERVER_LOG`
-
-Log file for video server output
-
-**Default**: `/tmp/yahboom_video_server.log`
-
-**Env variable**: `PI_VIDEO_SERVER_LOG`
-
----
+The dashboard does not start `webrtc_server.py` remotely. Run it on the Pi manually; the backend probes `http://<broker-ip>:<port>` to detect a live stream.
 
 #### `VIDEO_SERVER_PORT`
 
@@ -911,16 +917,6 @@ Enable legacy MJPEG relay mode (false = use WebRTC)
 **Default**: `false`
 
 **Env variable**: `VIDEO_USE_MJPEG_RELAY`
-
----
-
-#### `VIDEO_LINK_WAIT_SEC`
-
-Time to wait for WebRTC dashboard link
-
-**Default**: `15`
-
-**Env variable**: `VIDEO_LINK_WAIT_SEC`
 
 ---
 
@@ -946,57 +942,7 @@ Interval for video server health checks
 
 ### VIT Settings
 
-Configure MobileCLIP/VIT encoder on Raspberry Pi.
-
-#### `PI_VIT_VENV`
-
-Virtual environment for VIT server
-
-**Default**: `~/vit_env/bin/activate`
-
-**Env variable**: `PI_VIT_VENV`
-
----
-
-#### `PI_VIT_SERVER_PATH`
-
-Path to VIT server script on Pi
-
-**Default**: `webrtc_server.py`
-
-**Env variable**: `PI_VIT_SERVER_PATH`
-
----
-
-#### `PI_VIT_SERVER_LOG`
-
-Log file for VIT server
-
-**Default**: `/tmp/yahboom_vit_server.log`
-
-**Env variable**: `PI_VIT_SERVER_LOG`
-
----
-
-#### `VIT_PROBE_INTERVAL_SEC`
-
-Interval for VIT encoder health checks
-
-**Default**: `2`
-
-**Env variable**: `VIT_PROBE_INTERVAL_SEC`
-
----
-
-#### `VIT_PROBE_CACHE_TTL_SEC`
-
-Cache TTL for VIT probe status
-
-**Default**: `2`
-
-**Env variable**: `VIT_PROBE_CACHE_TTL_SEC`
-
----
+MobileCLIP scene decoder on the dashboard backend (MQTT subscriptions). Embeddings are produced by `webrtc_server.py` on the Pi — not by a separate SSH-managed encoder process.
 
 #### `VIT_EMBEDDING_TOPIC`
 
