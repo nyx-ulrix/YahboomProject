@@ -27,13 +27,13 @@ TOPIC_READY     = "yahboom/cache_aware/ready"  # publish retained embedding-read
 
 # Detection config
 DETECTION_LABEL     = "a water bottle"
-DETECTION_THRESHOLD = 0.25   # cosine similarity threshold  tune this
-AUTO_OFF_COMMAND    =  "Auto_off"
+DETECTION_THRESHOLD = 0.2   # cosine similarity threshold  tune this
+AUTO_OFF_COMMAND    =  "auto_off"
 STOP_COMMAND        = "stop"
 
 # Cooldown: seconds to wait after a detection before detecting again.
 # Prevents flooding mqtt_ros_node.py with repeated stop commands.
-DETECTION_COOLDOWN_S = 2.0
+DETECTION_COOLDOWN_S = 1.5
 
 # =========================
 # GLOBALS
@@ -190,17 +190,18 @@ def on_message(client, userdata, msg):
                 _last_detection_time = now
 
                 # Publish stop command to mqtt_ros_node.py
-                result = client.publish(TOPIC_COMMAND, "stop", qos=1) 
-                result.wait_for_publish() # blocks until broker ACKs stop 
+                result = client.publish(TOPIC_COMMAND, "stop", qos=1)
+                result.wait_for_publish()
                 client.publish(TOPIC_COMMAND, "auto_off", qos=1)
 
+				
                 # Publish detection event for logging / dashboard
                 detect_payload = json.dumps({
                     "label":      DETECTION_LABEL,
                     "similarity": round(similarity, 4),
                     "threshold":  DETECTION_THRESHOLD,
                     "stop_command":    STOP_COMMAND,
-                    "Auto_off_command": AUTO_OFF_COMMAND,
+                    "auto_off_command": AUTO_OFF_COMMAND,
                     "dims":       embedding_dims,
                     "frame":      payload.get("frame", -1),
                     "timestamp":  now,
@@ -297,10 +298,11 @@ def main():
     try:
         mqtt_client.loop_forever()
     except KeyboardInterrupt:
-        print("\n[INFO] Shutting down detector.py")
+        print("\n[INFO] Shutting down cache_aware_offloading.py")
         mqtt_client.disconnect()
 
 
 if __name__ == "__main__":
     main()
+
 
