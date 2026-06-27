@@ -11,6 +11,7 @@ import numpy as np
 import open_clip
 import torch
 import paho.mqtt.client as mqtt
+from PIL import Image
 
 # =========================
 # SETTINGS
@@ -27,7 +28,7 @@ TOPIC_READY     = "yahboom/cache_aware/ready"  # publish retained embedding-read
 
 # Detection config
 DETECTION_LABEL     = "a water bottle"
-DETECTION_THRESHOLD = 0.2   # cosine similarity threshold  tune this
+DETECTION_THRESHOLD = 0.75   # cosine similarity threshold  tune this
 AUTO_OFF_COMMAND    =  "auto_off"
 STOP_COMMAND        = "stop"
 
@@ -40,6 +41,7 @@ DETECTION_COOLDOWN_S = 1.5
 # =========================
 model       = None
 device      = None
+preprocess = None
 
 # Text embedding  recomputed whenever embedding dims change
 _text_embedding      = None
@@ -60,7 +62,7 @@ def load_model():
     global model, device
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Load text encoder only  we don't need image encoder here
-    model, _, _ = open_clip.create_model_and_transforms(
+    model, preprocess, _ = open_clip.create_model_and_transforms(
         "MobileCLIP-S1", pretrained="datacompdr", device=device
     )
     model.eval()
@@ -77,24 +79,27 @@ def compute_text_embedding(target_dims: int):
     """
     global _text_embedding, _text_embedding_dims
 
-    tokenizer  = open_clip.get_tokenizer("MobileCLIP-S1")
-    text_tokens = tokenizer([DETECTION_LABEL]).to(device)
+    REFERENCE_IMAGE_PATH = "/path/to/your_water_bottle.jpg"  # <-- set your image path here
+
+def compute_text_embedding(target_dims: int):
+    img = Image.open(REFERENCE_IMAGE_PATH).convert("RGB")
+    img_tensor = preprocess(img).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        emb = model.encode_text(text_tokens)
+        emb = model.encode_image(img_tensor)
 
-    emb = emb / emb.norm(dim=-1, keepdim=True)   # normalise full 512
-    emb = emb[:, :target_dims]                    # slice to match image dims
-    emb = emb / emb.norm(dim=-1, keepdim=True)   # re-normalise after slice
+    emb = emb / emb.norm(dim=-1, keepdim=True)
+    emb = emb[:, :target_dims]
+    emb = emb / emb.norm(dim=-1, keepdim=True)
 
     new_emb = emb.cpu().numpy().astype(np.float32).flatten()
 
     with text_lock:
-        _text_embedding      = new_emb
+        global _text_embedding, _text_embedding_dims
+        _text_embedding = new_emb
         _text_embedding_dims = target_dims
 
-    print(f"[DETECT] Text embedding ready: '{DETECTION_LABEL}' @ {target_dims} dims")
-
+    print(f"[DETECT] Image embedding ready: '{REFERENCE_IMAGE_PATH}' @ {target_dims} dims")
 
     client = mqtt_client
     if client is not None:
