@@ -4,7 +4,7 @@ import { useMetricsStore } from '../app/store';
 /** VIT label from labels.json — edge-aware stop triggers on this class only. */
 export const EDGE_AWARE_STOP_LABEL = 'bottle';
 
-export const EDGE_AWARE_MIN_CONFIDENCE = 40;
+export const EDGE_AWARE_MIN_CONFIDENCE = 75;
 const EDGE_AWARE_COOLDOWN_MS = 5_000;
 
 export type VitStatusForStopLabel = {
@@ -80,7 +80,7 @@ export function hasQualifyingStopLabel(vit: VitStatusForStopLabel): boolean {
 }
 
 /**
- * When edge-aware mode is on, session is armed, and stop label is >= 40%, send
+ * When edge-aware mode is on, session is armed, and stop label is >= 75%, send
  * stop (same as manual stop). Returns true if triggered.
  */
 export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): boolean {
