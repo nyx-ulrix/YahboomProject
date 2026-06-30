@@ -108,7 +108,7 @@ Default: **Edge** (right). Preference is saved in browser `localStorage` (`yahbo
 |------|-----------|-----------|
 | **Cache** (left) | `cache_aware_offloading` | Pi runs `cache_aware_offloading.py` in lxterminal. Bottle stop is detected on the Pi (CLIP embeddings via MQTT). Dashboard does **not** send `auto_off` on stop. |
 | **Hybrid** (center) | `hybrid` | Pi script **and** dashboard VIT bottle stop are both armed. **First trigger wins**; run records which path stopped (`Pi script · bottle` vs `Dashboard VIT · bottle`). |
-| **Edge** (right, default) | `edge_aware` | Dashboard VIT scene decoder sends `auto_off` + `stop` when the **bottle** label is detected (≥ 40% after START). Pi cache script is **stopped** when this mode is selected. |
+| **Edge** (right, default) | `edge_aware` | Dashboard VIT scene decoder sends `auto_off` + `stop` when the **bottle** label is detected (≥ 75% after START). Pi cache script is **stopped** when this mode is selected. |
 
 Changing to Cache or Hybrid starts the Pi script once (one lxterminal per slider change). Switching between Cache and Hybrid does **not** restart the script. Switching to Edge kills the Pi script and closes its terminal.
 
@@ -139,7 +139,7 @@ VIT encoder and video must be running on the Pi (`webrtc_server.py`) so the Pi s
 #### Edge-aware stop label (dashboard VIT)
 
 - Trigger class: `bottle` (`EDGE_AWARE_STOP_LABEL` in `edgeAwareStopLabelEstop.ts`).
-- Polls `GET /api/vit/status` every 500 ms. On a **new** decode after START with ≥ 40% confidence, sends `auto_off` + `stop`.
+- Polls `GET /api/vit/status` every 500 ms. On a **new** decode after START with ≥ 75% confidence, sends `auto_off` + `stop`.
 - Armed only after START (pre-START detections are ignored).
 
 #### Timing and CSV
