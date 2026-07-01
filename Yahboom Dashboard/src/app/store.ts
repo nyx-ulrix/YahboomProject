@@ -91,19 +91,19 @@ const LIDAR_VIEW_IPAD: LayoutItem[] = [
 ];
 
 const STOP_DISTANCCE_TEST_LAPTOP: LayoutItem[] = [
-  { i: 'vit_decoder_widget',          x: 0,  y: 0, w: 4, h: 5 },
-  { i: 'video_feed_widget',           x: 4,  y: 0, w: 5, h: 5 },
-  { i: 'stop_test_bench_widget',      x: 10,  y: 0, w: 3, h: 4 },
-  { i: 'stop_button_widget',          x: 9,  y: 4, w: 3, h: 1 },
-  { i: 'event_log_widget',            x: 0,  y: 5, w: 12, h: 4 }
+  { i: 'vit_decoder_widget',          x: 0,  y: 0, w: 4, h: 4 },
+  { i: 'video_feed_widget',           x: 4,  y: 0, w: 4, h: 3 },
+  { i: 'stop_test_bench_widget',      x: 10,  y: 0, w: 4, h: 4 },
+  { i: 'stop_button_widget',          x: 4,  y: 4, w: 4, h: 1 },
+  { i: 'event_log_widget',            x: 0,  y: 5, w: 12, h: 4 } 
 ];
 
 /** VIT View (iPad / narrow) — same structure, stacked for a narrower viewport. */
 const STOP_DISTANCCE_TEST_IPAD: LayoutItem[] = [
-  { i: 'vit_decoder_widget',          x: 0,  y: 0, w: 4, h: 5 },
-  { i: 'video_feed_widget',           x: 4,  y: 0, w: 5, h: 5 },
-  { i: 'stop_test_bench_widget',      x: 10,  y: 0, w: 3, h: 4 },
-  { i: 'stop_button_widget',          x: 9,  y: 4, w: 3, h: 1 },
+  { i: 'vit_decoder_widget',          x: 0,  y: 0, w: 4, h: 4 },
+  { i: 'video_feed_widget',           x: 4,  y: 0, w: 4, h: 3 },
+  { i: 'stop_test_bench_widget',      x: 10,  y: 0, w: 4, h: 4 },
+  { i: 'stop_button_widget',          x: 4,  y: 4, w: 4, h: 1 },
   { i: 'event_log_widget',            x: 0,  y: 5, w: 12, h: 4 }
 ];
 

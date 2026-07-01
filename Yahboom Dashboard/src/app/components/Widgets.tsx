@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Activity, FlaskConical, Joystick, Network, Octagon, Play,
+  Activity, FlaskConical, Joystick, Loader2, Network, Octagon, Play,
   Radar, ScanEye, Download, Trash2,
   Signal, Timer, Video, type LucideIcon,
 } from 'lucide-react';
@@ -13,15 +13,21 @@ import { sendCommand, sendCameraCommand, setEstopState, toggleRosAuto, vecToComm
 import { setEdgeAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/edgeAwareStopLabelEstop';
 import {
   benchNeedsPiScript,
+  benchHasDashboardBottleStop,
   clearTestBenchCache,
   loadStopModePreference,
+  loadStopToggles,
   loadTestBenchCache,
+  piReportsCacheAwareOn,
   saveStopModePreference,
+  saveStopToggles,
   saveTestBenchCache,
   STOP_BENCH_MODES,
   STOP_MODE_LABELS,
   STOP_SOURCE_LABELS,
+  togglesToStopMode,
   type StopBenchMode,
+  type StopModeToggles,
   type StopSource,
 } from '../../lib/testBenchStorage';
 import {
@@ -1572,6 +1578,7 @@ type StopModeApiResponse = {
   mode?: StopBenchMode;
   cache_script_running?: boolean;
   cache_script_detection_ready?: boolean;
+  cache_aware_mqtt_ready?: boolean;
   cache_script_launch_mode?: 'terminal';
   cache_script_log?: string;
   edge_aware_enabled?: boolean;
@@ -1784,7 +1791,12 @@ function StopTestBenchWidget() {
     () => cachedBench.current.networkType ?? networkMode ?? 'Wi-Fi',
   );
   const [stopMode, setStopMode] = useState<StopBenchMode>(() => loadStopModePreference());
-  const [cacheScriptReady, setCacheScriptReady] = useState(() => loadStopModePreference() === 'edge_aware');
+  const [stopToggles, setStopToggles] = useState<StopModeToggles>(() => loadStopToggles());
+  const [cacheScriptReady, setCacheScriptReady] = useState(() => {
+    const t = loadStopToggles();
+    const mode = togglesToStopMode(t.cacheOn, t.edgeOn);
+    return mode == null || !benchNeedsPiScript(mode);
+  });
   const [cacheScriptRunning, setCacheScriptRunning] = useState(false);
   const [modeSwitching, setModeSwitching] = useState(false);
   const [, setTick] = useState(0);
@@ -1804,9 +1816,17 @@ function StopTestBenchWidget() {
   const stopSourceRef = useRef<StopSource | null>(null);
   const networkTypeRef = useRef(networkType);
   const stopModeRef = useRef(stopMode);
+  const stopTogglesRef = useRef(stopToggles);
+  const recordedBenchModeRef = useRef<StopBenchMode>(stopMode);
+  const applyStopModeRef = useRef<(mode: StopBenchMode, opts?: { bothOff?: boolean; reuseExisting?: boolean }) => Promise<void>>(async () => {});
+  const userDisabledCacheRef = useRef(false);
   useEffect(() => { networkTypeRef.current = networkType; }, [networkType]);
   useEffect(() => { stopModeRef.current = stopMode; }, [stopMode]);
-  useEffect(() => { setTestBenchStopMode(stopMode); }, [stopMode]);
+  useEffect(() => { stopTogglesRef.current = stopToggles; }, [stopToggles]);
+  useEffect(() => {
+    const mode = togglesToStopMode(stopToggles.cacheOn, stopToggles.edgeOn);
+    if (mode) setTestBenchStopMode(mode);
+  }, [stopToggles]);
 
   const freezeTimerAtNow = useCallback(() => {
     const anchor = activeStartRef.current ?? commandSentAtRef.current;
@@ -1844,16 +1864,56 @@ function StopTestBenchWidget() {
   const applyStopModeApi = useCallback((data: StopModeApiResponse) => {
     if (data.mode && STOP_BENCH_MODES.includes(data.mode)) {
       setStopMode(data.mode);
-      const edgeEnabled = data.edge_aware_enabled === true
-        || data.mode === 'edge_aware'
-        || data.mode === 'hybrid';
-      setEdgeAwareStopEnabled(edgeEnabled);
     }
-    const mode = data.mode ?? stopModeRef.current;
+    const toggles = stopTogglesRef.current;
+    const benchMode = togglesToStopMode(toggles.cacheOn, toggles.edgeOn)
+      ?? data.mode
+      ?? stopModeRef.current;
+    setEdgeAwareStopEnabled(toggles.edgeOn);
+    if (!toggles.edgeOn) {
+      setStopLabelEstopArmed(false);
+    }
     const running = data.cache_script_running === true;
-    setCacheScriptRunning(benchNeedsPiScript(mode) && running);
-    setCacheScriptReady(cacheBenchStartReady({ ...data, mode }));
+    setCacheScriptRunning(benchNeedsPiScript(benchMode) && running);
+    setCacheScriptReady(cacheBenchStartReady({ ...data, mode: benchMode }));
   }, []);
+
+  const enableCacheToggleFromPi = useCallback((data: StopModeApiResponse) => {
+    if (sessionActiveRef.current || modeSwitching || userDisabledCacheRef.current) return;
+    if (!piReportsCacheAwareOn(data) || stopTogglesRef.current.cacheOn) return;
+
+    const next = { cacheOn: true, edgeOn: stopTogglesRef.current.edgeOn };
+    setStopToggles(next);
+    stopTogglesRef.current = next;
+    saveStopToggles(next);
+
+    const mode = togglesToStopMode(next.cacheOn, next.edgeOn);
+    if (!mode) return;
+
+    if (data.mode !== mode) {
+      void applyStopModeRef.current(mode, { reuseExisting: true });
+    } else {
+      applyStopModeApi({ ...data, mode });
+    }
+  }, [modeSwitching]);
+
+  const stopPiCacheScript = useCallback(async () => {
+    try {
+      const res = await fetch('/api/test_bench/cache_script/stop', { method: 'POST' });
+      const data = await res.json() as StopModeApiResponse;
+      if (!res.ok) {
+        useMetricsStore.getState().pushEvent(
+          'error',
+          data.message ?? 'Failed to stop Pi cache-aware script',
+        );
+        return;
+      }
+      applyStopModeApi(data);
+      useMetricsStore.getState().pushEvent('info', 'Pi cache-aware script stopped — terminal closed');
+    } catch {
+      useMetricsStore.getState().pushEvent('error', 'Failed to reach backend to stop Pi cache script');
+    }
+  }, [applyStopModeApi]);
 
   useEffect(() => {
     saveTestBenchCache({ runs });
@@ -1865,24 +1925,28 @@ function StopTestBenchWidget() {
 
   useEffect(() => {
     let alive = true;
-    const preferred = loadStopModePreference();
+    const preferredToggles = loadStopToggles();
+    const preferredMode = togglesToStopMode(preferredToggles.cacheOn, preferredToggles.edgeOn) ?? 'edge_aware';
+    const bothOff = togglesToStopMode(preferredToggles.cacheOn, preferredToggles.edgeOn) == null;
     const load = async () => {
       try {
         const res = await fetch('/api/test_bench/stop_mode', { cache: 'no-store' });
         if (!res.ok || !alive) return;
         const data = await res.json() as StopModeApiResponse;
-        if (data.mode !== preferred) {
+        if (data.mode !== preferredMode) {
           setModeSwitching(true);
-          setCacheScriptReady(preferred === 'edge_aware');
+          setCacheScriptReady(bothOff || !benchNeedsPiScript(preferredMode));
           setCacheScriptRunning(false);
           const syncRes = await fetch('/api/test_bench/stop_mode', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode: preferred }),
+            body: JSON.stringify({ mode: preferredMode }),
           });
           if (!alive) return;
           const syncData = await syncRes.json() as StopModeApiResponse;
-          applyStopModeApi({ ...syncData, mode: preferred });
+          applyStopModeApi({ ...syncData, mode: preferredMode });
+          enableCacheToggleFromPi(syncData);
+          if (bothOff) setEdgeAwareStopEnabled(false);
           setModeSwitching(false);
           if (!syncRes.ok) {
             useMetricsStore.getState().pushEvent(
@@ -1892,40 +1956,57 @@ function StopTestBenchWidget() {
             return;
           }
         } else {
-          applyStopModeApi({ ...data, mode: preferred });
+          applyStopModeApi({ ...data, mode: preferredMode });
+          enableCacheToggleFromPi(data);
+          if (bothOff) setEdgeAwareStopEnabled(false);
         }
       } catch { /* backend may be starting */ }
     };
     void load();
     return () => { alive = false; };
-  }, [applyStopModeApi]);
+  }, [applyStopModeApi, enableCacheToggleFromPi]);
 
   useEffect(() => {
-    if (!benchNeedsPiScript(stopMode) || cacheScriptReady || modeSwitching) return;
+    const benchMode = togglesToStopMode(stopToggles.cacheOn, stopToggles.edgeOn);
+    const needsCachePoll = !stopToggles.cacheOn || (benchMode != null && benchNeedsPiScript(benchMode) && !cacheScriptReady);
+    if (!needsCachePoll || modeSwitching || commandSentAt != null) return;
     let alive = true;
     const poll = async () => {
       try {
         const res = await fetch('/api/test_bench/stop_mode?force=1', { cache: 'no-store' });
         if (!res.ok || !alive) return;
         const data = await res.json() as StopModeApiResponse;
-        applyStopModeApi({ ...data, mode: data.mode ?? stopMode });
+        enableCacheToggleFromPi(data);
+        const activeBenchMode = togglesToStopMode(stopTogglesRef.current.cacheOn, stopTogglesRef.current.edgeOn);
+        applyStopModeApi({
+          ...data,
+          mode: data.mode ?? activeBenchMode ?? stopModeRef.current,
+        });
       } catch { /* backend unreachable */ }
     };
     void poll();
     const id = setInterval(() => { void poll(); }, 1500);
     return () => { alive = false; clearInterval(id); };
-  }, [stopMode, cacheScriptReady, modeSwitching, applyStopModeApi]);
+  }, [stopToggles, cacheScriptReady, modeSwitching, commandSentAt, applyStopModeApi, enableCacheToggleFromPi]);
 
-  const applyStopMode = async (mode: StopBenchMode) => {
+  const applyStopMode = async (mode: StopBenchMode, opts?: { bothOff?: boolean; reuseExisting?: boolean }) => {
     if (modeSwitching || sessionActiveRef.current) return;
     setModeSwitching(true);
-    setCacheScriptReady(mode === 'edge_aware');
+    const toggles = stopTogglesRef.current;
+    setCacheScriptReady(opts?.bothOff || !benchNeedsPiScript(mode));
     setCacheScriptRunning(false);
+    setEdgeAwareStopEnabled(opts?.bothOff ? false : toggles.edgeOn);
+    if (opts?.bothOff || !toggles.edgeOn) {
+      setStopLabelEstopArmed(false);
+    }
     try {
       const res = await fetch('/api/test_bench/stop_mode', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify({
+          mode,
+          reuse_existing: opts?.reuseExisting === true,
+        }),
       });
       const data = await res.json() as StopModeApiResponse;
       if (!res.ok) {
@@ -1938,8 +2019,16 @@ function StopTestBenchWidget() {
         return;
       }
       applyStopModeApi({ ...data, mode });
-      saveStopModePreference(mode);
-      if (benchNeedsPiScript(mode) && !data.cache_script_running) {
+      if (!opts?.bothOff) {
+        saveStopModePreference(mode);
+      }
+      if (opts?.bothOff) {
+        setEdgeAwareStopEnabled(false);
+        useMetricsStore.getState().pushEvent(
+          'info',
+          'Stop detectors off — enable Cache aware and/or Edge aware to run a test',
+        );
+      } else if (benchNeedsPiScript(mode) && !data.cache_script_running) {
         useMetricsStore.getState().pushEvent(
           'warning',
           data.message ?? 'Pi cache-aware script did not start',
@@ -1955,6 +2044,8 @@ function StopTestBenchWidget() {
       setModeSwitching(false);
     }
   };
+
+  applyStopModeRef.current = applyStopMode;
 
   useEffect(() => {
     if (!userPickedNetworkRef.current && networkMode) setNetworkType(networkMode);
@@ -1995,7 +2086,7 @@ function StopTestBenchWidget() {
     const cmdAt = commandSentAtRef.current;
     if (startedAt == null || cmdAt == null) return;
     const recordedSource = stopSourceRef.current ?? 'manual';
-    const mode = stopModeRef.current;
+    const mode = recordedBenchModeRef.current;
     resetSession();
     setRuns((prev) => [
       ...prev,
@@ -2100,6 +2191,14 @@ function StopTestBenchWidget() {
 
   const startTest = async () => {
     if (sessionActiveRef.current) return;
+    const benchMode = togglesToStopMode(stopTogglesRef.current.cacheOn, stopTogglesRef.current.edgeOn);
+    if (!benchMode) {
+      useMetricsStore.getState().pushEvent(
+        'warning',
+        'Stop-time test blocked — turn on Cache aware and/or Edge aware first',
+      );
+      return;
+    }
     if (useMetricsStore.getState().estopActive) {
       useMetricsStore.getState().pushEvent('warning', 'Stop-time test blocked — clear E-stop first');
       return;
@@ -2114,6 +2213,8 @@ function StopTestBenchWidget() {
       return;
     }
 
+    recordedBenchModeRef.current = benchMode;
+    setTestBenchStopMode(benchMode);
     sessionActiveRef.current = true;
     setTestBenchSessionActive(true);
     commandSentAtRef.current = commandTs;
@@ -2122,15 +2223,16 @@ function StopTestBenchWidget() {
     movementDeadlineRef.current = Date.now() + MOVEMENT_WAIT_MS;
 
     let ignoreDecodeKey: string | null = null;
-    try {
-      const vitRes = await fetch('/api/vit/status', { cache: 'no-store' });
-      if (vitRes.ok) {
-        const vit = await vitRes.json() as VitStatusForStopLabel;
-        ignoreDecodeKey = vitDecodeEventKey(vit);
-      }
-    } catch { /* VIT may be offline */ }
-
-    setStopLabelEstopArmed(true, ignoreDecodeKey);
+    if (benchHasDashboardBottleStop(benchMode)) {
+      try {
+        const vitRes = await fetch('/api/vit/status', { cache: 'no-store' });
+        if (vitRes.ok) {
+          const vit = await vitRes.json() as VitStatusForStopLabel;
+          ignoreDecodeKey = vitDecodeEventKey(vit);
+        }
+      } catch { /* VIT may be offline */ }
+      setStopLabelEstopArmed(true, ignoreDecodeKey);
+    }
     setCommandSentAt(commandTs);
     setTick((n) => n + 1);
     toggleRosAuto();
@@ -2346,10 +2448,120 @@ function StopTestBenchWidget() {
     : sessionActive && displayPiNow != null && elapsedAnchor != null
       ? Math.max(0, displayPiNow - elapsedAnchor)
       : 0;
-  const cacheStartBlocked = benchNeedsPiScript(stopMode) && !cacheScriptReady;
-  const cacheWaitingEmbedding = benchNeedsPiScript(stopMode) && cacheScriptRunning && !cacheScriptReady;
-  const stopModeIndex = STOP_BENCH_MODES.indexOf(stopMode);
-  const startBlocked = sessionActive || estopActive || modeSwitching || cacheStartBlocked;
+  const cacheOn = stopToggles.cacheOn;
+  const edgeOn = stopToggles.edgeOn;
+  const bothStopsOff = !cacheOn && !edgeOn;
+  const effectiveStopMode = togglesToStopMode(cacheOn, edgeOn);
+  const benchModeForGating = effectiveStopMode ?? stopMode;
+  const cacheStartBlocked = benchNeedsPiScript(benchModeForGating) && !cacheScriptReady;
+  const cacheWaitingEmbedding = benchNeedsPiScript(benchModeForGating) && cacheScriptRunning && !cacheScriptReady;
+  const stopTogglesDisabled = sessionActive || modeSwitching;
+
+  const persistStopToggles = (next: StopModeToggles) => {
+    setStopToggles(next);
+    stopTogglesRef.current = next;
+    saveStopToggles(next);
+  };
+
+  const applyStopModeToggles = (nextCache: boolean, nextEdge: boolean) => {
+    const wasCacheOn = stopTogglesRef.current.cacheOn;
+    persistStopToggles({ cacheOn: nextCache, edgeOn: nextEdge });
+    if (nextCache) {
+      userDisabledCacheRef.current = false;
+    }
+    const mode = togglesToStopMode(nextCache, nextEdge);
+    if (wasCacheOn && !nextCache) {
+      userDisabledCacheRef.current = true;
+      setCacheScriptRunning(false);
+      void (async () => {
+        await stopPiCacheScript();
+        if (mode) {
+          await applyStopModeRef.current(mode);
+        } else {
+          await applyStopModeRef.current('edge_aware', { bothOff: true });
+        }
+      })();
+      return;
+    }
+    if (!wasCacheOn && nextCache && mode) {
+      void (async () => {
+        let reuse = false;
+        try {
+          const res = await fetch('/api/test_bench/stop_mode?force=1', { cache: 'no-store' });
+          if (res.ok) {
+            const data = await res.json() as StopModeApiResponse;
+            reuse = data.cache_script_running === true || piReportsCacheAwareOn(data);
+          }
+        } catch { /* probe optional */ }
+        await applyStopModeRef.current(mode, { reuseExisting: reuse });
+      })();
+      return;
+    }
+    if (mode) {
+      void applyStopMode(mode);
+    } else {
+      void applyStopMode('edge_aware', { bothOff: true });
+    }
+  };
+
+  const toggleCacheStop = () => {
+    if (stopTogglesDisabled) return;
+    applyStopModeToggles(!cacheOn, edgeOn);
+  };
+
+  const toggleEdgeStop = () => {
+    if (stopTogglesDisabled) return;
+    applyStopModeToggles(cacheOn, !edgeOn);
+  };
+
+  const stopModeStatusMessage = (() => {
+    if (bothStopsOff) {
+      return 'No stop detectors armed — enable Cache aware and/or Edge aware to unlock START.';
+    }
+    if (modeSwitching && cacheOn) {
+      return 'Starting cache_aware_offloading.py on the Pi…';
+    }
+    if (effectiveStopMode === 'hybrid') {
+      return cacheScriptReady
+        ? 'Pi script + dashboard VIT both armed — first detector wins; run records which stopped.'
+        : cacheScriptRunning
+          ? 'Waiting for bottle embedding — ensure VIT and video are running.'
+          : 'Waiting for Pi script — START is disabled.';
+    }
+    if (effectiveStopMode === 'cache_aware_offloading') {
+      return cacheScriptReady
+        ? 'Pi script in lxterminal — stop from Pi only.'
+        : cacheScriptRunning
+          ? 'Waiting for bottle embedding — ensure VIT and video are running.'
+          : 'Waiting for cache_aware_offloading.py on the Pi — START is disabled.';
+    }
+    if (effectiveStopMode === 'edge_aware') {
+      return 'VIT bottle detection on the dashboard sends auto_off + stop. Requires VIT and video.';
+    }
+    return '';
+  })();
+
+  const startButtonWaiting =
+    modeSwitching
+    || cacheStartBlocked
+    || cacheWaitingEmbedding
+    || waitingForMovement;
+  const startBlocked = sessionActive || estopActive || modeSwitching || cacheStartBlocked || bothStopsOff;
+  const startButtonTitle = sessionActive
+    ? waitingForMovement
+      ? 'Waiting for robot movement — explore command sent'
+      : 'Test in progress — ends when the robot stops'
+    : bothStopsOff
+      ? 'Turn on Cache aware and/or Edge aware before START'
+      : modeSwitching
+      ? 'Stop mode switching — waiting for Pi script'
+      : cacheWaitingEmbedding
+        ? 'Waiting for bottle embedding on the Pi'
+        : cacheStartBlocked
+          ? 'Cache-aware script must be running on the Pi before START'
+          : estopActive
+            ? 'E-stop active — clear it first'
+            : 'Start a run (sends explore command)';
   const benchPillLabel = modeSwitching
     ? 'SCRIPT…'
     : cacheWaitingEmbedding
@@ -2357,10 +2569,12 @@ function StopTestBenchWidget() {
       : stopping
       ? 'STOPPING'
       : waitingForMovement
-        ? 'WAITING'
+        ? 'STARTING UP'
         : running
           ? 'RUNNING'
-          : cacheStartBlocked
+          : bothStopsOff
+            ? 'NO STOP'
+            : cacheStartBlocked
             ? 'NO SCRIPT'
             : 'IDLE';
   const benchPillColor = modeSwitching
@@ -2373,7 +2587,9 @@ function StopTestBenchWidget() {
         ? accents.yellow
         : running
           ? accents.green
-          : cacheStartBlocked
+          : bothStopsOff
+            ? accents.red
+            : cacheStartBlocked
             ? accents.red
             : 'var(--text-muted)';
   const benchPillBg = modeSwitching
@@ -2386,7 +2602,9 @@ function StopTestBenchWidget() {
         ? 'rgba(245,158,11,0.18)'
         : running
           ? 'rgba(34,197,94,0.18)'
-          : cacheStartBlocked
+          : bothStopsOff
+            ? 'rgba(239,68,68,0.18)'
+            : cacheStartBlocked
             ? 'rgba(239,68,68,0.18)'
             : 'var(--secondary)';
   const inputStyle: React.CSSProperties = {
@@ -2443,101 +2661,104 @@ function StopTestBenchWidget() {
         </div>
       </div>
 
-      {/* Stop mode slider — cache | hybrid | edge (default right) */}
+      {/* Stop mode toggles — cache script + edge VIT (hybrid when both on) */}
       <div className="flex-shrink-0 rounded-xl px-2.5 py-2"
         style={{ background: 'rgba(0,0,0,0.12)', border: '1px solid var(--stroke-subtle)' }}>
-        <div className="flex items-center justify-between gap-2 mb-1.5">
+        <div className="flex items-center justify-between gap-2 mb-2">
           <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
             Stop mode
           </span>
           <span className="pill truncate" style={{
             padding: '1px 6px', fontSize: 8, fontWeight: 700, maxWidth: '55%',
-            background: stopMode === 'edge_aware'
-              ? 'rgba(6,182,212,0.18)'
-              : stopMode === 'hybrid'
-                ? 'rgba(139,92,246,0.18)'
+            background: bothStopsOff
+              ? 'rgba(239,68,68,0.18)'
+              : effectiveStopMode === 'edge_aware'
+                ? 'rgba(6,182,212,0.18)'
+                : effectiveStopMode === 'hybrid'
+                  ? 'rgba(139,92,246,0.18)'
+                  : 'var(--secondary)',
+            color: bothStopsOff
+              ? accents.red
+              : effectiveStopMode === 'edge_aware'
+                ? accents.cyan
+                : effectiveStopMode === 'hybrid'
+                  ? accents.purple
+                  : 'var(--text-muted)',
+          }}>
+            {bothStopsOff
+              ? 'Off'
+              : effectiveStopMode
+                ? STOP_MODE_LABELS[effectiveStopMode]
+                : STOP_MODE_LABELS[stopMode]}
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-1.5">
+          <button
+            type="button"
+            onClick={toggleCacheStop}
+            disabled={stopTogglesDisabled}
+            className="rounded-xl transition-all"
+            style={{
+              padding: '8px 10px',
+              fontWeight: 700,
+              fontSize: 10,
+              letterSpacing: '0.04em',
+              textAlign: 'left',
+              cursor: stopTogglesDisabled ? 'not-allowed' : 'pointer',
+              opacity: stopTogglesDisabled ? 0.55 : 1,
+              color: cacheOn ? '#fff' : 'var(--text-secondary)',
+              background: cacheOn
+                ? 'linear-gradient(135deg, var(--state-success), #14532d)'
                 : 'var(--secondary)',
-            color: stopMode === 'edge_aware'
-              ? accents.cyan
-              : stopMode === 'hybrid'
-                ? accents.purple
-                : 'var(--text-muted)',
-          }}>
-            {STOP_MODE_LABELS[stopMode]}
-          </span>
+              border: cacheOn
+                ? '1px solid rgba(255,255,255,0.22)'
+                : '1px solid var(--stroke-subtle)',
+              boxShadow: cacheOn
+                ? '0 8px 24px rgba(34,197,94,0.45), inset 0 1px 0 rgba(255,255,255,0.2)'
+                : 'none',
+            }}
+            title={cacheOn ? 'Turn off Pi cache-aware script' : 'Turn on Pi cache-aware script'}
+          >
+            <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
+              Cache aware
+            </span>
+            {cacheOn ? 'ON' : 'OFF'}
+          </button>
+          <button
+            type="button"
+            onClick={toggleEdgeStop}
+            disabled={stopTogglesDisabled}
+            className="rounded-xl transition-all"
+            style={{
+              padding: '8px 10px',
+              fontWeight: 700,
+              fontSize: 10,
+              letterSpacing: '0.04em',
+              textAlign: 'left',
+              cursor: stopTogglesDisabled ? 'not-allowed' : 'pointer',
+              opacity: stopTogglesDisabled ? 0.55 : 1,
+              color: edgeOn ? '#fff' : 'var(--text-secondary)',
+              background: edgeOn
+                ? 'linear-gradient(135deg, var(--state-success), #14532d)'
+                : 'var(--secondary)',
+              border: edgeOn
+                ? '1px solid rgba(255,255,255,0.22)'
+                : '1px solid var(--stroke-subtle)',
+              boxShadow: edgeOn
+                ? '0 8px 24px rgba(34,197,94,0.45), inset 0 1px 0 rgba(255,255,255,0.2)'
+                : 'none',
+            }}
+            title={edgeOn ? 'Turn off dashboard VIT bottle stop' : 'Turn on dashboard VIT bottle stop'}
+          >
+            <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
+              Edge aware
+            </span>
+            {edgeOn ? 'ON' : 'OFF'}
+          </button>
         </div>
-        <div className="flex items-center gap-2 mb-1">
-          <span style={{
-            fontSize: 8, fontWeight: stopMode === 'cache_aware_offloading' ? 700 : 500,
-            color: stopMode === 'cache_aware_offloading' ? 'var(--text-primary)' : 'var(--text-muted)',
-            lineHeight: 1.2, flex: 1, textAlign: 'left',
-          }}>
-            Cache
-          </span>
-          <span style={{
-            fontSize: 8, fontWeight: stopMode === 'hybrid' ? 700 : 500,
-            color: stopMode === 'hybrid' ? accents.purple : 'var(--text-muted)',
-            lineHeight: 1.2, flex: 1, textAlign: 'center',
-          }}>
-            Hybrid
-          </span>
-          <span style={{
-            fontSize: 8, fontWeight: stopMode === 'edge_aware' ? 700 : 500,
-            color: stopMode === 'edge_aware' ? accents.cyan : 'var(--text-muted)',
-            lineHeight: 1.2, flex: 1, textAlign: 'right',
-          }}>
-            Edge
-          </span>
-        </div>
-        <Slider
-          min={0}
-          max={2}
-          step={1}
-          value={[stopModeIndex >= 0 ? stopModeIndex : 2]}
-          centerTickIndex={1}
-          fillToValue={stopModeIndex >= 0 ? stopModeIndex : 2}
-          fillColor={
-            stopMode === 'edge_aware'
-              ? 'rgba(6,182,212,0.45)'
-              : stopMode === 'hybrid'
-                ? 'rgba(139,92,246,0.45)'
-                : 'rgba(100,130,165,0.45)'
-          }
-          hideRange
-          disabled={sessionActive || modeSwitching}
-          onValueChange={(vals) => {
-            const idx = vals[0];
-            if (idx == null || idx < 0 || idx >= STOP_BENCH_MODES.length) return;
-            const next = STOP_BENCH_MODES[idx];
-            if (next !== stopMode) void applyStopMode(next);
-          }}
-          className="py-1"
-        />
-        {stopMode === 'edge_aware' && (
+        {stopModeStatusMessage && (
           <p style={{ margin: '6px 0 0', fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.35 }}>
-            VIT bottle detection on the dashboard sends auto_off + stop. Requires VIT and video.
-          </p>
-        )}
-        {stopMode === 'hybrid' && (
-          <p style={{ margin: '6px 0 0', fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.35 }}>
-            {modeSwitching
-              ? 'Starting cache_aware_offloading.py on the Pi…'
-              : cacheScriptReady
-                ? 'Pi script + dashboard VIT both armed — first detector wins; run records which stopped.'
-                : cacheScriptRunning
-                  ? 'Waiting for bottle embedding — ensure VIT and video are running.'
-                  : 'Waiting for Pi script — START is disabled.'}
-          </p>
-        )}
-        {stopMode === 'cache_aware_offloading' && (
-          <p style={{ margin: '6px 0 0', fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.35 }}>
-            {modeSwitching
-              ? 'Starting cache_aware_offloading.py on the Pi…'
-              : cacheScriptReady
-                ? 'Pi script in lxterminal — stop from Pi only.'
-                : cacheScriptRunning
-                  ? 'Waiting for bottle embedding — ensure VIT and video are running.'
-                  : 'Waiting for cache_aware_offloading.py on the Pi — START is disabled.'}
+            {stopModeStatusMessage}
           </p>
         )}
       </div>
@@ -2575,30 +2796,31 @@ function StopTestBenchWidget() {
           disabled={startBlocked}
           className="ml-auto flex items-center justify-center gap-1.5 rounded-xl transition-all"
           style={{
-            minWidth: 92, padding: '10px 14px',
-            fontWeight: 800, fontSize: 12, letterSpacing: '0.06em', color: '#fff',
+            minWidth: 118, padding: '10px 12px',
+            fontWeight: 800, fontSize: startButtonWaiting ? 10 : 12, letterSpacing: '0.06em', color: '#fff',
             cursor: startBlocked ? 'not-allowed' : 'pointer',
-            opacity: startBlocked ? 0.5 : 1,
-            background: 'linear-gradient(135deg, var(--state-success), #14532d)',
+            opacity: startBlocked && !startButtonWaiting ? 0.5 : 1,
+            background: startButtonWaiting
+              ? 'linear-gradient(135deg, #f59e0b, #b45309)'
+              : 'linear-gradient(135deg, var(--state-success), #14532d)',
             border: '1px solid rgba(255,255,255,0.2)',
-            boxShadow: '0 8px 24px rgba(34,197,94,0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
+            boxShadow: startButtonWaiting
+              ? '0 8px 24px rgba(245,158,11,0.4), inset 0 1px 0 rgba(255,255,255,0.2)'
+              : '0 8px 24px rgba(34,197,94,0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
           }}
-          title={
-            sessionActive
-              ? 'Test in progress — ends when the robot stops'
-              : modeSwitching
-                ? 'Stop mode switching — waiting for Pi script'
-                : cacheWaitingEmbedding
-                  ? 'Waiting for bottle embedding on the Pi'
-                  : cacheStartBlocked
-                    ? 'Cache-aware script must be running on the Pi before START'
-                  : estopActive
-                    ? 'E-stop active — clear it first'
-                    : 'Start a run (sends explore command)'
-          }
+          title={startButtonTitle}
         >
-          <Play size={13} fill="#fff" />
-          START
+          {startButtonWaiting ? (
+            <>
+              <Loader2 size={13} className="animate-spin" />
+              STARTING UP
+            </>
+          ) : (
+            <>
+              <Play size={13} fill="#fff" />
+              START
+            </>
+          )}
         </button>
       </div>
 

@@ -5,6 +5,9 @@ import { DEFAULT_BROKER_HOST, useMetricsStore, usePickerStore, useSettingsStore 
 import { sendCommand, sendCameraCommand, setEstopState, vecToCameraCommand, type BotCommand } from '../lib/Controls';
 import { connectBroker } from '../lib/Connections';
 import {
+  loadStopToggles,
+} from '../lib/testBenchStorage';
+import {
   isEdgeAwareStopEnabled,
   processVitStatusForStopLabelEstop,
   setEdgeAwareStopEnabled,
@@ -479,17 +482,18 @@ export function useKeyboardCamera(onChange?: (v: { pan: number; tilt: number }) 
 /** Keep edge-aware flag in sync with backend; evaluate VIT decoder labels on each poll. */
 export function useEdgeAwareStopLabelEstop() {
   useEffect(() => {
+    setEdgeAwareStopEnabled(loadStopToggles().edgeOn);
+
     let alive = true;
 
     const poll = async () => {
       try {
         const modeRes = await fetch('/api/test_bench/stop_mode', { cache: 'no-store' });
         if (modeRes.ok) {
-          const modeData = await modeRes.json() as { mode?: string; edge_aware_enabled?: boolean };
-          const enabled = modeData.edge_aware_enabled === true
-            || modeData.mode === 'edge_aware'
-            || modeData.mode === 'hybrid';
-          setEdgeAwareStopEnabled(enabled);
+          const modeData = await modeRes.json() as { mode?: string };
+          const toggles = loadStopToggles();
+          const modeOk = modeData.mode === 'edge_aware' || modeData.mode === 'hybrid';
+          setEdgeAwareStopEnabled(toggles.edgeOn && modeOk);
         }
         if (!isEdgeAwareStopEnabled()) return;
 

@@ -126,6 +126,30 @@ export const STOP_BENCH_MODES: StopBenchMode[] = [
 export const DEFAULT_STOP_BENCH_MODE: StopBenchMode = 'edge_aware';
 
 const STOP_MODE_PREF_KEY = 'yahboom_stop_bench_mode';
+const STOP_TOGGLES_KEY = 'yahboom_stop_toggles';
+
+export function loadStopToggles(): StopModeToggles {
+  try {
+    const raw = localStorage.getItem(STOP_TOGGLES_KEY);
+    if (raw) {
+      const data = JSON.parse(raw) as Record<string, unknown>;
+      if (typeof data.cacheOn === 'boolean' && typeof data.edgeOn === 'boolean') {
+        return { cacheOn: data.cacheOn, edgeOn: data.edgeOn };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return stopModeToToggles(loadStopModePreference());
+}
+
+export function saveStopToggles(toggles: StopModeToggles): void {
+  try {
+    localStorage.setItem(STOP_TOGGLES_KEY, JSON.stringify(toggles));
+  } catch {
+    /* ignore */
+  }
+}
 
 export function loadStopModePreference(): StopBenchMode {
   try {
@@ -150,4 +174,31 @@ export function benchNeedsPiScript(mode: StopBenchMode): boolean {
 
 export function benchHasDashboardBottleStop(mode: StopBenchMode): boolean {
   return mode === 'edge_aware' || mode === 'hybrid';
+}
+
+export type StopModeToggles = { cacheOn: boolean; edgeOn: boolean };
+
+/** True when the Pi reports cache-aware is running and ready (MQTT or SSH probe). */
+export function piReportsCacheAwareOn(data: {
+  cache_aware_mqtt_ready?: boolean;
+  cache_script_running?: boolean;
+  cache_script_detection_ready?: boolean;
+}): boolean {
+  if (data.cache_aware_mqtt_ready === true) return true;
+  return data.cache_script_running === true && data.cache_script_detection_ready === true;
+}
+
+export function stopModeToToggles(mode: StopBenchMode): StopModeToggles {
+  return {
+    cacheOn: benchNeedsPiScript(mode),
+    edgeOn: benchHasDashboardBottleStop(mode),
+  };
+}
+
+/** Map cache/edge toggles to backend stop mode. Returns null when both are off. */
+export function togglesToStopMode(cacheOn: boolean, edgeOn: boolean): StopBenchMode | null {
+  if (cacheOn && edgeOn) return 'hybrid';
+  if (cacheOn) return 'cache_aware_offloading';
+  if (edgeOn) return 'edge_aware';
+  return null;
 }

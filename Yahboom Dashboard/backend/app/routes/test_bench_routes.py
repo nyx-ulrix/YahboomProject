@@ -4,6 +4,7 @@ Stop-Time Test Bench API — stop-mode selection and Pi cache-aware script contr
 
 from flask import Blueprint, jsonify, request
 
+from app.services.mqtt_service import mqtt_service
 from app.services.test_bench.cache_aware_ssh import (
     probe_cache_aware_script,
     start_cache_aware_script,
@@ -21,25 +22,31 @@ test_bench_bp = Blueprint("test_bench", __name__, url_prefix="/api/test_bench")
 
 def _cache_script_fields(probe: dict | None = None, *, running: bool | None = None) -> dict:
     """Merge Pi cache-script probe fields into an API payload."""
+    mqtt_ready = mqtt_service.cache_aware_embedding_ready
     if running is None:
         running = bool((probe or {}).get("running"))
+    probe_ready = bool((probe or {}).get("detection_ready"))
+    detection_ready = bool(running and probe_ready) or mqtt_ready
     return {
         "cache_script_running": running,
-        "cache_script_detection_ready": bool(running and (probe or {}).get("detection_ready")),
+        "cache_script_detection_ready": detection_ready,
+        "cache_aware_mqtt_ready": mqtt_ready,
         **({"cache_script_launch_mode": probe["launch_mode"]} if probe and probe.get("launch_mode") else {}),
         **({"cache_script_log": probe["log_path"]} if probe and probe.get("log_path") else {}),
     }
 
 
-def _stop_mode_payload(*, probe: dict | None = None, cache_script_running: bool | None = None) -> dict:
+def _stop_mode_payload(
+    *,
+    probe: dict | None = None,
+    cache_script_running: bool | None = None,
+    force_probe: bool = False,
+) -> dict:
     payload = edge_aware_estop.get_status()
-    if not edge_aware_estop.needs_pi_cache_script:
-        payload.update(_cache_script_fields({}, running=False))
-        return payload
     if probe is None:
-        probe = probe_cache_aware_script()
+        probe = probe_cache_aware_script(force=force_probe)
     running = cache_script_running if cache_script_running is not None else bool(probe.get("running"))
-    if running and not probe.get("detection_ready"):
+    if running and not probe.get("detection_ready") and not mqtt_service.cache_aware_embedding_ready:
         probe = {**probe, **probe_cache_aware_script(force=True)}
     payload.update(_cache_script_fields(probe, running=running))
     return payload
@@ -48,10 +55,24 @@ def _stop_mode_payload(*, probe: dict | None = None, cache_script_running: bool 
 @test_bench_bp.route("/stop_mode", methods=["GET"])
 def get_stop_mode():
     force = request.args.get("force", "").lower() in ("1", "true", "yes")
-    if not edge_aware_estop.needs_pi_cache_script:
-        return jsonify(_stop_mode_payload(probe={}, cache_script_running=False))
     probe = probe_cache_aware_script(force=force)
-    return jsonify(_stop_mode_payload(probe=probe))
+    return jsonify(_stop_mode_payload(probe=probe, force_probe=force))
+
+
+@test_bench_bp.route("/cache_script/stop", methods=["POST"])
+def stop_cache_script():
+    """Stop cache_aware_offloading.py on the Pi and close its terminal."""
+    try:
+        probe = stop_cache_aware_script()
+    except Exception as exc:
+        return jsonify({
+            "status": "error",
+            "message": str(exc).strip() or "Failed to stop cache-aware script on Pi",
+        }), 503
+    return jsonify({
+        "status": "ok",
+        **_stop_mode_payload(probe=probe, cache_script_running=False),
+    })
 
 
 @test_bench_bp.route("/stop_mode", methods=["POST"])
@@ -75,14 +96,30 @@ def set_stop_mode():
             stop_cache_aware_script()
             cache_running = False
         else:
-            probe = start_cache_aware_script(wait=True)
-            cache_running = bool(probe.get("running"))
-            if not cache_running:
+            reuse_existing = data.get("reuse_existing") in (True, "true", 1, "1", "yes")
+            if reuse_existing:
+                probe = probe_cache_aware_script(force=True)
+                if probe.get("running"):
+                    cache_running = True
+                    if probe.get("detection_ready"):
+                        message = "Cache aware enabled — using existing Pi script"
+                    else:
+                        message = (
+                            "Pi script already running — waiting for bottle embedding "
+                            "([DETECT] Text embedding ready). START unlocks when ready."
+                        )
+                else:
+                    probe = start_cache_aware_script(wait=True)
+                    cache_running = bool(probe.get("running"))
+            else:
+                probe = start_cache_aware_script(wait=True)
+                cache_running = bool(probe.get("running"))
+            if not cache_running and not message:
                 message = (
                     "cache_aware_offloading.py did not start on the Pi within the "
                     "configured timeout — check SSH, vit_env, and script path."
                 )
-            elif not probe.get("detection_ready"):
+            elif cache_running and not probe.get("detection_ready") and not message:
                 message = (
                     "Pi script is running — waiting for bottle embedding "
                     "([DETECT] Text embedding ready). START unlocks when ready."

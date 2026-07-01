@@ -4,6 +4,7 @@ Shared Pi SSH launch helpers — lxterminal when a GUI session is available, hea
 
 from __future__ import annotations
 
+import re
 import shlex
 
 import paramiko
@@ -205,6 +206,38 @@ def start_lxterminal(
             + (f": {err}{extra}" if err or extra else "")
         )
     return session
+
+
+def close_lxterminal(
+    client: paramiko.SSHClient,
+    *,
+    home: str,
+    title: str,
+    launcher_paths: list[str],
+) -> None:
+    """Kill lxterminal windows (Wayland or X11) and related launcher processes."""
+    term = re.escape(PI_TERMINAL.split()[0])
+    title_esc = re.escape(title)
+    title_q = shlex.quote(title)
+
+    parts: list[str] = []
+    for launcher_path in launcher_paths:
+        launcher_esc = re.escape(launcher_path)
+        launcher_q = shlex.quote(launcher_path)
+        parts.append(f"pkill -f '{term}.*{launcher_esc}' 2>/dev/null")
+        parts.append(f"pkill -f '{term} -e {launcher_q}' 2>/dev/null")
+    parts.append(f"pkill -f '{term}.*{title_esc}' 2>/dev/null")
+    parts.append(f"pkill -f '{title_esc}' 2>/dev/null")
+
+    env_prefix, _session = gui_env_prefix(client, home)
+    if env_prefix:
+        parts.append(f"{env_prefix}pkill -f '{term}.*{title_esc}' 2>/dev/null")
+        if "WAYLAND" not in env_prefix:
+            parts.append(f"{env_prefix}wmctrl -c {title_q} 2>/dev/null")
+
+    cmd = "; ".join(parts) + "; sleep 0.3; true"
+    _, stdout, _ = client.exec_command(cmd, timeout=15)
+    stdout.channel.recv_exit_status()
 
 
 def start_interactive_or_headless(

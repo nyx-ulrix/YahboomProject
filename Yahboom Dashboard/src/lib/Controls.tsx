@@ -1,5 +1,5 @@
 import { useMetricsStore } from '../app/store';
-import { notifyTestBenchManualStop, notifyTestBenchStopLabelStop, skipAutoOffOnBenchStop } from './testBenchSession';
+import { notifyTestBenchManualStop, notifyTestBenchStopLabelStop, benchModeHasDashboardBottleStop, skipAutoOffOnBenchStop } from './testBenchSession';
 /**
  * Engage or release the emergency stop on both the local store and the shared
  * backend, so every connected client reflects the change within ~3 seconds.
@@ -164,6 +164,7 @@ export function sendCommand(command: BotCommand, source?: CommandSource): void {
   // Edge-aware bottle stop — auto_off + stop in parallel; freeze test-bench timer.
   // Must run before the autoMode movement gate (explore is on during bench START).
   if (command === 'stop' && source === 'stop_label') {
+    if (!benchModeHasDashboardBottleStop()) return;
     notifyTestBenchStopLabelStop();
     useMetricsStore.setState({
       ...commandState('auto_off'),

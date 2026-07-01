@@ -2,7 +2,6 @@
 SSH helpers to start/stop cache_aware_offloading.py on the Raspberry Pi.
 
 Opens a Pi desktop terminal with:
-  source ~/vit_env/bin/activate
   python3 cache_aware_offloading.py
 """
 
@@ -17,6 +16,7 @@ import paramiko
 
 from app.services.mqtt_service import mqtt_service
 from app.services.pi_remote_launch import (
+    close_lxterminal,
     gui_session_available,
     start_lxterminal,
     write_launcher,
@@ -33,7 +33,6 @@ from config import (
     PI_SSH_PASSWORD,
     PI_SSH_USER,
     PI_TERMINAL,
-    PI_VIT_VENV,
     PROBE_CACHE_TTL_SEC,
 )
 
@@ -86,23 +85,16 @@ def _pkill_patterns() -> str:
     )
 
 
-def _close_terminal_cmd(*, sleep_sec: float = 0.3) -> str:
-    """Kill cache-aware processes and close the Pi desktop terminal window."""
-    term = re.escape(_terminal_bin())
-    launcher = re.escape(PI_CACHE_LAUNCHER)
-    title = re.escape(PI_CACHE_AWARE_TERMINAL_TITLE)
+def _close_pi_cache_session(client: paramiko.SSHClient) -> None:
+    """Kill cache_aware_offloading.py and close its lxterminal on the Pi (Wayland or X11)."""
     home = _pi_home()
-    xauth = shlex.quote(f"{home}/.Xauthority")
-    title_q = shlex.quote(PI_CACHE_AWARE_TERMINAL_TITLE)
-    return (
-        f"{_pkill_patterns()}"
-        # lxterminal often omits -t from /proc/cmdline — match -e launcher instead.
-        f"pkill -f '{term}.*{launcher}' 2>/dev/null; "
-        f"pkill -f '{term} -e {shlex.quote(PI_CACHE_LAUNCHER)}' 2>/dev/null; "
-        f"pkill -f '{term}.*{title}' 2>/dev/null; "
-        f"pkill -f '{title}' 2>/dev/null; "
-        f"DISPLAY=:0 XAUTHORITY={xauth} wmctrl -c {title_q} 2>/dev/null; "
-        f"sleep {sleep_sec}; true"
+    _, stdout, _ = client.exec_command(_pkill_patterns(), timeout=10)
+    stdout.channel.recv_exit_status()
+    close_lxterminal(
+        client,
+        home=home,
+        title=PI_CACHE_AWARE_TERMINAL_TITLE,
+        launcher_paths=[PI_CACHE_LAUNCHER, PI_CACHE_LOG_VIEWER],
     )
 
 
@@ -153,12 +145,10 @@ def _log(message: str, level: str = "info") -> None:
 
 def _launcher_body() -> tuple[str, str]:
     home, workdir, script, log = _pi_paths()
-    venv_activate = _expand_pi_path(PI_VIT_VENV, home)
     body = (
         "#!/bin/bash\n"
         f"cd {shlex.quote(workdir)}\n"
         f"truncate -s 0 {shlex.quote(log)} 2>/dev/null\n"
-        f"source {shlex.quote(venv_activate)}\n"
         f"env PYTHONUNBUFFERED=1 stdbuf -oL -eL python3 {shlex.quote(script)} 2>&1 | tee -a {shlex.quote(log)}\n"
         "exec bash\n"
     )
@@ -329,10 +319,6 @@ def start_cache_aware_script(*, wait: bool = True) -> dict:
 
     existing = _probe_on_pi(client, host)
     if existing.get("running"):
-        if gui_session_available(client, home) and not _cache_terminal_open(client):
-            _open_pi_log_terminal(client)
-        if _cache_terminal_open(client):
-            existing["launch_mode"] = "terminal"
         client.close()
         _probe_cache["at"] = time.monotonic()
         _probe_cache["result"] = existing
@@ -361,8 +347,7 @@ def start_cache_aware_script(*, wait: bool = True) -> dict:
             )
         return probe
 
-    _, stdout, _ = client.exec_command(_close_terminal_cmd(sleep_sec=0.5), timeout=10)
-    stdout.channel.recv_exit_status()
+    _close_pi_cache_session(client)
     mqtt_service.clear_cache_aware_ready()
     _start_in_pi_terminal(client)
     launch_mode = "terminal"
@@ -393,8 +378,7 @@ def stop_cache_aware_script() -> dict:
     _invalidate_probe_cache()
     mqtt_service.clear_cache_aware_ready()
     client = _ssh_client(host)
-    _, stdout, _ = client.exec_command(_close_terminal_cmd(), timeout=10)
-    stdout.channel.recv_exit_status()
+    _close_pi_cache_session(client)
     probe = _probe_on_pi(client, host)
     client.close()
     _probe_cache["at"] = time.monotonic()

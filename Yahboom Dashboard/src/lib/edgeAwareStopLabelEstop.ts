@@ -1,5 +1,6 @@
 import { sendCommand } from './Controls';
 import { useMetricsStore } from '../app/store';
+import { benchModeHasDashboardBottleStop } from './testBenchSession';
 
 /** VIT label from labels.json — edge-aware stop triggers on this class only. */
 export const EDGE_AWARE_STOP_LABEL = 'bottle';
@@ -84,7 +85,7 @@ export function hasQualifyingStopLabel(vit: VitStatusForStopLabel): boolean {
  * stop (same as manual stop). Returns true if triggered.
  */
 export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): boolean {
-  if (!edgeAwareEnabled || !stopLabelEstopArmed) return false;
+  if (!edgeAwareEnabled || !stopLabelEstopArmed || !benchModeHasDashboardBottleStop()) return false;
 
   const latest = vit.latest;
   const key = vitDecodeEventKey(vit);
