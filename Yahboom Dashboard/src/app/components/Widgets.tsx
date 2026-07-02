@@ -2501,6 +2501,13 @@ function StopTestBenchWidget() {
   const updateRun = (id: number, patch: Partial<StopTestRun>) =>
     setRuns((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
 
+  const deleteRun = (id: number) => {
+    setRuns((prev) => {
+      const next = prev.filter((r) => r.id !== id);
+      return next.map((r, index) => ({ ...r, run: index + 1 }));
+    });
+  };
+
   const exportCsv = () => {
     if (runs.length === 0) return;
     const headers = [
@@ -2945,7 +2952,7 @@ function StopTestBenchWidget() {
         {/* Column header */}
         <div className="sticky top-0 grid items-center gap-1 px-2 py-1 uppercase tracking-wider"
           style={{
-            gridTemplateColumns: '22px 48px 64px 1fr 44px 1fr 72px',
+            gridTemplateColumns: '22px 48px 64px 1fr 44px 1fr 72px 24px',
             fontSize: 8,
             color: 'var(--text-muted)',
             background: 'var(--bg-elevated)',
@@ -2958,6 +2965,7 @@ function StopTestBenchWidget() {
           <span>Conf</span>
           <span>Dist (cm)</span>
           <span>Net</span>
+          <span />
         </div>
 
         {runs.length === 0 ? (
@@ -2969,7 +2977,7 @@ function StopTestBenchWidget() {
           runs.map((r) => (
             <div key={r.id} className="grid items-center gap-1 px-2 py-1 border-b"
               style={{
-                gridTemplateColumns: '22px 48px 64px 1fr 44px 1fr 72px',
+                gridTemplateColumns: '22px 48px 64px 1fr 44px 1fr 72px 24px',
                 borderColor: 'var(--stroke-subtle)',
               }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', fontFamily: 'monospace' }}>
@@ -3051,6 +3059,23 @@ function StopTestBenchWidget() {
                   <option value={r.networkType}>{r.networkType}</option>
                 )}
               </select>
+              <button
+                type="button"
+                onClick={() => deleteRun(r.id)}
+                className="flex items-center justify-center rounded"
+                title={`Delete run ${r.run}`}
+                style={{
+                  width: 22,
+                  height: 22,
+                  padding: 0,
+                  border: '1px solid var(--stroke-subtle)',
+                  background: 'transparent',
+                  color: 'var(--text-muted)',
+                  cursor: 'pointer',
+                }}
+              >
+                <Trash2 size={10} />
+              </button>
             </div>
           ))
         )}
