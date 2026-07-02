@@ -1,5 +1,5 @@
 import { useMetricsStore } from '../app/store';
-import { notifyTestBenchManualStop, notifyTestBenchStopLabelStop, benchModeHasDashboardBottleStop, skipAutoOffOnBenchStop } from './testBenchSession';
+import { notifyTestBenchManualStop, benchModeHasDashboardBottleStop, skipAutoOffOnBenchStop } from './testBenchSession';
 /**
  * Engage or release the emergency stop on both the local store and the shared
  * backend, so every connected client reflects the change within ~3 seconds.
@@ -158,25 +158,38 @@ async function postBotCommand(command: BotCommand): Promise<void> {
   });
 }
 
+/**
+ * Edge / hybrid bottle stop — send auto_off first so explore disengages, then stop.
+ * Used by dashboard VIT detection (not Pi cache script).
+ */
+export function sendDashboardBottleStop(): void {
+  if (!benchModeHasDashboardBottleStop()) return;
+
+  useMetricsStore.setState({
+    ...commandState('auto_off'),
+    ...commandState('stop', 'stop_label'),
+  });
+
+  void (async () => {
+    try {
+      await postBotCommand('auto_off');
+      await postBotCommand('stop');
+    } catch {
+      useMetricsStore.getState().pushEvent(
+        'error',
+        'Failed to send dashboard bottle stop — backend unreachable',
+        'yahboom/cmd',
+      );
+    }
+  })();
+}
+
 export function sendCommand(command: BotCommand, source?: CommandSource): void {
   const state = useMetricsStore.getState();
 
-  // Edge-aware bottle stop — auto_off + stop in parallel; freeze test-bench timer.
-  // Must run before the autoMode movement gate (explore is on during bench START).
+  // Edge-aware bottle stop — auto_off then stop; freeze test-bench timer via notify hook.
   if (command === 'stop' && source === 'stop_label') {
-    if (!benchModeHasDashboardBottleStop()) return;
-    notifyTestBenchStopLabelStop();
-    useMetricsStore.setState({
-      ...commandState('auto_off'),
-      ...commandState('stop', 'stop_label'),
-    });
-    void (async () => {
-      try {
-        await Promise.all([postBotCommand('auto_off'), postBotCommand('stop')]);
-      } catch {
-        useMetricsStore.getState().pushEvent('error', 'Failed to send stop-label commands — backend unreachable', 'yahboom/cmd');
-      }
-    })();
+    sendDashboardBottleStop();
     return;
   }
 
@@ -202,8 +215,13 @@ export function sendCommand(command: BotCommand, source?: CommandSource): void {
     && state.estopActive
   ) return;
 
-  // Manual stop also turns off explore/auto on the Pi (same as STOP EXPLORING).
-  if (command === 'stop' && source === 'manual' && state.autoRunning && !skipAutoOffOnBenchStop()) {
+  // Manual stop also turns off explore/auto on the Pi (edge + hybrid; not pure cache bench).
+  if (
+    command === 'stop'
+    && source === 'manual'
+    && state.autoRunning
+    && !skipAutoOffOnBenchStop()
+  ) {
     sendCommand('auto_off');
   }
   if (command === 'stop' && source === 'manual') {

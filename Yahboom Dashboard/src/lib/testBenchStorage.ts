@@ -18,6 +18,7 @@ export type PersistedStopTestRun = {
   networkType: string;
   stopMode: StopBenchMode;
   stopSource?: StopSource;
+  stopConfidencePercent?: number | null;
 };
 
 export type TestBenchCache = {
@@ -55,6 +56,7 @@ function isPersistedRun(value: unknown): value is PersistedStopTestRun {
     && typeof r.networkType === 'string'
     && isStopBenchMode(r.stopMode)
     && (r.stopSource === undefined || isStopSource(r.stopSource))
+    && (r.stopConfidencePercent === undefined || r.stopConfidencePercent === null || typeof r.stopConfidencePercent === 'number')
   );
 }
 
@@ -106,15 +108,15 @@ export function clearTestBenchCache(): void {
 }
 
 export const STOP_SOURCE_LABELS: Record<StopSource, string> = {
-  cache_pi: 'Pi script · bottle',
-  edge_dashboard: 'Dashboard VIT · bottle',
+  cache_pi: 'Cache stop',
+  edge_dashboard: 'Edge Stop',
   manual: 'Manual stop',
 };
 
 export const STOP_MODE_LABELS: Record<StopBenchMode, string> = {
-  cache_aware_offloading: 'Cache aware',
+  cache_aware_offloading: 'Cache stop',
   hybrid: 'Hybrid',
-  edge_aware: 'Edge aware',
+  edge_aware: 'Edge Stop',
 };
 
 export const STOP_BENCH_MODES: StopBenchMode[] = [
@@ -124,6 +126,8 @@ export const STOP_BENCH_MODES: StopBenchMode[] = [
 ];
 
 export const DEFAULT_STOP_BENCH_MODE: StopBenchMode = 'edge_aware';
+
+export const DEFAULT_STOP_TOGGLES: StopModeToggles = { cacheOn: false, edgeOn: false };
 
 const STOP_MODE_PREF_KEY = 'yahboom_stop_bench_mode';
 const STOP_TOGGLES_KEY = 'yahboom_stop_toggles';
@@ -140,7 +144,7 @@ export function loadStopToggles(): StopModeToggles {
   } catch {
     /* ignore */
   }
-  return stopModeToToggles(loadStopModePreference());
+  return { ...DEFAULT_STOP_TOGGLES };
 }
 
 export function saveStopToggles(toggles: StopModeToggles): void {

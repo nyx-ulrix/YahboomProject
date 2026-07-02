@@ -1,11 +1,13 @@
-import { sendCommand } from './Controls';
+import { sendDashboardBottleStop } from './Controls';
 import { useMetricsStore } from '../app/store';
 import { benchModeHasDashboardBottleStop } from './testBenchSession';
+import { notifyTestBenchStopLabelStop } from './testBenchSession';
 
 /** VIT label from labels.json — edge-aware stop triggers on this class only. */
 export const EDGE_AWARE_STOP_LABEL = 'bottle';
 
-export const EDGE_AWARE_MIN_CONFIDENCE = 75;
+/** Minimum bottle confidence (%) before edge-aware dashboard stop fires. */
+const EDGE_AWARE_MIN_CONFIDENCE = 75;
 const EDGE_AWARE_COOLDOWN_MS = 5_000;
 
 export type VitStatusForStopLabel = {
@@ -71,17 +73,23 @@ function labelRows(latest: NonNullable<VitStatusForStopLabel['latest']>) {
   return rows;
 }
 
+/** Highest bottle confidence on the latest decode, if any. */
+export function bestStopLabelConfidence(vit: VitStatusForStopLabel): number | null {
+  const latest = vit.latest;
+  if (!latest) return null;
+  const bottleRows = labelRows(latest).filter((row) => isStopLabel(row.label));
+  if (!bottleRows.length) return null;
+  return Math.max(...bottleRows.map((row) => row.confidence));
+}
+
 /** True when any stop-label row meets the confidence threshold (any rank). */
 export function hasQualifyingStopLabel(vit: VitStatusForStopLabel): boolean {
-  const latest = vit.latest;
-  if (!latest) return false;
-  return labelRows(latest).some(
-    (row) => isStopLabel(row.label) && row.confidence >= EDGE_AWARE_MIN_CONFIDENCE,
-  );
+  const confidence = bestStopLabelConfidence(vit);
+  return confidence != null && confidence >= EDGE_AWARE_MIN_CONFIDENCE;
 }
 
 /**
- * When edge-aware mode is on, session is armed, and stop label is >= 75%, send
+ * When edge-aware mode is on, session is armed, and stop label meets threshold, send
  * stop (same as manual stop). Returns true if triggered.
  */
 export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): boolean {
@@ -90,19 +98,26 @@ export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): b
   const latest = vit.latest;
   const key = vitDecodeEventKey(vit);
   if (!latest || !key || key === lastHandledKey) return false;
-  if (!hasQualifyingStopLabel(vit)) return false;
 
-  return triggerStopLabelStop(key);
+  const confidence = bestStopLabelConfidence(vit);
+  if (confidence == null || confidence < EDGE_AWARE_MIN_CONFIDENCE) return false;
+
+  return triggerStopLabelStop(key, confidence);
 }
 
-function triggerStopLabelStop(key: string): boolean {
+function triggerStopLabelStop(key: string, confidence: number): boolean {
   const now = Date.now();
   if (now - lastTriggerAt < EDGE_AWARE_COOLDOWN_MS) return false;
   if (useMetricsStore.getState().estopActive) return false;
 
   lastHandledKey = key;
   lastTriggerAt = now;
-  sendCommand('stop', 'stop_label');
-  useMetricsStore.getState().pushEvent('warning', `Edge-aware stop — ${EDGE_AWARE_STOP_LABEL} detected, stop sent`, 'yahboom/vit/status');
+  notifyTestBenchStopLabelStop(confidence);
+  sendDashboardBottleStop();
+  useMetricsStore.getState().pushEvent(
+    'warning',
+    `Edge-aware stop — ${EDGE_AWARE_STOP_LABEL} ${confidence.toFixed(2)}% (≥ ${EDGE_AWARE_MIN_CONFIDENCE}%), stop sent`,
+    'yahboom/vit/status',
+  );
   return true;
 }

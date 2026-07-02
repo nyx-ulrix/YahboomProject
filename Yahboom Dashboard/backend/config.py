@@ -16,6 +16,7 @@ GRID_TOPIC = os.getenv("MQTT_GRID_TOPIC", "yahboom/grid")
 DRIVE_STATUS_TOPIC = os.getenv("MQTT_DRIVE_STATUS_TOPIC", "yahboom/drive/status")
 CACHE_AWARE_READY_TOPIC = os.getenv(
     "MQTT_CACHE_AWARE_READY_TOPIC", "yahboom/cache_aware/ready")
+DETECT_STATUS_TOPIC = os.getenv("MQTT_DETECT_STATUS_TOPIC", "yahboom/detect/status")
 # Flask settings
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "3000"))

@@ -59,6 +59,14 @@ def get_stop_mode():
     return jsonify(_stop_mode_payload(probe=probe, force_probe=force))
 
 
+@test_bench_bp.route("/latest_detection", methods=["GET"])
+def get_latest_detection():
+    """Latest Pi cache-aware bottle detection from MQTT yahboom/detect/status."""
+    return jsonify({
+        "detection": mqtt_service.get_latest_cache_detection(),
+    })
+
+
 @test_bench_bp.route("/cache_script/stop", methods=["POST"])
 def stop_cache_script():
     """Stop cache_aware_offloading.py on the Pi and close its terminal."""
@@ -102,10 +110,10 @@ def set_stop_mode():
                 if probe.get("running"):
                     cache_running = True
                     if probe.get("detection_ready"):
-                        message = "Cache aware enabled — using existing Pi script"
+                        message = "Cache stop enabled — using existing script on Pi"
                     else:
                         message = (
-                            "Pi script already running — waiting for bottle embedding "
+                            "Cache stop already running — waiting for bottle embedding "
                             "([DETECT] Text embedding ready). START unlocks when ready."
                         )
                 else:
@@ -121,12 +129,12 @@ def set_stop_mode():
                 )
             elif cache_running and not probe.get("detection_ready") and not message:
                 message = (
-                    "Pi script is running — waiting for bottle embedding "
+                    "Cache stop is running — waiting for bottle embedding "
                     "([DETECT] Text embedding ready). START unlocks when ready."
                 )
             if mode == STOP_MODE_HYBRID and cache_running:
                 hybrid_msg = (
-                    "Hybrid mode — Pi cache script and dashboard VIT bottle stop "
+                    "Hybrid mode — Cache stop and Edge Stop "
                     "are both armed (first trigger wins)"
                 )
                 message = f"{hybrid_msg}; {message}" if message else hybrid_msg

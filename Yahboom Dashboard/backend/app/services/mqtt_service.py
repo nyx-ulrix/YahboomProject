@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import time
 import json
 from config import (
-    BROKER_PORT, CACHE_AWARE_READY_TOPIC, DRIVE_STATUS_TOPIC, GRID_TOPIC, TOPIC, MQTT_TIMEOUT, PUBLISH_TIMEOUT,
+    BROKER_PORT, CACHE_AWARE_READY_TOPIC, DETECT_STATUS_TOPIC, DRIVE_STATUS_TOPIC, GRID_TOPIC, TOPIC, MQTT_TIMEOUT, PUBLISH_TIMEOUT,
     SAFETY_TOPIC, EVENT_LOG_MAX, EVENT_LOG_MESSAGE_MAXLEN,
 )
 
@@ -37,6 +37,7 @@ class MQTTService:
         self._event_id = 0
         self.cache_aware_embedding_ready = False
         self.cache_aware_ready_dims: int | None = None
+        self.latest_cache_detection: dict | None = None
         self.log_event('info', 'Backend started', tag='system')
 
     # -------------------------------------------------------------------------
@@ -112,6 +113,7 @@ class MQTTService:
             self.mqtt_client.subscribe(GRID_TOPIC)
             self.mqtt_client.subscribe(DRIVE_STATUS_TOPIC)
             self.mqtt_client.subscribe(CACHE_AWARE_READY_TOPIC)
+            self.mqtt_client.subscribe(DETECT_STATUS_TOPIC)
             self.mqtt_client.loop_start()
             self.connected = True
             msg = f"Connected to MQTT broker at {self.broker_ip}:{BROKER_PORT}"
@@ -135,6 +137,44 @@ class MQTTService:
         client.subscribe(GRID_TOPIC)
         client.subscribe(DRIVE_STATUS_TOPIC)
         client.subscribe(CACHE_AWARE_READY_TOPIC)
+        client.subscribe(DETECT_STATUS_TOPIC)
+
+    def _parse_detect_status(self, raw: str) -> dict | None:
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            obj = json.loads(text)
+        except Exception:
+            return None
+        if not isinstance(obj, dict):
+            return None
+        try:
+            similarity = float(obj.get("similarity"))
+        except (TypeError, ValueError):
+            return None
+        threshold_raw = obj.get("threshold")
+        try:
+            threshold = float(threshold_raw) if threshold_raw is not None else None
+        except (TypeError, ValueError):
+            threshold = None
+        ts = obj.get("timestamp")
+        try:
+            timestamp = float(ts) if ts is not None else None
+        except (TypeError, ValueError):
+            timestamp = None
+        return {
+            "label": obj.get("label"),
+            "similarity": similarity,
+            "similarity_percent": round(similarity * 100, 2),
+            "threshold": threshold,
+            "threshold_percent": round(threshold * 100, 2) if threshold is not None else None,
+            "timestamp": timestamp,
+            "updated_at": int(time.time() * 1000),
+        }
+
+    def get_latest_cache_detection(self) -> dict:
+        return dict(self.latest_cache_detection) if self.latest_cache_detection else {}
 
     def _parse_cache_aware_ready(self, raw: str) -> bool:
         text = raw.strip()
@@ -385,6 +425,12 @@ class MQTTService:
             except Exception:
                 dims = None
             self.set_cache_aware_ready(ready=ready, dims=dims)
+            return
+
+        if message.topic == DETECT_STATUS_TOPIC:
+            parsed = self._parse_detect_status(raw)
+            if parsed:
+                self.latest_cache_detection = parsed
             return
 
         return

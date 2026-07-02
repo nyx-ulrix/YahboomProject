@@ -6,6 +6,7 @@ import { benchHasDashboardBottleStop, benchNeedsPiScript } from './testBenchStor
 let onManualStopDuringSession: (() => void) | null = null;
 let pendingStopReason: string | undefined;
 let pendingStopIsStopLabel = false;
+let pendingStopConfidence: number | null = null;
 let edgeAwareStopLabelActive = false;
 let benchSessionActive = false;
 let benchStopMode: StopBenchMode = 'edge_aware';
@@ -49,9 +50,10 @@ export function notifyTestBenchManualStop(reason?: string) {
 }
 
 /** Bottle / edge-aware stop-label — freezes the live timer immediately. */
-export function notifyTestBenchStopLabelStop() {
+export function notifyTestBenchStopLabelStop(confidence?: number) {
   pendingStopReason = 'Stop-time test — stop label detected';
   pendingStopIsStopLabel = true;
+  pendingStopConfidence = confidence ?? null;
   edgeAwareStopLabelActive = true;
   onManualStopDuringSession?.();
 }
@@ -76,4 +78,11 @@ export function takeTestBenchStopIsStopLabel(): boolean {
   const isStopLabel = pendingStopIsStopLabel;
   pendingStopIsStopLabel = false;
   return isStopLabel;
+}
+
+/** Confidence (%) latched for the most recent bottle stop, if any. */
+export function takeTestBenchStopConfidence(): number | null {
+  const value = pendingStopConfidence;
+  pendingStopConfidence = null;
+  return value;
 }

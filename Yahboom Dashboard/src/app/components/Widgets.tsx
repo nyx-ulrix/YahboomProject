@@ -15,7 +15,6 @@ import {
   benchNeedsPiScript,
   benchHasDashboardBottleStop,
   clearTestBenchCache,
-  loadStopModePreference,
   loadStopToggles,
   loadTestBenchCache,
   piReportsCacheAwareOn,
@@ -37,6 +36,7 @@ import {
   setTestBenchSessionActive,
   setTestBenchStopMode,
   skipAutoOffAfterBenchRun,
+  takeTestBenchStopConfidence,
   takeTestBenchStopIsStopLabel,
   takeTestBenchStopReason,
 } from '../../lib/testBenchSession';
@@ -1604,7 +1604,27 @@ type StopTestRun = {
   networkType: string;
   stopMode: StopBenchMode;
   stopSource?: StopSource;
+  stopConfidencePercent?: number | null;
 };
+
+type CacheDetectionApi = {
+  detection?: {
+    similarity?: number;
+    similarity_percent?: number;
+    threshold?: number;
+    threshold_percent?: number;
+    updated_at?: number;
+  };
+};
+
+function cacheDetectionSimilarityPercent(
+  detection: CacheDetectionApi['detection'] | null | undefined,
+): number | null {
+  if (!detection) return null;
+  if (detection.similarity_percent != null) return detection.similarity_percent;
+  if (detection.similarity != null) return Math.round(detection.similarity * 10000) / 100;
+  return null;
+}
 
 type DriveStatusPayload = {
   status?: string;
@@ -1712,6 +1732,38 @@ async function fetchLatestRobotMs(): Promise<number | null> {
   return fetchGridRobotMs();
 }
 
+async function fetchLatestCacheDetection(): Promise<CacheDetectionApi['detection'] | null> {
+  try {
+    const res = await fetch('/api/test_bench/latest_detection', { cache: 'no-store' });
+    if (!res.ok) return null;
+    const data = await res.json() as CacheDetectionApi;
+    const detection = data.detection;
+    if (!detection || detection.similarity == null && detection.similarity_percent == null) {
+      return null;
+    }
+    return detection;
+  } catch {
+    return null;
+  }
+}
+
+/** Pi publishes detect/status just before stop — brief retry avoids an empty read at run end. */
+async function fetchLatestCacheDetectionForStop(
+  cached: CacheDetectionApi['detection'] | null,
+): Promise<CacheDetectionApi['detection'] | null> {
+  if (cached?.similarity != null || cached?.similarity_percent != null) {
+    return cached;
+  }
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const detection = await fetchLatestCacheDetection();
+    if (detection) return detection;
+    if (attempt < 5) {
+      await new Promise((resolve) => { setTimeout(resolve, 50); });
+    }
+  }
+  return null;
+}
+
 async function fetchBackendEstopActive(): Promise<boolean> {
   try {
     const res = await fetch('/api/status', { cache: 'no-store' });
@@ -1790,7 +1842,10 @@ function StopTestBenchWidget() {
   const [networkType, setNetworkType] = useState<string>(
     () => cachedBench.current.networkType ?? networkMode ?? 'Wi-Fi',
   );
-  const [stopMode, setStopMode] = useState<StopBenchMode>(() => loadStopModePreference());
+  const [stopMode, setStopMode] = useState<StopBenchMode>(() => {
+    const t = loadStopToggles();
+    return togglesToStopMode(t.cacheOn, t.edgeOn) ?? 'edge_aware';
+  });
   const [stopToggles, setStopToggles] = useState<StopModeToggles>(() => loadStopToggles());
   const [cacheScriptReady, setCacheScriptReady] = useState(() => {
     const t = loadStopToggles();
@@ -1814,6 +1869,9 @@ function StopTestBenchWidget() {
   const preMoveStopReasonRef = useRef<string | null>(null);
   const firstStopTsRef = useRef<number | null>(null);
   const stopSourceRef = useRef<StopSource | null>(null);
+  const stopConfidenceRef = useRef<number | null>(null);
+  const latestCacheDetectionRef = useRef<CacheDetectionApi['detection'] | null>(null);
+  const cacheDetectPollCountRef = useRef(0);
   const networkTypeRef = useRef(networkType);
   const stopModeRef = useRef(stopMode);
   const stopTogglesRef = useRef(stopToggles);
@@ -1851,8 +1909,17 @@ function StopTestBenchWidget() {
       firstStopTsRef.current = null;
       preMoveStopReasonRef.current = takeTestBenchStopReason() ?? null;
       const isStopLabel = takeTestBenchStopIsStopLabel();
+      const confidence = takeTestBenchStopConfidence();
       if (isStopLabel) {
         latchStopSource('edge_dashboard');
+        if (confidence != null) stopConfidenceRef.current = confidence;
+        const mode = stopModeRef.current;
+        if (
+          (mode === 'edge_aware' || mode === 'hybrid')
+          && useMetricsStore.getState().autoRunning
+        ) {
+          sendCommand('auto_off');
+        }
       } else {
         latchStopSource('manual');
       }
@@ -1926,16 +1993,39 @@ function StopTestBenchWidget() {
   useEffect(() => {
     let alive = true;
     const preferredToggles = loadStopToggles();
-    const preferredMode = togglesToStopMode(preferredToggles.cacheOn, preferredToggles.edgeOn) ?? 'edge_aware';
-    const bothOff = togglesToStopMode(preferredToggles.cacheOn, preferredToggles.edgeOn) == null;
+    const preferredMode = togglesToStopMode(preferredToggles.cacheOn, preferredToggles.edgeOn);
+    const bothOff = preferredMode == null;
     const load = async () => {
       try {
         const res = await fetch('/api/test_bench/stop_mode', { cache: 'no-store' });
         if (!res.ok || !alive) return;
         const data = await res.json() as StopModeApiResponse;
+        if (bothOff) {
+          if (data.mode !== 'edge_aware' || data.cache_script_running) {
+            setModeSwitching(true);
+            setCacheScriptReady(true);
+            setCacheScriptRunning(false);
+            const syncRes = await fetch('/api/test_bench/stop_mode', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ mode: 'edge_aware' }),
+            });
+            if (!alive) return;
+            const syncData = await syncRes.json() as StopModeApiResponse;
+            applyStopModeApi({ ...syncData, mode: 'edge_aware' });
+            setEdgeAwareStopEnabled(false);
+            setStopLabelEstopArmed(false);
+            setModeSwitching(false);
+          } else {
+            applyStopModeApi({ ...data, mode: 'edge_aware' });
+            setEdgeAwareStopEnabled(false);
+            setStopLabelEstopArmed(false);
+          }
+          return;
+        }
         if (data.mode !== preferredMode) {
           setModeSwitching(true);
-          setCacheScriptReady(bothOff || !benchNeedsPiScript(preferredMode));
+          setCacheScriptReady(!benchNeedsPiScript(preferredMode!));
           setCacheScriptRunning(false);
           const syncRes = await fetch('/api/test_bench/stop_mode', {
             method: 'POST',
@@ -2026,7 +2116,7 @@ function StopTestBenchWidget() {
         setEdgeAwareStopEnabled(false);
         useMetricsStore.getState().pushEvent(
           'info',
-          'Stop detectors off — enable Cache aware and/or Edge aware to run a test',
+          'Stop detectors off — enable Cache stop and/or Edge Stop to run a test',
         );
       } else if (benchNeedsPiScript(mode) && !data.cache_script_running) {
         useMetricsStore.getState().pushEvent(
@@ -2067,6 +2157,9 @@ function StopTestBenchWidget() {
     preMoveStopReasonRef.current = null;
     clearEdgeAwareStopLabelBenchStop();
     stopSourceRef.current = null;
+    stopConfidenceRef.current = null;
+    latestCacheDetectionRef.current = null;
+    cacheDetectPollCountRef.current = 0;
     setFrozenElapsedMs(null);
     setStopLabelEstopArmed(false);
     setCommandSentAt(null);
@@ -2081,11 +2174,23 @@ function StopTestBenchWidget() {
     setTestBenchSessionActive(false);
   }, []);
 
-  const endRun = useCallback((stoppedAt: number) => {
+  const captureStopMetrics = useCallback(async (source: StopSource) => {
+    if (source === 'manual') {
+      return { stopConfidencePercent: null };
+    }
+    if (source === 'edge_dashboard') {
+      return { stopConfidencePercent: stopConfidenceRef.current };
+    }
+    const detection = await fetchLatestCacheDetectionForStop(latestCacheDetectionRef.current);
+    return { stopConfidencePercent: cacheDetectionSimilarityPercent(detection) };
+  }, []);
+
+  const endRun = useCallback(async (stoppedAt: number) => {
     const startedAt = activeStartRef.current;
     const cmdAt = commandSentAtRef.current;
     if (startedAt == null || cmdAt == null) return;
     const recordedSource = stopSourceRef.current ?? 'manual';
+    const metrics = await captureStopMetrics(recordedSource);
     const mode = recordedBenchModeRef.current;
     resetSession();
     setRuns((prev) => [
@@ -2102,14 +2207,14 @@ function StopTestBenchWidget() {
         networkType: networkTypeRef.current,
         stopMode: mode,
         stopSource: recordedSource,
+        stopConfidencePercent: metrics.stopConfidencePercent,
       },
     ]);
-  }, [resetSession]);
+  }, [captureStopMetrics, resetSession]);
 
   const disableAutoRoam = useCallback(() => {
     if (stopModeRef.current === 'cache_aware_offloading') return;
     if (stopModeRef.current === 'hybrid' && stopSourceRef.current === 'cache_pi') return;
-    if (isEdgeAwareStopLabelBenchStop()) return;
     if (useMetricsStore.getState().autoRunning) {
       sendCommand('auto_off');
     }
@@ -2147,7 +2252,7 @@ function StopTestBenchWidget() {
     }
     stopCommandPendingRef.current = false;
     stopCommandPendingAtRef.current = null;
-    endRun(resolveStopMs(startTs, firstStopTsRef.current));
+    await endRun(resolveStopMs(startTs, firstStopTsRef.current));
     return true;
   }, [disableAutoRoam, endRun, freezeTimerAtNow, latchStopSource]);
 
@@ -2170,7 +2275,7 @@ function StopTestBenchWidget() {
     }
     const fromDrive = drive ? robotMsFromPayload(drive as Record<string, unknown>) : null;
     const stopTs = fromDrive ?? await fetchLatestRobotMs();
-    endRun(resolveStopMs(startTs, stopTs));
+    await endRun(resolveStopMs(startTs, stopTs));
   }, [endRun, freezeTimerAtNow, latchStopSource]);
 
   const cancelSession = useCallback((message: string) => {
@@ -2195,7 +2300,7 @@ function StopTestBenchWidget() {
     if (!benchMode) {
       useMetricsStore.getState().pushEvent(
         'warning',
-        'Stop-time test blocked — turn on Cache aware and/or Edge aware first',
+        'Stop-time test blocked — turn on Cache stop and/or Edge Stop first',
       );
       return;
     }
@@ -2322,6 +2427,14 @@ function StopTestBenchWidget() {
 
       if (!armedRef.current) return;
 
+      if (benchNeedsPiScript(stopModeRef.current)) {
+        cacheDetectPollCountRef.current += 1;
+        if (cacheDetectPollCountRef.current % 5 === 0) {
+          const detection = await fetchLatestCacheDetection();
+          if (detection) latestCacheDetectionRef.current = detection;
+        }
+      }
+
       if (
         drive?.status
         && isPiStopCommandStatus(drive.status, stopCommandPendingRef.current)
@@ -2398,10 +2511,11 @@ function StopTestBenchWidget() {
       'Command-to-Move (ms)',
       'Stop Duration (ms)',
       'Stop Time (s)',
-      'Stopping Distance (m)',
+      'Stopping Distance (cm)',
       'Network Type',
       'Stop Mode',
       'Stop Source',
+      'Stop Confidence (%)',
     ];
     const lines = runs.map((r) => [
       r.run,
@@ -2415,6 +2529,7 @@ function StopTestBenchWidget() {
       csvField(r.networkType),
       csvField(STOP_MODE_LABELS[r.stopMode]),
       csvField(r.stopSource ? STOP_SOURCE_LABELS[r.stopSource] : '—'),
+      r.stopConfidencePercent != null ? r.stopConfidencePercent.toFixed(2) : '—',
     ].join(','));
     const csv = [headers.join(','), ...lines].join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -2516,27 +2631,27 @@ function StopTestBenchWidget() {
 
   const stopModeStatusMessage = (() => {
     if (bothStopsOff) {
-      return 'No stop detectors armed — enable Cache aware and/or Edge aware to unlock START.';
+      return 'No stop detectors armed — enable Cache stop and/or Edge Stop to unlock START.';
     }
     if (modeSwitching && cacheOn) {
       return 'Starting cache_aware_offloading.py on the Pi…';
     }
     if (effectiveStopMode === 'hybrid') {
       return cacheScriptReady
-        ? 'Pi script + dashboard VIT both armed — first detector wins; run records which stopped.'
+        ? 'Cache stop + Edge Stop both armed — first detector wins; run records which stopped.'
         : cacheScriptRunning
           ? 'Waiting for bottle embedding — ensure VIT and video are running.'
-          : 'Waiting for Pi script — START is disabled.';
+          : 'Waiting for Cache stop — START is disabled.';
     }
     if (effectiveStopMode === 'cache_aware_offloading') {
       return cacheScriptReady
-        ? 'Pi script in lxterminal — stop from Pi only.'
+        ? 'Cache stop in lxterminal — stop from Pi only.'
         : cacheScriptRunning
           ? 'Waiting for bottle embedding — ensure VIT and video are running.'
           : 'Waiting for cache_aware_offloading.py on the Pi — START is disabled.';
     }
     if (effectiveStopMode === 'edge_aware') {
-      return 'VIT bottle detection on the dashboard sends auto_off + stop. Requires VIT and video.';
+      return 'Edge Stop sends auto_off + stop on bottle detection. Requires VIT and video.';
     }
     return '';
   })();
@@ -2552,9 +2667,9 @@ function StopTestBenchWidget() {
       ? 'Waiting for robot movement — explore command sent'
       : 'Test in progress — ends when the robot stops'
     : bothStopsOff
-      ? 'Turn on Cache aware and/or Edge aware before START'
+      ? 'Turn on Cache stop and/or Edge Stop before START'
       : modeSwitching
-      ? 'Stop mode switching — waiting for Pi script'
+      ? 'Stop mode switching — waiting for Cache stop'
       : cacheWaitingEmbedding
         ? 'Waiting for bottle embedding on the Pi'
         : cacheStartBlocked
@@ -2717,10 +2832,10 @@ function StopTestBenchWidget() {
                 ? '0 8px 24px rgba(34,197,94,0.45), inset 0 1px 0 rgba(255,255,255,0.2)'
                 : 'none',
             }}
-            title={cacheOn ? 'Turn off Pi cache-aware script' : 'Turn on Pi cache-aware script'}
+            title={cacheOn ? 'Turn off Cache stop' : 'Turn on Cache stop'}
           >
             <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
-              Cache aware
+              Cache stop
             </span>
             {cacheOn ? 'ON' : 'OFF'}
           </button>
@@ -2748,10 +2863,10 @@ function StopTestBenchWidget() {
                 ? '0 8px 24px rgba(34,197,94,0.45), inset 0 1px 0 rgba(255,255,255,0.2)'
                 : 'none',
             }}
-            title={edgeOn ? 'Turn off dashboard VIT bottle stop' : 'Turn on dashboard VIT bottle stop'}
+            title={edgeOn ? 'Turn off Edge Stop' : 'Turn on Edge Stop'}
           >
             <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
-              Edge aware
+              Edge Stop
             </span>
             {edgeOn ? 'ON' : 'OFF'}
           </button>
@@ -2830,7 +2945,7 @@ function StopTestBenchWidget() {
         {/* Column header */}
         <div className="sticky top-0 grid items-center gap-1 px-2 py-1 uppercase tracking-wider"
           style={{
-            gridTemplateColumns: '22px 48px 64px 1fr 1fr 72px',
+            gridTemplateColumns: '22px 48px 64px 1fr 44px 1fr 72px',
             fontSize: 8,
             color: 'var(--text-muted)',
             background: 'var(--bg-elevated)',
@@ -2840,7 +2955,8 @@ function StopTestBenchWidget() {
           <span>Stop</span>
           <span>Mode</span>
           <span>Stopped by</span>
-          <span>Dist (m)</span>
+          <span>Conf</span>
+          <span>Dist (cm)</span>
           <span>Net</span>
         </div>
 
@@ -2853,7 +2969,7 @@ function StopTestBenchWidget() {
           runs.map((r) => (
             <div key={r.id} className="grid items-center gap-1 px-2 py-1 border-b"
               style={{
-                gridTemplateColumns: '22px 48px 64px 1fr 1fr 72px',
+                gridTemplateColumns: '22px 48px 64px 1fr 44px 1fr 72px',
                 borderColor: 'var(--stroke-subtle)',
               }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', fontFamily: 'monospace' }}>
@@ -2902,11 +3018,25 @@ function StopTestBenchWidget() {
               >
                 {r.stopSource ? STOP_SOURCE_LABELS[r.stopSource] : '—'}
               </span>
+              <span
+                className="truncate"
+                title={r.stopConfidencePercent != null ? `Confidence at stop: ${r.stopConfidencePercent.toFixed(2)}%` : 'No detector confidence recorded'}
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  fontFamily: 'monospace',
+                  color: r.stopConfidencePercent != null ? accents.cyan : 'var(--text-muted)',
+                  textAlign: 'right',
+                }}
+              >
+                {r.stopConfidencePercent != null ? `${r.stopConfidencePercent.toFixed(2)}%` : '—'}
+              </span>
               <input
                 type="number"
                 inputMode="decimal"
-                step="0.01"
-                placeholder="—"
+                step="1"
+                placeholder="cm"
+                title="Stopping distance in centimeters"
                 value={r.stoppingDistance}
                 onChange={(e) => updateRun(r.id, { stoppingDistance: e.target.value })}
                 style={{ ...inputStyle, padding: '2px 5px', fontFamily: 'monospace', minWidth: 0 }}
