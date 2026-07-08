@@ -148,16 +148,10 @@ class MqttRosNode(Node):
     def __init__(self):
         super().__init__("mqtt_ros_cmd_vel_node")
 
-        # =========================
-        # ROS PUBLISHERS
-        # =========================
         self.cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.servo_s1_pub = self.create_publisher(Int32, "/servo_s1", 10)
         self.servo_s2_pub = self.create_publisher(Int32, "/servo_s2", 10)
 
-        # =========================
-        # ROS SUBSCRIBER: LIDAR
-        # =========================
         self.scan_sub = self.create_subscription(
             LaserScan,
             "/scan",
@@ -165,9 +159,6 @@ class MqttRosNode(Node):
             10
         )
 
-        # =========================
-        # MOVEMENT STATE
-        # =========================
         self.target_linear_x = 0.0
         self.target_angular_z = 0.0
 
@@ -176,15 +167,9 @@ class MqttRosNode(Node):
 
         self.last_command = "stop"
 
-        # =========================
-        # MODE / SAFETY STATE
-        # =========================
         self.estop_active = False
         self.auto_mode = False
 
-        # =========================
-        # LIDAR STATE
-        # =========================
         self.front_distance = None
         self.left_distance = None
         self.right_distance = None
@@ -201,21 +186,12 @@ class MqttRosNode(Node):
         self.grid_size = grid_cells
         self.grid_centre = grid_cells // 2
 
-        # =========================
-        # SERVO STATE
-        # =========================
         self.servo_s1 = 0
         self.servo_s2 = -60
         self.active_servo_cmd = None
 
-        # =========================
-        # AUTO LIDAR STATE
-        # =========================
-        self.auto_state = "idle" # idle | forward | turning_90
+        self.auto_state = "idle"
 
-        # =========================
-        # TIMERS
-        # =========================
         self.movement_timer = self.create_timer(
             1.0 / PUBLISH_RATE,
             self.publish_cmd_vel
@@ -231,9 +207,6 @@ class MqttRosNode(Node):
             self.publish_grid_mqtt
         )
 
-        # =========================
-        # MQTT SETUP
-        # =========================
         try:
             self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
         except AttributeError:
@@ -255,9 +228,6 @@ class MqttRosNode(Node):
         self.get_logger().info("Hard e-stop: estop_on / estop_off")
         self.get_logger().info("Auto soft stop: auto_soft_stop")
 
-    # =========================
-    # MQTT CALLBACKS
-    # =========================
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self.get_logger().info("Connected to MQTT broker")
@@ -273,9 +243,6 @@ class MqttRosNode(Node):
             self.get_logger().info(f"Received MQTT command: {command}")
             self.last_command = command
 
-        # =========================
-        # MODE COMMANDS
-        # =========================
         if command == "auto_on":
             self.auto_mode = True
             self.auto_state = "active"
@@ -293,9 +260,6 @@ class MqttRosNode(Node):
             self.get_logger().info("AUTO MODE DISABLED")
             return
 
-        # =========================
-        # HARD E-STOP COMMANDS
-        # =========================
         if command == "estop_on":
             self.enable_estop()
             return
@@ -304,12 +268,6 @@ class MqttRosNode(Node):
             self.disable_estop()
             return
 
-        # =========================
-        # AUTO SOFT STOP
-        # This stops the robot but does NOT latch e-stop.
-        # Used when LiDAR detects obstacle during auto mode.
-        # Client can still send left/right/fwd after this.
-        # =========================
         if command == "auto_soft_stop":
             self.force_zero_motion()
             self.stop_robot_now()
@@ -317,9 +275,6 @@ class MqttRosNode(Node):
             self.get_logger().warn("AUTO SOFT STOP - robot halted, e-stop not latched")
             return
 
-        # =========================
-        # BLOCK MOVEMENT WHILE HARD E-STOP ACTIVE
-        # =========================
         if self.estop_active and command in MOVEMENT_COMMANDS:
             self.force_zero_motion()
             self.stop_robot_now()
@@ -327,11 +282,6 @@ class MqttRosNode(Node):
             self.get_logger().warn(f"Command blocked because E-stop is active: {command}")
             return
 
-        # =========================
-        # MANUAL / CLIENT MOVEMENT COMMANDS
-        # These commands work in both manual mode and auto/client-decision mode.
-        # The client decides the direction during auto mode.
-        # =========================
         if command == "fwd":
             self.auto_mode = False
             self.auto_state = "idle"
@@ -395,9 +345,6 @@ class MqttRosNode(Node):
             self.stop_robot_now()
             self.publish_drive_status("stopped")
 
-        # =========================
-        # CAMERA MOVEMENT COMMANDS
-        # =========================
         elif command == "cleft":
             self.active_servo_cmd = "cleft"
 
@@ -450,9 +397,6 @@ class MqttRosNode(Node):
 
         return float(np.percentile(vals, percentile))
 
-    # =========================
-    # LIDAR CALLBACK
-    # =========================
     def scan_callback(self, scan_data):
         ranges = np.array(scan_data.ranges, dtype=np.float32)
 
@@ -486,9 +430,6 @@ class MqttRosNode(Node):
         self.rear_left_distance = self.sector_percentile_distance(REAR_LEFT_MIN, REAR_LEFT_MAX, 25.0)
         self.rear_right_distance = self.sector_percentile_distance(REAR_RIGHT_MIN, REAR_RIGHT_MAX, 25.0)
 
-    # =========================
-    # OCCUPANCY GRID BUILDER
-    # =========================
     def build_grid(self):
         size = self.grid_size
         centre = self.grid_centre
@@ -526,9 +467,6 @@ class MqttRosNode(Node):
 
         return grid.tolist()
 
-    # =========================
-    # PUBLISH GRID OVER MQTT
-    # =========================
     def publish_grid_mqtt(self):
         if len(self.scan_ranges) == 0:
             return
@@ -559,9 +497,6 @@ class MqttRosNode(Node):
         except Exception as e:
             self.get_logger().warn(f"Failed to publish grid: {e}")
 
-    # =========================
-    # DRIVE STATUS PUBLISHER
-    # =========================
     def publish_drive_status(self, status):
         payload = {
             "status": status,
@@ -583,9 +518,6 @@ class MqttRosNode(Node):
         except Exception as e:
             self.get_logger().warn(f"Failed to publish drive status: {e}")
 
-    # =========================
-    # E-STOP HELPERS
-    # =========================
     def enable_estop(self):
         self.estop_active = True
         self.auto_mode = False
@@ -611,9 +543,6 @@ class MqttRosNode(Node):
         self.current_linear_x = 0.0
         self.current_angular_z = 0.0
 
-    # =========================
-    # SMOOTHING
-    # =========================
     def ramp_value(self, current, target, step):
         if abs(target - current) <= step:
             return target
@@ -667,9 +596,6 @@ class MqttRosNode(Node):
         side = "left" if angle > 0.0 else "right"
         return f"{abs(angle):.1f} deg {side}"
 
-    # =========================
-    # AUTO MOVEMENT LOGIC
-    # =========================
     def auto_movement_logic(self):
         if len(self.scan_angles) == 0 or self.front_distance is None:
             self.force_zero_motion()
@@ -764,9 +690,6 @@ class MqttRosNode(Node):
         self.stop_robot_now()
         self.publish_drive_status("auto_all_blocked_front_and_rear")
 
-    # =========================
-    # PUBLISH MOVEMENT
-    # =========================
     def publish_cmd_vel(self):
         if self.estop_active:
             self.force_zero_motion()
@@ -798,9 +721,6 @@ class MqttRosNode(Node):
 
         self.cmd_vel_pub.publish(twist)
 
-    # =========================
-    # SERVO MOVEMENT
-    # =========================
     def servo_tick(self):
         if self.active_servo_cmd is None:
             return
@@ -863,9 +783,6 @@ class MqttRosNode(Node):
             f"Servo - s1: {self.servo_s1}d, s2: {self.servo_s2}d"
         )
 
-    # =========================
-    # STOP ROBOT NOW
-    # =========================
     def stop_robot_now(self):
         twist = Twist()
         twist.linear.x = 0.0
@@ -880,9 +797,6 @@ class MqttRosNode(Node):
         except Exception:
             pass
 
-    # =========================
-    # CLEAN EXIT
-    # =========================
     def destroy_node(self):
         self.estop_active = True
         self.auto_mode = False
@@ -916,4 +830,5 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
+
 

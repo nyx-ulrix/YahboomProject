@@ -12,6 +12,7 @@
 #       - send auto_off status to client/dashboard
 #
 # This script checks EMBEDDINGS only.
+# It does NOT use bottle.png directly.
 # It does NOT load torch/open_clip.
 # It does NOT send estop_on.
 
@@ -681,7 +682,7 @@ def on_message(client, userdata, msg):
             )
 
             print(
-                f"[DETECT] *** {best_match['label'].upper()} DETECTED — STOPPING *** "
+                f"[DETECT] *** {best_match['label'].upper()} DETECTED â€” STOPPING *** "
                 f"similarity={similarity:.4f} | "
                 f"threshold={threshold} | "
                 f"hits={CONSECUTIVE_HITS_REQUIRED} | "
@@ -842,5 +843,3 @@ def main():
 
 if __name__ == "__main__":
 	main()
-
-

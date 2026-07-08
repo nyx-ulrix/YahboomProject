@@ -19,9 +19,9 @@ import paho.mqtt.client as mqtt
 # SETTINGS
 # =========================
 CAMERA_INDEX = 0
-WIDTH = 640
-HEIGHT = 480
-FPS = 30
+WIDTH = 320
+HEIGHT = 240
+FPS = 15
 PORT = 8080
 
 BROKER_IP = "localhost"
@@ -51,7 +51,7 @@ COMMAND_TO_EMBEDDING_BYTES = {
     "embds3": 2048,
 }
 
-# Runtime-mutable â€” protected by embedding_lock
+# Runtime-mutable Ã¢â‚¬â€ protected by embedding_lock
 _current_embedding_bytes = 2048
 _current_target_dims     = 512
 embedding_lock = threading.Lock()
@@ -185,7 +185,7 @@ def create_mqtt_client():
     return client
 
 # =========================
-# EMBEDDING â€” normalize â†’ slice â†’ re-normalize
+# EMBEDDING Ã¢â‚¬â€ normalize Ã¢â€ â€™ slice Ã¢â€ â€™ re-normalize
 # =========================
 def get_embedding(frame):
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -253,7 +253,7 @@ def vit_worker():
                     print(
                         f"[VIT] Published {embedding_count} embeddings "
                         f"| dims={target_dims} "
-                        f"| embedding={len(raw_bytes)} B "
+                        f"| embedding size={len(raw_bytes)} B "
                         f"| frame={frame_count}"
                     )
 
@@ -455,5 +455,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
