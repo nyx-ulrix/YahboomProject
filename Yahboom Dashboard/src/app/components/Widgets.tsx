@@ -1573,7 +1573,7 @@ export const vitDecoderDef: WidgetDefinition = {
 
 // STOP-TIME TEST BENCH — measure how long the robot takes to stop after EXPLORE.
 // Command time is stamped on the Pi clock when START is pressed; the official run
-// start is when the Pi reports movement. Stop time comes from Pi drive-status MQTT.
+// start is when the Pi reports movement. Mission time ends at Pi drive-status halt.
 type StopModeApiResponse = {
   mode?: StopBenchMode;
   cache_script_running?: boolean;
@@ -1971,14 +1971,14 @@ function StopTestBenchWidget() {
       if (!res.ok) {
         useMetricsStore.getState().pushEvent(
           'error',
-          data.message ?? 'Failed to stop Pi cache-aware script',
+          data.message ?? 'Failed to stop Cache stop script',
         );
         return;
       }
       applyStopModeApi(data);
-      useMetricsStore.getState().pushEvent('info', 'Pi cache-aware script stopped — terminal closed');
+      useMetricsStore.getState().pushEvent('info', 'Cache stop script stopped — terminal closed');
     } catch {
-      useMetricsStore.getState().pushEvent('error', 'Failed to reach backend to stop Pi cache script');
+      useMetricsStore.getState().pushEvent('error', 'Failed to reach backend to stop Cache stop');
     }
   }, [applyStopModeApi]);
 
@@ -2116,17 +2116,17 @@ function StopTestBenchWidget() {
         setEdgeAwareStopEnabled(false);
         useMetricsStore.getState().pushEvent(
           'info',
-          'Stop detectors off — enable Cache stop and/or Edge Stop to run a test',
+          'Detectors off — enable Cache stop and/or Edge Stop to run a mission',
         );
       } else if (benchNeedsPiScript(mode) && !data.cache_script_running) {
         useMetricsStore.getState().pushEvent(
           'warning',
-          data.message ?? 'Pi cache-aware script did not start',
+          data.message ?? 'Cache stop script did not start on the Pi',
         );
       } else if (data.message) {
         useMetricsStore.getState().pushEvent('warning', data.message);
       } else {
-        useMetricsStore.getState().pushEvent('info', `Stop mode: ${STOP_MODE_LABELS[mode]}`);
+        useMetricsStore.getState().pushEvent('info', `Mission bench: ${STOP_MODE_LABELS[mode]}`);
       }
     } catch {
       useMetricsStore.getState().pushEvent('error', 'Failed to reach backend for stop mode');
@@ -2285,12 +2285,12 @@ function StopTestBenchWidget() {
   }, [resetSession]);
 
   const cancelSessionOnEstop = useCallback(() => {
-    cancelSession('Stop-time test — e-stop engaged (run not recorded)');
+    cancelSession('Mission test — emergency stop engaged (run not recorded)');
   }, [cancelSession]);
 
   const cancelPreMoveStop = useCallback((suffix?: string) => {
     const base = preMoveStopReasonRef.current
-      ?? 'Stop-time test — stopped before movement started';
+      ?? 'Mission test — ended before movement started';
     cancelSession(suffix ? `${base} (${suffix})` : base);
   }, [cancelSession]);
 
@@ -2300,12 +2300,12 @@ function StopTestBenchWidget() {
     if (!benchMode) {
       useMetricsStore.getState().pushEvent(
         'warning',
-        'Stop-time test blocked — turn on Cache stop and/or Edge Stop first',
+        'Mission test blocked — turn on Cache stop and/or Edge Stop first',
       );
       return;
     }
     if (useMetricsStore.getState().estopActive) {
-      useMetricsStore.getState().pushEvent('warning', 'Stop-time test blocked — clear E-stop first');
+      useMetricsStore.getState().pushEvent('warning', 'Mission test blocked — clear emergency stop first');
       return;
     }
 
@@ -2313,7 +2313,7 @@ function StopTestBenchWidget() {
     if (commandTs == null) {
       useMetricsStore.getState().pushEvent(
         'warning',
-        'Stop-time test — no Pi clock available (is mqtt_ros_node connected?)',
+        'Mission test — no Raspberry Pi clock available (is mqtt_ros_node connected?)',
       );
       return;
     }
@@ -2395,7 +2395,7 @@ function StopTestBenchWidget() {
 
         const deadline = movementDeadlineRef.current;
         if (deadline != null && Date.now() > deadline) {
-          cancelSession('Stop-time test — robot did not start moving in time');
+          cancelSession('Mission test — robot did not start moving in time');
           return;
         }
 
@@ -2512,17 +2512,17 @@ function StopTestBenchWidget() {
     if (runs.length === 0) return;
     const headers = [
       'Run',
-      'Command Time (Pi)',
-      'Movement Start (Pi)',
-      'Stop Time (Pi)',
-      'Command-to-Move (ms)',
-      'Stop Duration (ms)',
-      'Stop Time (s)',
-      'Stopping Distance (cm)',
+      'Command Time (Raspberry Pi)',
+      'Movement Start (Raspberry Pi)',
+      'Mission End (Raspberry Pi)',
+      'Command to Move (milliseconds)',
+      'Mission Time (milliseconds)',
+      'Mission Time (seconds)',
+      'Distance of Object (centimeters)',
       'Network Type',
-      'Stop Mode',
-      'Stop Source',
-      'Stop Confidence (%)',
+      'Detector Mode',
+      'Stopped By',
+      'Detection Confidence (percent)',
     ];
     const lines = runs.map((r) => [
       r.run,
@@ -2543,7 +2543,7 @@ function StopTestBenchWidget() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `stop_time_test_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`;
+    a.download = `mission_time_test_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -2638,7 +2638,7 @@ function StopTestBenchWidget() {
 
   const stopModeStatusMessage = (() => {
     if (bothStopsOff) {
-      return 'No stop detectors armed — enable Cache stop and/or Edge Stop to unlock START.';
+      return 'No detectors armed — enable Cache stop and/or Edge Stop to unlock Start.';
     }
     if (modeSwitching && cacheOn) {
       return 'Starting cache_aware_offloading.py on the Pi…';
@@ -2648,14 +2648,14 @@ function StopTestBenchWidget() {
         ? 'Cache stop + Edge Stop both armed — first detector wins; run records which stopped.'
         : cacheScriptRunning
           ? 'Waiting for bottle embedding — ensure VIT and video are running.'
-          : 'Waiting for Cache stop — START is disabled.';
+          : 'Waiting for Cache stop — Start is disabled.';
     }
     if (effectiveStopMode === 'cache_aware_offloading') {
       return cacheScriptReady
-        ? 'Cache stop in lxterminal — stop from Pi only.'
+        ? 'Cache stop in lxterminal — stop from Raspberry Pi only.'
         : cacheScriptRunning
           ? 'Waiting for bottle embedding — ensure VIT and video are running.'
-          : 'Waiting for cache_aware_offloading.py on the Pi — START is disabled.';
+          : 'Waiting for cache_aware_offloading.py on the Raspberry Pi — Start is disabled.';
     }
     if (effectiveStopMode === 'edge_aware') {
       return 'Edge Stop sends auto_off + stop on bottle detection. Requires VIT and video.';
@@ -2672,33 +2672,33 @@ function StopTestBenchWidget() {
   const startButtonTitle = sessionActive
     ? waitingForMovement
       ? 'Waiting for robot movement — explore command sent'
-      : 'Test in progress — ends when the robot stops'
+      : 'Mission in progress — ends when the robot stops'
     : bothStopsOff
-      ? 'Turn on Cache stop and/or Edge Stop before START'
+      ? 'Turn on Cache stop and/or Edge Stop before Start'
       : modeSwitching
-      ? 'Stop mode switching — waiting for Cache stop'
+      ? 'Detector mode switching — waiting for Cache stop'
       : cacheWaitingEmbedding
-        ? 'Waiting for bottle embedding on the Pi'
+        ? 'Waiting for bottle embedding on the Raspberry Pi'
         : cacheStartBlocked
-          ? 'Cache-aware script must be running on the Pi before START'
+          ? 'Cache stop must be running on the Raspberry Pi before Start'
           : estopActive
-            ? 'E-stop active — clear it first'
+            ? 'Emergency stop active — clear it first'
             : 'Start a run (sends explore command)';
   const benchPillLabel = modeSwitching
-    ? 'SCRIPT…'
+    ? 'Starting Script'
     : cacheWaitingEmbedding
-      ? 'WARMUP'
+      ? 'Warming Up'
       : stopping
-      ? 'STOPPING'
+      ? 'Mission Ended'
       : waitingForMovement
-        ? 'STARTING UP'
+        ? 'Starting Up'
         : running
-          ? 'RUNNING'
+          ? 'Running'
           : bothStopsOff
-            ? 'NO STOP'
+            ? 'No Detector'
             : cacheStartBlocked
-            ? 'NO SCRIPT'
-            : 'IDLE';
+            ? 'No Cache Script'
+            : 'Idle';
   const benchPillColor = modeSwitching
     ? accents.cyan
     : cacheWaitingEmbedding
@@ -2742,7 +2742,7 @@ function StopTestBenchWidget() {
         style={{ color: 'var(--text-muted)', fontSize: 9, lineHeight: 1.1 }}>
         <div className="flex items-center gap-1 min-w-0">
           <FlaskConical size={11} style={{ color: accents.cyan, flexShrink: 0 }} />
-          <span className="truncate">Stop-Time Test Bench</span>
+          <span className="truncate">Mission Test Bench</span>
         </div>
         <span className="pill" style={{
           padding: '1px 6px', fontSize: 8, fontWeight: 700,
@@ -2788,7 +2788,7 @@ function StopTestBenchWidget() {
         style={{ background: 'rgba(0,0,0,0.12)', border: '1px solid var(--stroke-subtle)' }}>
         <div className="flex items-center justify-between gap-2 mb-2">
           <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
-            Stop mode
+            Detectors
           </span>
           <span className="pill truncate" style={{
             padding: '1px 6px', fontSize: 8, fontWeight: 700, maxWidth: '55%',
@@ -2844,7 +2844,7 @@ function StopTestBenchWidget() {
             <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
               Cache stop
             </span>
-            {cacheOn ? 'ON' : 'OFF'}
+            {cacheOn ? 'On' : 'Off'}
           </button>
           <button
             type="button"
@@ -2875,7 +2875,7 @@ function StopTestBenchWidget() {
             <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
               Edge Stop
             </span>
-            {edgeOn ? 'ON' : 'OFF'}
+            {edgeOn ? 'On' : 'Off'}
           </button>
         </div>
         {stopModeStatusMessage && (
@@ -2891,12 +2891,12 @@ function StopTestBenchWidget() {
         <div className="flex flex-col min-w-0">
           <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
             {stopping
-              ? 'Stopped at (Pi)'
+              ? 'Mission ended (Raspberry Pi clock)'
               : running
-                ? 'Stop elapsed (Pi)'
+                ? 'Mission time (Raspberry Pi clock)'
                 : waitingForMovement
-                  ? 'Since command (Pi)'
-                  : 'Elapsed (Pi)'}
+                  ? 'Since command (Raspberry Pi clock)'
+                  : 'Elapsed (Raspberry Pi clock)'}
           </span>
           <span style={{
             fontSize: 24, fontWeight: 800, fontFamily: 'monospace',
@@ -2909,7 +2909,7 @@ function StopTestBenchWidget() {
                   : 'var(--text-primary)',
             lineHeight: 1.1,
           }}>
-            {fmtSeconds(elapsedMs)}<span style={{ fontSize: 12, marginLeft: 2 }}>s</span>
+            {fmtSeconds(elapsedMs)}<span style={{ fontSize: 12, marginLeft: 2 }}>seconds</span>
           </span>
         </div>
         <button
@@ -2935,12 +2935,12 @@ function StopTestBenchWidget() {
           {startButtonWaiting ? (
             <>
               <Loader2 size={13} className="animate-spin" />
-              STARTING UP
+              Starting Up
             </>
           ) : (
             <>
               <Play size={13} fill="#fff" />
-              START
+              Start
             </>
           )}
         </button>
@@ -2950,34 +2950,35 @@ function StopTestBenchWidget() {
       <div className="flex-1 min-h-0 overflow-y-auto rounded-xl"
         style={{ background: 'rgba(0,0,0,0.18)', border: '1px solid var(--stroke-subtle)' }}>
         {/* Column header */}
-        <div className="sticky top-0 grid items-center gap-1 px-2 py-1 uppercase tracking-wider"
+        <div className="sticky top-0 grid items-center gap-1 px-2 py-1.5 tracking-wide"
           style={{
-            gridTemplateColumns: '22px 48px 64px 1fr 44px 1fr 72px 24px',
-            fontSize: 8,
+            gridTemplateColumns: '28px minmax(56px, 0.75fr) minmax(64px, 0.85fr) minmax(88px, 1.4fr) minmax(72px, 0.95fr) minmax(88px, 1fr) minmax(72px, 0.9fr) 24px',
+            fontSize: 7,
+            lineHeight: 1.25,
             color: 'var(--text-muted)',
             background: 'var(--bg-elevated)',
             borderBottom: '1px solid var(--stroke-subtle)',
           }}>
-          <span>#</span>
-          <span>Stop</span>
+          <span>Run</span>
+          <span>Mission Time</span>
           <span>Mode</span>
-          <span>Stopped by</span>
-          <span>Conf</span>
-          <span>Dist (cm)</span>
-          <span>Net</span>
+          <span>Stopped By</span>
+          <span>Detection Confidence</span>
+          <span>Object Distance (centimeters)</span>
+          <span>Network</span>
           <span />
         </div>
 
         {runs.length === 0 ? (
           <div className="flex items-center justify-center text-center px-3 py-6"
             style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            Press START to begin a run. Stop time is measured from when the Pi reports movement.
+            Press Start to begin a run. Mission time is measured from when the Raspberry Pi reports movement.
           </div>
         ) : (
           runs.map((r) => (
             <div key={r.id} className="grid items-center gap-1 px-2 py-1 border-b"
               style={{
-                gridTemplateColumns: '22px 48px 64px 1fr 44px 1fr 72px 24px',
+                gridTemplateColumns: '28px minmax(56px, 0.75fr) minmax(64px, 0.85fr) minmax(88px, 1.4fr) minmax(72px, 0.95fr) minmax(88px, 1fr) minmax(72px, 0.9fr) 24px',
                 borderColor: 'var(--stroke-subtle)',
               }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', fontFamily: 'monospace' }}>
@@ -3028,7 +3029,7 @@ function StopTestBenchWidget() {
               </span>
               <span
                 className="truncate"
-                title={r.stopConfidencePercent != null ? `Confidence at stop: ${r.stopConfidencePercent.toFixed(2)}%` : 'No detector confidence recorded'}
+                title={r.stopConfidencePercent != null ? `Detection confidence at mission end: ${r.stopConfidencePercent.toFixed(2)} percent` : 'No detection confidence — manual stop or not recorded'}
                 style={{
                   fontSize: 10,
                   fontWeight: 700,
@@ -3037,14 +3038,14 @@ function StopTestBenchWidget() {
                   textAlign: 'right',
                 }}
               >
-                {r.stopConfidencePercent != null ? `${r.stopConfidencePercent.toFixed(2)}%` : '—'}
+                {r.stopConfidencePercent != null ? `${r.stopConfidencePercent.toFixed(2)} percent` : '—'}
               </span>
               <input
                 type="number"
                 inputMode="decimal"
                 step="1"
-                placeholder="cm"
-                title="Stopping distance in centimeters"
+                placeholder="centimeters"
+                title="Distance of object in centimeters"
                 value={r.stoppingDistance}
                 onChange={(e) => updateRun(r.id, { stoppingDistance: e.target.value })}
                 style={{ ...inputStyle, padding: '2px 5px', fontFamily: 'monospace', minWidth: 0 }}
@@ -3100,7 +3101,7 @@ function StopTestBenchWidget() {
           }}
         >
           <Download size={11} />
-          EXPORT CSV
+          Export CSV
         </button>
         <button
           onClick={clearRuns}
@@ -3122,7 +3123,7 @@ function StopTestBenchWidget() {
 }
 
 export const stopTestBenchDef: WidgetDefinition = {
-  id: 'stop_test_bench_widget', name: 'Stop-Time Test Bench', group: 'control',
+  id: 'stop_test_bench_widget', name: 'Mission Test Bench', group: 'control',
   sizeClass: 'L', defaultSize: { w: 3, h: 4, minW: 2, minH: 3 },
   icon: 'FlaskConical', pinned: false, component: StopTestBenchWidget,
 };
