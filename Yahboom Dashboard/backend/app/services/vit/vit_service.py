@@ -44,14 +44,17 @@ if not log.handlers:
 # ── MQTT / broker ─────────────────────────────────────────────────────────────
 _BROKER_PORT      = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 _MQTT_TIMEOUT     = int(os.getenv("MQTT_TIMEOUT", "60"))
-_EMBEDDING_TOPIC  = os.getenv("MQTT_VIT_EMBEDDING_TOPIC", "yahboom/vit/embedding")
+_EMBEDDING_TOPIC  = os.getenv("MQTT_VIT_EMBEDDING_TOPIC", "yahboom/vit/embedding") # Main topic where the Pi sends embeddings.
 _CLIP_EMBED_TOPIC = os.getenv("MQTT_VIT_CLIP_EMBEDDING_TOPIC", "yahboom/clip_embedding")
 # Older webrtc_server.py / robot scripts used slash-less topic names.
-_LEGACY_EMBED_TOPIC = os.getenv("MQTT_VIT_LEGACY_EMBEDDING_TOPIC", "yahboomvitembedding")
+_LEGACY_EMBED_TOPIC = os.getenv("MQTT_VIT_LEGACY_EMBEDDING_TOPIC", "yahboomvitembedding") #For Backword compatibility if needed.
 _STATUS_TOPIC     = os.getenv("MQTT_VIT_STATUS_TOPIC",    "yahboom/vit/status")
 _ROBOT_STATUS_TOPIC = os.getenv("MQTT_VIT_ROBOT_STATUS_TOPIC", "yahboom/status")
 _LEGACY_STATUS_TOPIC = os.getenv("MQTT_VIT_LEGACY_STATUS_TOPIC", "yahboomvitstatus")
-_RESULT_TOPIC     = os.getenv("MQTT_VIT_RESULT_TOPIC",    "yahboom/vit/result")
+
+#If local modle is not availabe, the services can still use the result from this topic.
+_RESULT_TOPIC     = os.getenv("MQTT_VIT_RESULT_TOPIC",    "yahboom/vit/result")  
+
 _CONFIG_TOPIC     = os.getenv("MQTT_VIT_CONFIG_TOPIC",    "yahboom/vit/config")
 _COMMAND_TOPIC    = os.getenv("MQTT_VIT_COMMAND_TOPIC",   "yahboom/vit/command")
 
