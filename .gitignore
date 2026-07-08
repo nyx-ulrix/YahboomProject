@@ -1,4 +1,4 @@
-# ============================================================
+x# ============================================================
 # Unified .gitignore for Yahboom Project
 # ============================================================
 
@@ -80,6 +80,9 @@ ehthumbs.db
 .cursor/
 .cursor
 cursor.json
+
+## Graphify
+graphify-out/
 
 ## JetBrains IDEs
 .idea/

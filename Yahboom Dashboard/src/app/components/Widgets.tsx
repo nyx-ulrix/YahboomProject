@@ -1573,7 +1573,7 @@ export const vitDecoderDef: WidgetDefinition = {
 
 // STOP-TIME TEST BENCH — measure how long the robot takes to stop after EXPLORE.
 // Command time is stamped on the Pi clock when START is pressed; the official run
-// start is when the Pi reports movement. Stop time comes from Pi drive-status MQTT.
+// start is when the Pi reports movement. Mission time ends at Pi drive-status halt.
 type StopModeApiResponse = {
   mode?: StopBenchMode;
   cache_script_running?: boolean;
@@ -2514,11 +2514,11 @@ function StopTestBenchWidget() {
       'Run',
       'Command Time (Pi)',
       'Movement Start (Pi)',
-      'Stop Time (Pi)',
+      'Mission End (Pi)',
       'Command-to-Move (ms)',
-      'Stop Duration (ms)',
-      'Stop Time (s)',
-      'Stopping Distance (cm)',
+      'Mission Time (ms)',
+      'Mission Time (s)',
+      'Distance of Object (cm)',
       'Network Type',
       'Stop Mode',
       'Stop Source',
@@ -2543,7 +2543,7 @@ function StopTestBenchWidget() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `stop_time_test_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`;
+    a.download = `mission_time_test_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -2891,9 +2891,9 @@ function StopTestBenchWidget() {
         <div className="flex flex-col min-w-0">
           <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
             {stopping
-              ? 'Stopped at (Pi)'
+              ? 'Mission ended (Pi)'
               : running
-                ? 'Stop elapsed (Pi)'
+                ? 'Mission time (Pi)'
                 : waitingForMovement
                   ? 'Since command (Pi)'
                   : 'Elapsed (Pi)'}
@@ -2959,11 +2959,11 @@ function StopTestBenchWidget() {
             borderBottom: '1px solid var(--stroke-subtle)',
           }}>
           <span>#</span>
-          <span>Stop</span>
+          <span>Mission</span>
           <span>Mode</span>
           <span>Stopped by</span>
           <span>Conf</span>
-          <span>Dist (cm)</span>
+          <span>Object (cm)</span>
           <span>Net</span>
           <span />
         </div>
@@ -2971,7 +2971,7 @@ function StopTestBenchWidget() {
         {runs.length === 0 ? (
           <div className="flex items-center justify-center text-center px-3 py-6"
             style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            Press START to begin a run. Stop time is measured from when the Pi reports movement.
+            Press START to begin a run. Mission time is measured from when the Pi reports movement.
           </div>
         ) : (
           runs.map((r) => (
@@ -3044,7 +3044,7 @@ function StopTestBenchWidget() {
                 inputMode="decimal"
                 step="1"
                 placeholder="cm"
-                title="Stopping distance in centimeters"
+                title="Distance of object in centimeters"
                 value={r.stoppingDistance}
                 onChange={(e) => updateRun(r.id, { stoppingDistance: e.target.value })}
                 style={{ ...inputStyle, padding: '2px 5px', fontFamily: 'monospace', minWidth: 0 }}
