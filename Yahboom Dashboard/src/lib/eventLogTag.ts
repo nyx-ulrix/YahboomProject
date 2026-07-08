@@ -18,10 +18,10 @@ export function inferEventTag(ev: Pick<EventLogEntry, 'tag' | 'message'>): strin
   if (post?.[1]) return post[1].trim();
 
   if (/^LiDAR E-stop/i.test(ev.message)) return 'yahboom/safety/status';
-  if (/^Edge-aware stop/i.test(ev.message)) return 'yahboom/vit/status';
+  if (/^Edge Stop/i.test(ev.message)) return 'yahboom/vit/status';
   if (/^Connecting to broker/i.test(ev.message)) return 'mqtt';
   if (/^Emergency stop/i.test(ev.message)) return 'estop';
-  if (/^Stop mode:|^Stop-time test/i.test(ev.message)) return 'test-bench';
+  if (/^Mission bench:|^Mission test/i.test(ev.message)) return 'test-bench';
   if (/^Cannot reach Flask/i.test(ev.message)) return 'api';
   if (/^Backend started/i.test(ev.message)) return 'system';
 

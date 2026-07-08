@@ -116,7 +116,7 @@ function triggerStopLabelStop(key: string, confidence: number): boolean {
   sendDashboardBottleStop();
   useMetricsStore.getState().pushEvent(
     'warning',
-    `Edge-aware stop — ${EDGE_AWARE_STOP_LABEL} ${confidence.toFixed(2)}% (≥ ${EDGE_AWARE_MIN_CONFIDENCE}%), stop sent`,
+    `Edge Stop — bottle ${confidence.toFixed(2)} percent (minimum ${EDGE_AWARE_MIN_CONFIDENCE} percent), mission ended`,
     'yahboom/vit/status',
   );
   return true;

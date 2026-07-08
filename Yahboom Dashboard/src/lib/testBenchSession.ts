@@ -51,7 +51,7 @@ export function notifyTestBenchManualStop(reason?: string) {
 
 /** Bottle / edge-aware stop-label — freezes the live timer immediately. */
 export function notifyTestBenchStopLabelStop(confidence?: number) {
-  pendingStopReason = 'Stop-time test — stop label detected';
+  pendingStopReason = 'Mission test — bottle detected';
   pendingStopIsStopLabel = true;
   pendingStopConfidence = confidence ?? null;
   edgeAwareStopLabelActive = true;
