@@ -19,16 +19,17 @@ export function setTestBenchStopMode(mode: StopBenchMode) {
   benchStopMode = mode;
 }
 
-/** Pure cache mode: Pi stop only — do not send auto_off from dashboard. */
+/**
+ * Edge-aware bottle stop is always armed, so a manual stop always sends auto_off
+ * from the dashboard to disengage explore (the Pi handles its own cache-aware stop).
+ */
 export function skipAutoOffOnBenchStop(): boolean {
-  return benchSessionActive && benchStopMode === 'cache_aware_offloading';
+  return false;
 }
 
-/** Skip dashboard auto_off after run when Pi cache script ended the run (cache or hybrid). */
+/** Skip dashboard auto_off after a run only when the Pi cache script ended it. */
 export function skipAutoOffAfterBenchRun(stopSource: StopSource | null): boolean {
-  if (benchStopMode === 'cache_aware_offloading') return true;
-  if (benchStopMode === 'hybrid' && stopSource === 'cache_pi') return true;
-  return false;
+  return benchStopMode === 'cache_aware_offloading' && stopSource === 'cache_pi';
 }
 
 export function benchModeNeedsPiScript(): boolean {

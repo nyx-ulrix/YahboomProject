@@ -1,18 +1,17 @@
 """
-Stop-Time Test Bench API — stop-mode selection and Pi cache-aware script control.
+Stop-Time Test Bench API — stop-mode selection and cache-aware MQTT control.
+
+Cache-aware offloading is toggled by publishing Cae_ON / Cae_OFF over MQTT
+(see mqtt_service.publish_cache_aware_command). Readiness is driven solely by
+the Pi's retained {"ready": ...} status on yahboom/cache_aware/ready.
 """
 
 from flask import Blueprint, jsonify, request
 
 from app.services.mqtt_service import mqtt_service
-from app.services.test_bench.cache_aware_ssh import (
-    probe_cache_aware_script,
-    start_cache_aware_script,
-    stop_cache_aware_script,
-)
 from app.services.vit.edge_aware_estop import (
+    STOP_MODE_CACHE,
     STOP_MODE_EDGE,
-    STOP_MODE_HYBRID,
     STOP_MODES,
     edge_aware_estop,
 )
@@ -20,43 +19,25 @@ from app.services.vit.edge_aware_estop import (
 test_bench_bp = Blueprint("test_bench", __name__, url_prefix="/api/test_bench")
 
 
-def _cache_script_fields(probe: dict | None = None, *, running: bool | None = None) -> dict:
-    """Merge Pi cache-script probe fields into an API payload."""
+def _cache_script_fields() -> dict:
+    """Cache-aware readiness derived from the Pi's MQTT ready flag only (no SSH)."""
     mqtt_ready = mqtt_service.cache_aware_embedding_ready
-    if running is None:
-        running = bool((probe or {}).get("running"))
-    probe_ready = bool((probe or {}).get("detection_ready"))
-    detection_ready = bool(running and probe_ready) or mqtt_ready
     return {
-        "cache_script_running": running,
-        "cache_script_detection_ready": detection_ready,
+        "cache_script_running": mqtt_ready,
+        "cache_script_detection_ready": mqtt_ready,
         "cache_aware_mqtt_ready": mqtt_ready,
-        **({"cache_script_launch_mode": probe["launch_mode"]} if probe and probe.get("launch_mode") else {}),
-        **({"cache_script_log": probe["log_path"]} if probe and probe.get("log_path") else {}),
     }
 
 
-def _stop_mode_payload(
-    *,
-    probe: dict | None = None,
-    cache_script_running: bool | None = None,
-    force_probe: bool = False,
-) -> dict:
+def _stop_mode_payload() -> dict:
     payload = edge_aware_estop.get_status()
-    if probe is None:
-        probe = probe_cache_aware_script(force=force_probe)
-    running = cache_script_running if cache_script_running is not None else bool(probe.get("running"))
-    if running and not probe.get("detection_ready") and not mqtt_service.cache_aware_embedding_ready:
-        probe = {**probe, **probe_cache_aware_script(force=True)}
-    payload.update(_cache_script_fields(probe, running=running))
+    payload.update(_cache_script_fields())
     return payload
 
 
 @test_bench_bp.route("/stop_mode", methods=["GET"])
 def get_stop_mode():
-    force = request.args.get("force", "").lower() in ("1", "true", "yes")
-    probe = probe_cache_aware_script(force=force)
-    return jsonify(_stop_mode_payload(probe=probe, force_probe=force))
+    return jsonify(_stop_mode_payload())
 
 
 @test_bench_bp.route("/latest_detection", methods=["GET"])
@@ -67,20 +48,25 @@ def get_latest_detection():
     })
 
 
-@test_bench_bp.route("/cache_script/stop", methods=["POST"])
-def stop_cache_script():
-    """Stop cache_aware_offloading.py on the Pi and close its terminal."""
-    try:
-        probe = stop_cache_aware_script()
-    except Exception as exc:
-        return jsonify({
-            "status": "error",
-            "message": str(exc).strip() or "Failed to stop cache-aware script on Pi",
-        }), 503
-    return jsonify({
-        "status": "ok",
-        **_stop_mode_payload(probe=probe, cache_script_running=False),
-    })
+@test_bench_bp.route("/cache_aware", methods=["POST"])
+def set_cache_aware():
+    """
+    Turn cache-aware offloading on/off by publishing Cae_ON / Cae_OFF over MQTT.
+
+    Expected JSON: { "on": true|false }
+    """
+    data = request.get_json(silent=True) or {}
+    on = bool(data.get("on"))
+
+    success, message = mqtt_service.publish_cache_aware_command(on)
+    edge_aware_estop.set_mode(STOP_MODE_CACHE if on else STOP_MODE_EDGE)
+
+    payload = {
+        "status": "ok" if success else "error",
+        **_stop_mode_payload(),
+        "message": message,
+    }
+    return jsonify(payload), 200 if success else 503
 
 
 @test_bench_bp.route("/stop_mode", methods=["POST"])
@@ -95,65 +81,8 @@ def set_stop_mode():
         }), 400
 
     applied = edge_aware_estop.set_mode(mode)
-    cache_running = False
-    message = None
-    probe: dict = {}
-
-    try:
-        if mode == STOP_MODE_EDGE:
-            stop_cache_aware_script()
-            cache_running = False
-        else:
-            reuse_existing = data.get("reuse_existing") in (True, "true", 1, "1", "yes")
-            if reuse_existing:
-                probe = probe_cache_aware_script(force=True)
-                if probe.get("running"):
-                    cache_running = True
-                    if probe.get("detection_ready"):
-                        message = "Cache stop enabled — using existing script on Pi"
-                    else:
-                        message = (
-                            "Cache stop already running — waiting for bottle embedding "
-                            "([DETECT] Text embedding ready). START unlocks when ready."
-                        )
-                else:
-                    probe = start_cache_aware_script(wait=True)
-                    cache_running = bool(probe.get("running"))
-            else:
-                probe = start_cache_aware_script(wait=True)
-                cache_running = bool(probe.get("running"))
-            if not cache_running and not message:
-                message = (
-                    "cache_aware_offloading.py did not start on the Pi within the "
-                    "configured timeout — check SSH, vit_env, and script path."
-                )
-            elif cache_running and not probe.get("detection_ready") and not message:
-                message = (
-                    "Cache stop is running — waiting for bottle embedding "
-                    "([DETECT] Text embedding ready). START unlocks when ready."
-                )
-            if mode == STOP_MODE_HYBRID and cache_running:
-                hybrid_msg = (
-                    "Hybrid mode — Cache stop and Edge Stop "
-                    "are both armed (first trigger wins)"
-                )
-                message = f"{hybrid_msg}; {message}" if message else hybrid_msg
-            elif probe.get("launch_mode") == "terminal" and cache_running and not message:
-                message = "Opened Pi terminal — cache_aware_offloading.py"
-    except Exception as exc:
-        return jsonify({
-            "status": "error",
-            "message": str(exc).strip() or "Failed to control cache-aware script on Pi",
-            **_stop_mode_payload(probe={}, cache_script_running=False),
-            "mode": applied,
-        }), 503
-
-    payload = {
-        "status": "ok" if cache_running or mode == STOP_MODE_EDGE else "error",
-        **_stop_mode_payload(probe=probe, cache_script_running=cache_running),
+    return jsonify({
+        "status": "ok",
+        **_stop_mode_payload(),
         "mode": applied,
-    }
-    if message:
-        payload["message"] = message
-    code = 200 if cache_running or mode == STOP_MODE_EDGE else 503
-    return jsonify(payload), code
+    })

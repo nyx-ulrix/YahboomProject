@@ -2,7 +2,7 @@
 
 const STORAGE_KEY = 'yahboom_test_bench_v1';
 
-export type StopBenchMode = 'cache_aware_offloading' | 'hybrid' | 'edge_aware';
+export type StopBenchMode = 'cache_aware_offloading' | 'edge_aware';
 
 export type StopSource = 'cache_pi' | 'edge_dashboard' | 'manual';
 
@@ -34,7 +34,13 @@ const EMPTY_CACHE: TestBenchCache = {
 };
 
 function isStopBenchMode(value: unknown): value is StopBenchMode {
-  return value === 'cache_aware_offloading' || value === 'hybrid' || value === 'edge_aware';
+  return value === 'cache_aware_offloading' || value === 'edge_aware';
+}
+
+/** Legacy 'hybrid' runs are recorded as cache_aware_offloading (edge stays armed). */
+function normalizeStopMode(value: unknown): StopBenchMode | undefined {
+  if (value === 'hybrid') return 'cache_aware_offloading';
+  return isStopBenchMode(value) ? value : undefined;
 }
 
 function isStopSource(value: unknown): value is StopSource {
@@ -65,7 +71,15 @@ function parseCache(raw: string | null): TestBenchCache {
   try {
     const data = JSON.parse(raw) as Record<string, unknown>;
     const runs = Array.isArray(data.runs)
-      ? data.runs.filter(isPersistedRun)
+      ? data.runs
+          .map((run) => {
+            if (run && typeof run === 'object') {
+              const mode = normalizeStopMode((run as Record<string, unknown>).stopMode);
+              if (mode) return { ...(run as Record<string, unknown>), stopMode: mode };
+            }
+            return run;
+          })
+          .filter(isPersistedRun)
       : [];
     return {
       runs,
@@ -114,36 +128,27 @@ export const STOP_SOURCE_LABELS: Record<StopSource, string> = {
 };
 
 export const STOP_MODE_LABELS: Record<StopBenchMode, string> = {
-  cache_aware_offloading: 'Cache stop',
-  hybrid: 'Hybrid',
+  cache_aware_offloading: 'Cache Aware',
   edge_aware: 'Edge Stop',
 };
 
 export const STOP_BENCH_MODES: StopBenchMode[] = [
   'cache_aware_offloading',
-  'hybrid',
   'edge_aware',
 ];
 
 export const DEFAULT_STOP_BENCH_MODE: StopBenchMode = 'edge_aware';
 
-export const DEFAULT_STOP_TOGGLES: StopModeToggles = { cacheOn: false, edgeOn: false };
+// Edge-aware bottle stop is always on (no toggle); only cache-aware is user-controlled.
+export const DEFAULT_STOP_TOGGLES: StopModeToggles = { cacheOn: false, edgeOn: true };
 
 const STOP_MODE_PREF_KEY = 'yahboom_stop_bench_mode';
 const STOP_TOGGLES_KEY = 'yahboom_stop_toggles';
 
 export function loadStopToggles(): StopModeToggles {
-  try {
-    const raw = localStorage.getItem(STOP_TOGGLES_KEY);
-    if (raw) {
-      const data = JSON.parse(raw) as Record<string, unknown>;
-      if (typeof data.cacheOn === 'boolean' && typeof data.edgeOn === 'boolean') {
-        return { cacheOn: data.cacheOn, edgeOn: data.edgeOn };
-      }
-    }
-  } catch {
-    /* ignore */
-  }
+  // Cache Aware Offloading always starts OFF (never restored from a prior session);
+  // it must be re-enabled explicitly so the car receives a fresh Cae_ON + Cae_Ready.
+  // edgeOn is always true — edge-aware bottle stop has no toggle.
   return { ...DEFAULT_STOP_TOGGLES };
 }
 
@@ -173,11 +178,12 @@ export function saveStopModePreference(mode: StopBenchMode): void {
 }
 
 export function benchNeedsPiScript(mode: StopBenchMode): boolean {
-  return mode === 'cache_aware_offloading' || mode === 'hybrid';
+  return mode === 'cache_aware_offloading';
 }
 
-export function benchHasDashboardBottleStop(mode: StopBenchMode): boolean {
-  return mode === 'edge_aware' || mode === 'hybrid';
+// Edge-aware dashboard bottle stop is always armed, in every mode.
+export function benchHasDashboardBottleStop(_mode: StopBenchMode): boolean {
+  return true;
 }
 
 export type StopModeToggles = { cacheOn: boolean; edgeOn: boolean };
@@ -199,10 +205,10 @@ export function stopModeToToggles(mode: StopBenchMode): StopModeToggles {
   };
 }
 
-/** Map cache/edge toggles to backend stop mode. Returns null when both are off. */
-export function togglesToStopMode(cacheOn: boolean, edgeOn: boolean): StopBenchMode | null {
-  if (cacheOn && edgeOn) return 'hybrid';
-  if (cacheOn) return 'cache_aware_offloading';
-  if (edgeOn) return 'edge_aware';
-  return null;
+/**
+ * Map cache/edge toggles to backend stop mode. Edge-aware bottle stop is always
+ * armed, so cache-on -> cache_aware_offloading (Pi script + edge), else edge_aware.
+ */
+export function togglesToStopMode(cacheOn: boolean, _edgeOn: boolean): StopBenchMode {
+  return cacheOn ? 'cache_aware_offloading' : 'edge_aware';
 }

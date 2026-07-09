@@ -5,10 +5,6 @@ import { DEFAULT_BROKER_HOST, useMetricsStore, usePickerStore, useSettingsStore 
 import { sendCommand, sendCameraCommand, setEstopState, vecToCameraCommand, type BotCommand } from '../lib/Controls';
 import { connectBroker } from '../lib/Connections';
 import {
-  loadStopToggles,
-} from '../lib/testBenchStorage';
-import {
-  isEdgeAwareStopEnabled,
   processVitStatusForStopLabelEstop,
   setEdgeAwareStopEnabled,
 } from '../lib/edgeAwareStopLabelEstop';
@@ -479,24 +475,17 @@ export function useKeyboardCamera(onChange?: (v: { pan: number; tilt: number }) 
   }, []);
 }
 
-/** Keep edge-aware flag in sync with backend; evaluate VIT decoder labels on each poll. */
+/** Edge-aware bottle stop is always enabled; it only fires while a mission is armed. */
 export function useEdgeAwareStopLabelEstop() {
   useEffect(() => {
-    setEdgeAwareStopEnabled(loadStopToggles().edgeOn);
+    // Edge-aware stop has no toggle — always on. Triggering is still bounded by
+    // the test-bench session arming (stopLabelEstopArmed) inside processVitStatus…
+    setEdgeAwareStopEnabled(true);
 
     let alive = true;
 
     const poll = async () => {
       try {
-        const modeRes = await fetch('/api/test_bench/stop_mode', { cache: 'no-store' });
-        if (modeRes.ok) {
-          const modeData = await modeRes.json() as { mode?: string };
-          const toggles = loadStopToggles();
-          const modeOk = modeData.mode === 'edge_aware' || modeData.mode === 'hybrid';
-          setEdgeAwareStopEnabled(toggles.edgeOn && modeOk);
-        }
-        if (!isEdgeAwareStopEnabled()) return;
-
         const vitRes = await fetch('/api/vit/status', { cache: 'no-store' });
         if (!vitRes.ok || !alive) return;
         const vit = await vitRes.json();

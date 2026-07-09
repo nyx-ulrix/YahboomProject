@@ -186,7 +186,7 @@ def _infer_target_dims(raw_bytes: bytes, meta: dict | None = None) -> int:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Optional MobileCLIP decoder
+# MobileCLIP decoder
 # ═════════════════════════════════════════════════════════════════════════════
 
 class MobileClipDecoder:
@@ -268,7 +268,9 @@ class MobileClipDecoder:
             self.labels = list(labels)
             if self.ready:
                 self._build_text_embeddings()
-
+# ═════════════════════════════════════════════════════════════════════════════
+# #DECODING section 
+# ═════════════════════════════════════════════════════════════════════════════
     def decode(
         self,
         raw_bytes: bytes,
@@ -302,7 +304,9 @@ class MobileClipDecoder:
                 for i, p in zip(top_idx, top_prob):
                     results.append((self.labels[int(i)], round(float(p.item()) * 100, 1)))
         return results, target_dims
-
+# ═════════════════════════════════════════════════════════════════════════════
+# #DECODING section end 
+# ═════════════════════════════════════════════════════════════════════════════
 
 # ═════════════════════════════════════════════════════════════════════════════
 # VIT Service  (MQTT + background threads; integrates with Flask app)

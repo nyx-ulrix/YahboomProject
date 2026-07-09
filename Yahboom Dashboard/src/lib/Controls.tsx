@@ -159,7 +159,7 @@ async function postBotCommand(command: BotCommand): Promise<void> {
 }
 
 /**
- * Edge / hybrid bottle stop — send auto_off first so explore disengages, then stop.
+ * Edge-aware bottle stop — send auto_off first so explore disengages, then stop.
  * Used by dashboard VIT detection (not Pi cache script).
  */
 export function sendDashboardBottleStop(): void {
@@ -215,7 +215,7 @@ export function sendCommand(command: BotCommand, source?: CommandSource): void {
     && state.estopActive
   ) return;
 
-  // Manual stop also turns off explore/auto on the Pi (edge + hybrid; not pure cache bench).
+  // Manual stop also turns off explore/auto on the Pi so the robot disengages.
   if (
     command === 'stop'
     && source === 'manual'

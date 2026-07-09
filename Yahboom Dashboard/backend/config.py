@@ -74,7 +74,7 @@ PI_CACHE_AWARE_TERMINAL_TITLE = os.getenv(
     "PI_CACHE_AWARE_TERMINAL_TITLE", "Cache Aware Offloading")
 CACHE_SCRIPT_START_TIMEOUT_SEC = float(os.getenv("CACHE_SCRIPT_START_TIMEOUT_SEC", "30"))
 CACHE_SCRIPT_START_POLL_SEC = float(os.getenv("CACHE_SCRIPT_START_POLL_SEC", "1"))
-# Pi log line that unlocks test-bench START in cache / hybrid mode (see cache_aware_offloading.py).
+# Pi log line that unlocks test-bench START in cache-aware offloading mode (see cache_aware_offloading.py).
 CACHE_SCRIPT_EMBEDDING_READY_SNIPPET = os.getenv(
     "CACHE_SCRIPT_EMBEDDING_READY_SNIPPET",
     "[DETECT] Text embedding ready: 'a water bottle'",

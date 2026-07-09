@@ -213,6 +213,37 @@ class MQTTService:
         except Exception:
             pass
 
+    def publish_cache_aware_command(self, on: bool) -> tuple[bool, str]:
+        """
+        Turn cache-aware offloading on/off on the Pi by publishing Cae_ON/Cae_OFF
+        to CACHE_AWARE_READY_TOPIC. The car's script replies with 'Cae_Ready' on the
+        same topic when it is ready; that message is what unlocks START (handled in
+        _on_message). Sending a command resets readiness so START stays blocked until
+        a fresh 'Cae_Ready' arrives.
+        """
+        cmd = "Cae_ON" if on else "Cae_OFF"
+        # Any command invalidates the previous ready state — wait for a new Cae_Ready.
+        self.set_cache_aware_ready(ready=False)
+        if not self.connected:
+            reconnect_ip = self.broker_ip or ""
+            if reconnect_ip:
+                self.connect_to_broker(reconnect_ip)
+        if not self.connected:
+            msg = f"MQTT broker not connected — skipped {CACHE_AWARE_READY_TOPIC}: {cmd}"
+            self.log_event("warning", msg, tag=CACHE_AWARE_READY_TOPIC)
+            return False, msg
+        try:
+            # Simulate wired-backhaul send delay (non-video path).
+            backhaul_delay.apply()
+            self.mqtt_client.publish(CACHE_AWARE_READY_TOPIC, cmd)
+            self.log_event("info", f"MQTT -> {CACHE_AWARE_READY_TOPIC}: {cmd}", tag=CACHE_AWARE_READY_TOPIC)
+            return True, f"Published '{cmd}' to '{CACHE_AWARE_READY_TOPIC}'"
+        except Exception as e:
+            self.connected = False
+            msg = f"Cache-aware command publish failed: {e}"
+            self.log_event("error", msg, tag=CACHE_AWARE_READY_TOPIC)
+            return False, msg
+
     @staticmethod
     def _robot_timestamp_seconds(obj: dict) -> float | None:
         """Pi clock from mqtt_ros_node.py payloads (time.time() seconds)."""
@@ -421,6 +452,19 @@ class MQTTService:
             return
 
         if message.topic == CACHE_AWARE_READY_TOPIC:
+            text = raw.strip()
+            # Cae_ON/Cae_OFF are dashboard->Pi commands that share this topic;
+            # ignore our own command echo so it never clobbers the ready flag.
+            if text in ("Cae_ON", "Cae_OFF"):
+                return
+            # The car's cache-aware script reports readiness with 'Cae_Ready';
+            # this is what unlocks START in cache-aware offloading mode. Latch it
+            # once — ignore repeats until a new command (Cae_ON/Cae_OFF) resets it.
+            if text == "Cae_Ready":
+                if not self.cache_aware_embedding_ready:
+                    self.set_cache_aware_ready(ready=True)
+                    self.log_event("info", "Cache-aware script ready (Cae_Ready)", tag=CACHE_AWARE_READY_TOPIC)
+                return
             ready = self._parse_cache_aware_ready(raw)
             dims = None
             try:
