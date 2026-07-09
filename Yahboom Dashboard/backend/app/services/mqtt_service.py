@@ -216,10 +216,10 @@ class MQTTService:
     def publish_cache_aware_command(self, on: bool) -> tuple[bool, str]:
         """
         Turn cache-aware offloading on/off on the Pi by publishing Cae_ON/Cae_OFF
-        to CACHE_AWARE_READY_TOPIC. The car's script replies with 'Cae_Ready' on the
-        same topic when it is ready; that message is what unlocks START (handled in
-        _on_message). Sending a command resets readiness so START stays blocked until
-        a fresh 'Cae_Ready' arrives.
+        to TOPIC (yahboom/cmd) — the same command channel as WASD movement. The car's
+        script replies with 'Cae_Ready' on CACHE_AWARE_READY_TOPIC when it is ready;
+        that reply is what unlocks START (handled in _on_message). Sending a command
+        resets readiness so START stays blocked until a fresh 'Cae_Ready' arrives.
         """
         cmd = "Cae_ON" if on else "Cae_OFF"
         # Any command invalidates the previous ready state — wait for a new Cae_Ready.
@@ -229,19 +229,19 @@ class MQTTService:
             if reconnect_ip:
                 self.connect_to_broker(reconnect_ip)
         if not self.connected:
-            msg = f"MQTT broker not connected — skipped {CACHE_AWARE_READY_TOPIC}: {cmd}"
-            self.log_event("warning", msg, tag=CACHE_AWARE_READY_TOPIC)
+            msg = f"MQTT broker not connected — skipped {TOPIC}: {cmd}"
+            self.log_event("warning", msg, tag=TOPIC)
             return False, msg
         try:
             # Simulate wired-backhaul send delay (non-video path).
             backhaul_delay.apply()
-            self.mqtt_client.publish(CACHE_AWARE_READY_TOPIC, cmd)
-            self.log_event("info", f"MQTT -> {CACHE_AWARE_READY_TOPIC}: {cmd}", tag=CACHE_AWARE_READY_TOPIC)
-            return True, f"Published '{cmd}' to '{CACHE_AWARE_READY_TOPIC}'"
+            self.mqtt_client.publish(TOPIC, cmd)
+            self.log_event("info", f"MQTT -> {TOPIC}: {cmd}", tag=TOPIC)
+            return True, f"Published '{cmd}' to '{TOPIC}'"
         except Exception as e:
             self.connected = False
             msg = f"Cache-aware command publish failed: {e}"
-            self.log_event("error", msg, tag=CACHE_AWARE_READY_TOPIC)
+            self.log_event("error", msg, tag=TOPIC)
             return False, msg
 
     @staticmethod
@@ -453,8 +453,8 @@ class MQTTService:
 
         if message.topic == CACHE_AWARE_READY_TOPIC:
             text = raw.strip()
-            # Cae_ON/Cae_OFF are dashboard->Pi commands that share this topic;
-            # ignore our own command echo so it never clobbers the ready flag.
+            # Cae_ON/Cae_OFF are now published on yahboom/cmd, not here. Keep this
+            # guard as a defensive no-op in case anything echoes them onto this topic.
             if text in ("Cae_ON", "Cae_OFF"):
                 return
             # The car's cache-aware script reports readiness with 'Cae_Ready';
