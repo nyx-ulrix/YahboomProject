@@ -1878,6 +1878,11 @@ function StopTestBenchWidget() {
   const recordedBenchModeRef = useRef<StopBenchMode>(stopMode);
   const applyStopModeRef = useRef<(mode: StopBenchMode, opts?: { bothOff?: boolean; reuseExisting?: boolean }) => Promise<void>>(async () => {});
   const userDisabledCacheRef = useRef(false);
+  const widgetRootRef = useRef<HTMLDivElement>(null);
+  const distanceInputRefs = useRef<Map<number, HTMLInputElement>>(new Map());
+  const pendingDistanceFocusRunIdRef = useRef<number | null>(null);
+  const startTestRef = useRef<() => void>(() => {});
+  const startBlockedRef = useRef(false);
   useEffect(() => { networkTypeRef.current = networkType; }, [networkType]);
   useEffect(() => { stopModeRef.current = stopMode; }, [stopMode]);
   useEffect(() => { stopTogglesRef.current = stopToggles; }, [stopToggles]);
@@ -2192,11 +2197,13 @@ function StopTestBenchWidget() {
     const recordedSource = stopSourceRef.current ?? 'manual';
     const metrics = await captureStopMetrics(recordedSource);
     const mode = recordedBenchModeRef.current;
+    const newRunId = Date.now() + Math.random();
+    pendingDistanceFocusRunIdRef.current = newRunId;
     resetSession();
     setRuns((prev) => [
       ...prev,
       {
-        id: Date.now() + Math.random(),
+        id: newRunId,
         run: prev.length + 1,
         commandSentAt: cmdAt,
         startedAt,
@@ -2579,6 +2586,53 @@ function StopTestBenchWidget() {
   const cacheWaitingEmbedding = benchNeedsPiScript(benchModeForGating) && cacheScriptRunning && !cacheScriptReady;
   const stopTogglesDisabled = sessionActive || modeSwitching;
 
+  startTestRef.current = () => { void startTest(); };
+
+  useEffect(() => {
+    const runId = pendingDistanceFocusRunIdRef.current;
+    if (runId == null) return;
+    const input = distanceInputRefs.current.get(runId);
+    if (!input) return;
+    pendingDistanceFocusRunIdRef.current = null;
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+  }, [runs]);
+
+  const tryStartFromEnter = useCallback(() => {
+    if (startBlockedRef.current) return;
+    startTestRef.current();
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || e.repeat) return;
+      const root = widgetRootRef.current;
+      if (!root) return;
+
+      const active = document.activeElement;
+      if (active instanceof HTMLElement) {
+        if (active.dataset.benchDistance === 'true') return;
+        if (active.tagName === 'SELECT' || active.tagName === 'TEXTAREA') return;
+        if (active.tagName === 'INPUT') return;
+        if (!root.contains(active) && active !== document.body) return;
+      } else if (active !== null && active !== document.body) {
+        return;
+      }
+
+      const focusInWidget = active instanceof Node && root.contains(active);
+      const focusOnBody = active === document.body || active === null;
+      if (!focusInWidget && !focusOnBody) return;
+
+      if (startBlockedRef.current) return;
+      e.preventDefault();
+      tryStartFromEnter();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [tryStartFromEnter]);
+
   const persistStopToggles = (next: StopModeToggles) => {
     setStopToggles(next);
     stopTogglesRef.current = next;
@@ -2683,7 +2737,7 @@ function StopTestBenchWidget() {
           ? 'Cache stop must be running on the Raspberry Pi before Start'
           : estopActive
             ? 'Emergency stop active — clear it first'
-            : 'Start a run (sends explore command)';
+            : 'Start a run (sends explore command, or press Enter)';
   const benchPillLabel = modeSwitching
     ? 'Starting Script'
     : cacheWaitingEmbedding
@@ -2735,8 +2789,10 @@ function StopTestBenchWidget() {
     padding: '3px 6px', fontSize: 11, outline: 'none',
   };
 
+  startBlockedRef.current = startBlocked;
+
   return (
-    <div className="h-full flex flex-col gap-1.5 min-h-0">
+    <div ref={widgetRootRef} className="h-full flex flex-col gap-1.5 min-h-0">
       {/* Header */}
       <div className="flex-shrink-0 flex items-center justify-between gap-2 uppercase tracking-wider"
         style={{ color: 'var(--text-muted)', fontSize: 9, lineHeight: 1.1 }}>
@@ -2931,6 +2987,7 @@ function StopTestBenchWidget() {
               : '0 8px 24px rgba(34,197,94,0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
           }}
           title={startButtonTitle}
+          aria-keyshortcuts="Enter"
         >
           {startButtonWaiting ? (
             <>
@@ -3046,8 +3103,19 @@ function StopTestBenchWidget() {
                 step="1"
                 placeholder="centimeters"
                 title="Distance of object in centimeters"
+                data-bench-distance="true"
+                ref={(el) => {
+                  if (el) distanceInputRefs.current.set(r.id, el);
+                  else distanceInputRefs.current.delete(r.id);
+                }}
                 value={r.stoppingDistance}
                 onChange={(e) => updateRun(r.id, { stoppingDistance: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter') return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  tryStartFromEnter();
+                }}
                 style={{ ...inputStyle, padding: '2px 5px', fontFamily: 'monospace', minWidth: 0 }}
               />
               <select

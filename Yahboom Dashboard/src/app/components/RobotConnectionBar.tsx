@@ -14,6 +14,7 @@ export function RobotConnectionBar() {
   const [busy, setBusy] = useState(false);
   const [defaultIp, setDefaultIp] = useState('');
   const [showHost, setShowHost] = useState(false);
+  const [hopH, setHopH] = useState('');
 
   useEffect(() => {
     setDraftIp(brokerIp);
@@ -25,6 +26,35 @@ export function RobotConnectionBar() {
       .then((d: { default_broker_ip: string }) => setDefaultIp(d.default_broker_ip))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    fetch('/api/backhaul/config')
+      .then((r) => r.json())
+      .then((d: { h?: number }) => {
+        if (typeof d.h === 'number') setHopH(String(d.h));
+      })
+      .catch(() => {});
+  }, []);
+
+  const commitHopH = () => {
+    const parsed = Number(hopH);
+    if (!Number.isFinite(parsed) || parsed < 1) return;
+    const h = Math.trunc(parsed);
+    setHopH(String(h));
+    fetch('/api/backhaul/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ h }),
+    })
+      .then(() => {
+        useMetricsStore.getState().pushEvent('info', `Backhaul delay hops (h) set to ${h}`, 'mqtt');
+      })
+      .catch(() => {});
+  };
+
+  const onHopKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') commitHopH();
+  };
 
   const onConnect = async () => {
     setBusy(true);
@@ -109,6 +139,33 @@ export function RobotConnectionBar() {
           boxShadow: isConnected ? '0 0 6px var(--state-success)' : 'none',
         }}
       />
+
+      <label
+        className="flex items-center gap-1 shrink-0"
+        title="Backhaul delay hops (h) — simulated network delay on all non-video MQTT traffic"
+        style={{ color: 'var(--text-muted)', fontSize: 10, fontWeight: 600 }}
+      >
+        hops
+        <input
+          type="number"
+          min={1}
+          step={1}
+          inputMode="numeric"
+          value={hopH}
+          onChange={(e) => setHopH(e.target.value)}
+          onBlur={commitHopH}
+          onKeyDown={onHopKeyDown}
+          aria-label="Backhaul delay hops (h)"
+          className="w-12 px-2 py-1 rounded-lg outline-none"
+          style={{
+            background: 'var(--input-background)',
+            border: '1px solid var(--stroke-subtle)',
+            color: 'var(--text-primary)',
+            fontSize: 11,
+            fontFamily: 'monospace',
+          }}
+        />
+      </label>
     </div>
   );
 }

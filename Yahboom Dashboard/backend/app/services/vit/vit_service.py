@@ -472,6 +472,13 @@ class VITService:
             log.warning("VIT MQTT disconnected (rc=%d) — monitor will reconnect", _rc)
 
     def _on_message(self, _client, _ud, message) -> None:
+        # Simulate wired-backhaul receive delay (non-video path).
+        try:
+            from app.services.backhaul_delay import backhaul_delay
+            backhaul_delay.apply()
+        except Exception:
+            pass
+
         topic = message.topic
 
         if topic in _EMBEDDING_TOPICS:
@@ -587,6 +594,9 @@ class VITService:
         if image_file_size is not None:
             msg["image_file_size"] = image_file_size
         try:
+            # Simulate wired-backhaul send delay (non-video path).
+            from app.services.backhaul_delay import backhaul_delay
+            backhaul_delay.apply()
             self._client.publish(_RESULT_TOPIC, json.dumps(msg), qos=0)
         except Exception as exc:
             log.debug("Failed to publish VIT result: %s", exc)
@@ -803,6 +813,9 @@ class VITService:
                 return
 
         try:
+            # Simulate wired-backhaul send delay (non-video path).
+            from app.services.backhaul_delay import backhaul_delay
+            backhaul_delay.apply()
             result = ms.mqtt_client.publish(_COMMAND_TOPIC, command)
             if PUBLISH_TIMEOUT > 0:
                 result.wait_for_publish(timeout=PUBLISH_TIMEOUT)

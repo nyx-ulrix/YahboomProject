@@ -6,6 +6,7 @@ import paho.mqtt.client as mqtt
 from datetime import datetime, timezone
 import time
 import json
+from app.services.backhaul_delay import backhaul_delay
 from config import (
     BROKER_PORT, CACHE_AWARE_READY_TOPIC, DETECT_STATUS_TOPIC, DRIVE_STATUS_TOPIC, GRID_TOPIC, TOPIC, MQTT_TIMEOUT, PUBLISH_TIMEOUT,
     SAFETY_TOPIC, EVENT_LOG_MAX, EVENT_LOG_MESSAGE_MAXLEN,
@@ -85,6 +86,8 @@ class MQTTService:
             cmd = 'estop_off'
         if self.connected:
             try:
+                # Simulate wired-backhaul send delay (non-video path).
+                backhaul_delay.apply()
                 self.mqtt_client.publish(TOPIC, cmd)
                 self.log_event('info', f'MQTT -> {TOPIC}: {cmd}', tag=TOPIC)
             except Exception as e:
@@ -382,6 +385,8 @@ class MQTTService:
         }
 
     def _on_message(self, _client, _userdata, message) -> None:
+        # Simulate wired-backhaul receive delay (non-video path).
+        backhaul_delay.apply()
         raw = message.payload.decode(errors="replace")
         if message.topic == TOPIC:
             self.log_event("info", f"MQTT <- {TOPIC}: {raw}", tag=TOPIC)
