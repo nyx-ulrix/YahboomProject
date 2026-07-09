@@ -1,20 +1,24 @@
 # VIT.py
 # This script:
-# 1. Receives camera frames from webrtc.py through MQTT
-# 2. Runs MobileCLIP-S1 embedding
-# 3. If cache-aware mode is ACTIVE:
-#       - compares live embedding against cached bottle embedding
-#       - if cache MISS: publishes embedding data to MQTT
-#       - if cache HIT for consecutive frames: sends stop + auto_off
-# 4. If cache-aware mode is INACTIVE:
-#       - does not do cache-aware matching
-# 5. Listens for embedding size commands and cache-aware commands
-# 6. Publishes Cae_Ready / Cae_NotReady to the client side
-# 7. Forces Python/Torch temp files into /home/pi/tmp
+# 1. Receives camera frames from webrtc_server.py through MQTT
+# 2. Runs MobileCLIP-S1 embedding on the Yahboom / Raspberry Pi
+# 3. Cache-aware OFF by default when script starts
+# 4. Client sends Cae_ON  -> cache-aware becomes ON
+# 5. Client sends Cae_OFF -> cache-aware becomes OFF
+# 6. When cache-aware is ON:
+#       - live embedding is compared with /home/pi/cache_embeddings.json
+#       - cache confidence is printed in the terminal
+#       - if cache MISS: embedding is published to edge/client
+#       - if cache HIT: embedding is NOT sent to edge/client
+#       - if HIT is stable for required frames: robot receives stop command
+#       - cache-aware stays ON until Cae_OFF is received
 
 import os
 from pathlib import Path
 
+# =========================
+# TEMP FILE LOCATION
+# =========================
 TEMP_DIR = Path("/home/pi/tmp")
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -30,7 +34,6 @@ import base64
 import json
 import threading
 import time
-import sys
 
 import cv2
 import numpy as np
@@ -48,16 +51,31 @@ BROKER_PORT = 1883
 
 CACHE_FILE_PATH = "/home/pi/cache_embeddings.json"
 
-TOPIC_CAMERA_FRAME = "yahboom/camera/frame"
-TOPIC_CLIP = "yahboom/vit/embedding"
-TOPIC_STATUS = "yahboom/vit/status"
+# VIT.py listens to this topic for cache-aware commands:
+#   Cae_ON
+#   Cae_OFF
+#   embds1 / embds2 / embds3
 TOPIC_COMMAND = "yahboom/cmd"
 
+# VIT.py receives camera frames from webrtc_server.py here
+TOPIC_CAMERA_FRAME = "yahboom/camera/frame"
+
+# VIT.py publishes embeddings here only when edge/client should check
+TOPIC_CLIP = "yahboom/vit/embedding"
+
+# VIT.py status topics
+TOPIC_STATUS = "yahboom/vit/status"
 TOPIC_DETECT = "yahboom/detect/status"
 TOPIC_READY = "yahboom/cache_aware/ready"
 TOPIC_CLIENT_READY = "yahboom/cache_aware/client"
 TOPIC_AUTO_STATUS = "yahboom/auto/status"
 TOPIC_CACHE_EVENT = "yahboom/cache_aware/event"
+
+# Robot movement command topic.
+# IMPORTANT:
+# Stop commands go here, NOT to yahboom/vit/command.
+# This prevents VIT.py from receiving its own stop commands.
+TOPIC_ROBOT_COMMAND = "yahboom/cmd"
 
 INFERENCE_EVERY_N_FRAMES = 5
 SHOW_PREVIEW = False
@@ -65,12 +83,22 @@ SHOW_PREVIEW = False
 DETECTION_LABEL = "bottle"
 DEFAULT_DETECTION_THRESHOLD = 0.70
 
+# Bottle must be cache-hit this many times before sending robot stop.
 CONSECUTIVE_HITS_REQUIRED = 3
+
+# After a detection, don't trigger another stop until the bottle is gone
+# for this many cache-miss checks.
+UNLATCH_MISSES_REQUIRED = 5
+
 DETECTION_COOLDOWN_S = 2.0
 STOP_REPEAT_COUNT = 8
 STOP_REPEAT_DELAY_S = 0.05
 READY_HEARTBEAT_S = 2.0
 LOG_EVERY_N_FRAMES = 50
+
+# 1 = print every cache check.
+# Change to 5 or 10 if terminal becomes too noisy.
+CACHE_CONFIDENCE_LOG_EVERY_N_CHECKS = 1
 
 
 # =========================
@@ -133,10 +161,14 @@ CAE_NOT_READY_COMMAND = "Cae_NotReady"
 AUTO_OFF_COMMAND = "auto_off"
 STOP_COMMAND = "stop"
 
+# Only Cae_ON turns cache-aware ON.
+# auto_on is NOT included here on purpose.
 START_COMMANDS = {
     "cae_on",
 }
 
+# Only Cae_OFF turns cache-aware OFF.
+# auto_off is NOT included here on purpose.
 STOP_OR_OFF_COMMANDS = {
     "cae_off",
 }
@@ -161,10 +193,17 @@ embeddings_sent = 0
 
 cached_objects = []
 cache_ready = False
+
+# This is the actual cache-aware ON/OFF state.
+# It starts OFF and only becomes ON after Cae_ON.
 test_active = False
 
 _last_detection_time = 0.0
 _hit_streak = 0
+
+# Prevent repeated stop spam when bottle remains in view.
+_detection_latched = False
+_miss_streak_after_latch = 0
 
 _stop_ready_heartbeat = False
 _stop_sequence_running = False
@@ -185,7 +224,6 @@ def load_model():
     )
 
     model.eval()
-
     print(f"[INFO] Loaded MobileCLIP-S1 on {device}")
 
 
@@ -281,6 +319,13 @@ def load_cached_embeddings():
 
 
 def check_detection(live_embedding: np.ndarray):
+    """
+    Compare live embedding against stored embeddings from cache_embeddings.json.
+
+    Returns:
+        best_match: cached object dict or None
+        best_similarity: cosine/dot-product similarity
+    """
     if not cache_ready or not cached_objects:
         return None, -1.0
 
@@ -309,7 +354,7 @@ def check_detection(live_embedding: np.ndarray):
 
 
 # =========================
-# GET EMBEDDING
+# GET LIVE EMBEDDING
 # =========================
 def get_embedding(frame):
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -321,8 +366,10 @@ def get_embedding(frame):
         emb = model.encode_image(img_tensor.float())
 
     emb = emb / emb.norm(dim=-1, keepdim=True)
+
     target_dims = get_target_dims()
     emb = emb[:, :target_dims]
+
     emb = emb / emb.norm(dim=-1, keepdim=True)
 
     return emb.cpu().numpy().astype(np.float32)
@@ -418,6 +465,12 @@ def publish_client_auto_status(
     threshold=None,
     frame_id=None
 ):
+    """
+    Publishes cache-aware status for the client/UI.
+
+    In this script, auto_on means cache-aware active state for this status topic.
+    It does not directly control robot movement.
+    """
     if mqtt_client is None:
         return
 
@@ -439,6 +492,61 @@ def publish_client_auto_status(
     mqtt_client.publish(TOPIC_CACHE_EVENT, json.dumps(payload), qos=0, retain=False)
 
     print(f"[CLIENT] Published cache-aware status to {TOPIC_AUTO_STATUS}: {payload}")
+
+
+# =========================
+# TERMINAL CONFIDENCE CHECKER
+# =========================
+def print_cache_confidence(
+    frame_id,
+    best_match,
+    similarity,
+    threshold,
+    hit_streak,
+    result,
+    latched=False,
+    miss_streak_after_latch=0
+):
+    """
+    Prints cache-side confidence in terminal.
+
+    This only runs when:
+        cache_ready == True
+        test_active == True
+        cache-aware comparison is actually happening
+    """
+    if best_match is None:
+        print(
+            f"[CACHE_CONF] frame_id={frame_id} | "
+            f"active={test_active} | "
+            f"cache_ready={cache_ready} | "
+            f"latched={latched} | "
+            f"best_label=None | "
+            f"confidence=N/A | "
+            f"similarity=N/A | "
+            f"threshold=N/A | "
+            f"hit_streak={hit_streak}/{CONSECUTIVE_HITS_REQUIRED} | "
+            f"miss_after_latch={miss_streak_after_latch}/{UNLATCH_MISSES_REQUIRED} | "
+            f"result={result}"
+        )
+        return
+
+    confidence_percent = float(similarity) * 100.0
+    threshold_percent = float(threshold) * 100.0
+
+    print(
+        f"[CACHE_CONF] frame_id={frame_id} | "
+        f"active={test_active} | "
+        f"cache_ready={cache_ready} | "
+        f"latched={latched} | "
+        f"best_label={best_match['label']} | "
+        f"confidence={confidence_percent:.2f}% | "
+        f"similarity={similarity:.4f} | "
+        f"threshold={threshold_percent:.2f}% | "
+        f"hit_streak={hit_streak}/{CONSECUTIVE_HITS_REQUIRED} | "
+        f"miss_after_latch={miss_streak_after_latch}/{UNLATCH_MISSES_REQUIRED} | "
+        f"result={result}"
+    )
 
 
 # =========================
@@ -501,7 +609,7 @@ def parse_command_payload(raw_payload: bytes) -> str:
 
 
 def handle_command_message(msg):
-    global test_active, _hit_streak
+    global test_active, _hit_streak, _detection_latched, _miss_streak_after_latch
 
     if msg.topic != TOPIC_COMMAND:
         return
@@ -528,8 +636,11 @@ def handle_command_message(msg):
         if command in START_COMMANDS:
             test_active = True
             _hit_streak = 0
+            _detection_latched = False
+            _miss_streak_after_latch = 0
 
             print(f"[CAE] Received '{command}'. Cache-aware offloading is ACTIVE.")
+            print("[CAE] Cache-aware will stay ON until Cae_OFF is received.")
 
             publish_cache_ready(True, f"cache_aware_active_by_{command}", wait=False, log=True)
             publish_client_auto_status(True, f"cache_aware_active_by_{command}")
@@ -538,6 +649,8 @@ def handle_command_message(msg):
         if command in STOP_OR_OFF_COMMANDS:
             test_active = False
             _hit_streak = 0
+            _detection_latched = False
+            _miss_streak_after_latch = 0
 
             print(f"[CAE] Received '{command}'. Cache-aware offloading is INACTIVE.")
 
@@ -549,7 +662,8 @@ def handle_command_message(msg):
             publish_client_auto_status(False, f"cache_aware_inactive_by_{command}")
             return
 
-        print("[CMD] Unknown command. Use embds1, embds2, embds3, Cae_ON, or Cae_OFF.")
+        print("[CMD] Unknown command for VIT.py.")
+        print("[CMD] Valid VIT commands: embds1, embds2, embds3, Cae_ON, Cae_OFF.")
 
     except Exception as e:
         print(f"[CMD] Error handling command: {e}")
@@ -558,24 +672,38 @@ def handle_command_message(msg):
 # =========================
 # ROBOT STOP LOGIC
 # =========================
-def safe_publish_command(command: str, repeat: int = 1):
+def safe_publish_robot_command(command: str, repeat: int = 1):
+    """
+    Send command to the Yahboom movement script.
+
+    Important:
+    This publishes to TOPIC_ROBOT_COMMAND, not TOPIC_COMMAND.
+    That means sending 'stop' will not turn cache-aware off.
+    """
     if mqtt_client is None:
         return
 
     for _ in range(repeat):
-        result = mqtt_client.publish(TOPIC_COMMAND, command, qos=1)
+        result = mqtt_client.publish(TOPIC_ROBOT_COMMAND, command, qos=1)
 
         try:
             result.wait_for_publish(timeout=2.0)
         except TypeError:
             result.wait_for_publish()
 
-        print(f"[CMD] Sent '{command}' to {TOPIC_COMMAND}")
+        print(f"[ROBOT_CMD] Sent '{command}' to {TOPIC_ROBOT_COMMAND}")
         time.sleep(STOP_REPEAT_DELAY_S)
 
 
 def publish_stop_and_auto_off(similarity=None, threshold=None, frame_id=None):
-    global test_active, _hit_streak, _stop_sequence_running
+    """
+    Stop the Yahboom when cache hit happens.
+
+    Important:
+    This does NOT turn cache-aware off.
+    Cache-aware stays active until the client sends Cae_OFF.
+    """
+    global _hit_streak, _stop_sequence_running
 
     if _stop_sequence_running:
         return
@@ -583,27 +711,36 @@ def publish_stop_and_auto_off(similarity=None, threshold=None, frame_id=None):
     _stop_sequence_running = True
 
     try:
-        test_active = False
+        # Reset hit streak so it does not instantly trigger again.
+        # Do NOT set test_active = False here.
         _hit_streak = 0
 
-        print("[STOP] Bottle detected. Sending stop + auto_off...")
+        print("[STOP] Bottle detected. Sending stop to Yahboom...")
+        print("[STOP] Cache-aware remains ON until client sends Cae_OFF.")
 
-        safe_publish_command(STOP_COMMAND, repeat=1)
-        safe_publish_command(AUTO_OFF_COMMAND, repeat=1)
+        # Stop movement.
+        safe_publish_robot_command(STOP_COMMAND, repeat=STOP_REPEAT_COUNT)
 
+        # If your movement script needs auto_off to exit auto mode, send it to robot topic only.
+        safe_publish_robot_command(AUTO_OFF_COMMAND, repeat=1)
+
+        # Keep client cache-aware state ON.
         publish_client_auto_status(
-            False,
-            "bottle_detected_cache_similarity",
+            True,
+            "bottle_detected_robot_stopped_cache_still_on",
             similarity=similarity,
             threshold=threshold,
             frame_id=frame_id
         )
 
-        safe_publish_command(STOP_COMMAND, repeat=STOP_REPEAT_COUNT)
+        publish_cache_ready(
+            True,
+            "bottle_detected_robot_stopped_cache_still_on",
+            wait=False,
+            log=True
+        )
 
-        publish_cache_ready(True, "bottle_detected_auto_off_sent", wait=False, log=True)
-
-        print("[STOP] Stop + auto_off sequence completed.")
+        print("[STOP] Stop sequence completed. Cache-aware is still ON.")
 
     finally:
         _stop_sequence_running = False
@@ -631,7 +768,8 @@ def create_mqtt_client():
             c.subscribe(TOPIC_COMMAND, qos=0)
 
             print(f"[MQTT] Subscribed camera frames <- {TOPIC_CAMERA_FRAME}")
-            print(f"[MQTT] Subscribed commands      <- {TOPIC_COMMAND}")
+            print(f"[MQTT] Subscribed VIT commands  <- {TOPIC_COMMAND}")
+            print(f"[MQTT] Robot commands publish  -> {TOPIC_ROBOT_COMMAND}")
             print(f"[MQTT] Publishing embeddings   -> {TOPIC_CLIP}")
             print(f"[MQTT] Publishing status       -> {TOPIC_STATUS}")
             print(f"[MQTT] Publishing detections   -> {TOPIC_DETECT}")
@@ -651,7 +789,8 @@ def create_mqtt_client():
                     "device": str(device),
                     "camera_frame_topic": TOPIC_CAMERA_FRAME,
                     "embedding_topic": TOPIC_CLIP,
-                    "command_topic": TOPIC_COMMAND,
+                    "vit_command_topic": TOPIC_COMMAND,
+                    "robot_command_topic": TOPIC_ROBOT_COMMAND,
                     "ready_topic": TOPIC_READY,
                     "client_ready_topic": TOPIC_CLIENT_READY,
                     "embedding_shape": [1, get_target_dims()],
@@ -659,6 +798,7 @@ def create_mqtt_client():
                     "dtype": "float32",
                     "inference_every_n_frames": INFERENCE_EVERY_N_FRAMES,
                     "valid_commands": list(COMMAND_TO_EMBEDDING_BYTES.keys()) + [CAE_ON_COMMAND, CAE_OFF_COMMAND],
+                    "cache_aware_initial_state": bool(test_active),
                 },
             )
 
@@ -701,10 +841,50 @@ def create_mqtt_client():
 
 
 # =========================
+# EDGE PUBLISH HELPER
+# =========================
+def publish_embedding_to_edge(
+    raw_bytes,
+    embedding,
+    emb_bytes,
+    frame,
+    frame_id,
+    extra=None
+):
+    """
+    Publishes embedding to edge/client.
+
+    This should happen only when:
+      - cache is not ready, or
+      - cache-aware is off, or
+      - cache-aware is on and cache MISS happens.
+    """
+    image_file_size = int(frame.nbytes)
+
+    payload = {
+        "raw_bytes": len(raw_bytes),
+        "embedding_dim": int(embedding.shape[-1]),
+        "embedding_bytes": emb_bytes,
+        "dtype": "float32",
+        "frame_id": int(frame_id),
+        "image_file_size": image_file_size,
+        "timestamp": time.time(),
+        "data": base64.b64encode(raw_bytes).decode("utf-8"),
+    }
+
+    if extra:
+        payload.update(extra)
+
+    mqtt_client.publish(TOPIC_CLIP, json.dumps(payload), qos=0)
+
+
+# =========================
 # VIT WORKER
 # =========================
 def vit_worker():
-    global embeddings_sent, _last_detection_time, _hit_streak
+    global embeddings_sent
+    global _last_detection_time, _hit_streak
+    global _detection_latched, _miss_streak_after_latch
 
     last_processed_frame_id = -1
 
@@ -741,36 +921,39 @@ def vit_worker():
 
             embeddings_sent += 1
 
+            # =========================
+            # CASE 1: CACHE NOT READY
+            # Publish to edge normally.
+            # =========================
             if not cache_ready:
-                payload = {
-                    "raw_bytes": len(raw_bytes),
-                    "embedding_dim": int(embedding.shape[-1]),
-                    "embedding_bytes": emb_bytes,
-                    "dtype": "float32",
-                    "frame_id": int(frame_id),
-                    "image_file_size": image_file_size,
-                    "timestamp": time.time(),
-                    "cache_ready": False,
-                    "data": base64.b64encode(raw_bytes).decode("utf-8"),
-                }
+                publish_embedding_to_edge(
+                    raw_bytes=raw_bytes,
+                    embedding=embedding,
+                    emb_bytes=emb_bytes,
+                    frame=frame,
+                    frame_id=frame_id,
+                    extra={
+                        "cache_ready": False,
+                        "cache_active": False,
+                    }
+                )
 
-                mqtt_client.publish(TOPIC_CLIP, json.dumps(payload), qos=0)
-
+            # =========================
+            # CASE 2: CACHE READY BUT CACHE-AWARE OFF
+            # Publish to edge normally.
+            # =========================
             elif not test_active:
-                payload = {
-                    "raw_bytes": len(raw_bytes),
-                    "embedding_dim": int(embedding.shape[-1]),
-                    "embedding_bytes": emb_bytes,
-                    "dtype": "float32",
-                    "frame_id": int(frame_id),
-                    "image_file_size": image_file_size,
-                    "timestamp": time.time(),
-                    "cache_ready": True,
-                    "cache_active": False,
-                    "data": base64.b64encode(raw_bytes).decode("utf-8"),
-                }
-
-                mqtt_client.publish(TOPIC_CLIP, json.dumps(payload), qos=0)
+                publish_embedding_to_edge(
+                    raw_bytes=raw_bytes,
+                    embedding=embedding,
+                    emb_bytes=emb_bytes,
+                    frame=frame,
+                    frame_id=frame_id,
+                    extra={
+                        "cache_ready": True,
+                        "cache_active": False,
+                    }
+                )
 
                 if frame_id % LOG_EVERY_N_FRAMES == 0:
                     print(
@@ -778,101 +961,162 @@ def vit_worker():
                         f"cache-aware offloading inactive, publishing embedding normally."
                     )
 
+            # =========================
+            # CASE 3: CACHE READY AND CACHE-AWARE ON
+            # Compare live embedding with local cache first.
+            # =========================
             else:
                 best_match, similarity = check_detection(embedding[0])
 
                 if best_match is None:
-                    payload = {
-                        "raw_bytes": len(raw_bytes),
-                        "embedding_dim": int(embedding.shape[-1]),
-                        "embedding_bytes": emb_bytes,
-                        "dtype": "float32",
-                        "frame_id": int(frame_id),
-                        "image_file_size": image_file_size,
-                        "timestamp": time.time(),
-                        "cache_hit": False,
-                        "similarity": None,
-                        "threshold": None,
-                        "data": base64.b64encode(raw_bytes).decode("utf-8"),
-                    }
+                    _hit_streak = 0
 
-                    mqtt_client.publish(TOPIC_CLIP, json.dumps(payload), qos=0)
+                    if _detection_latched:
+                        _miss_streak_after_latch += 1
+                        if _miss_streak_after_latch >= UNLATCH_MISSES_REQUIRED:
+                            _detection_latched = False
+                            _miss_streak_after_latch = 0
+                            print("[CACHE] Detection latch cleared because cache miss repeated.")
+
+                    if embeddings_sent % CACHE_CONFIDENCE_LOG_EVERY_N_CHECKS == 0:
+                        print_cache_confidence(
+                            frame_id=frame_id,
+                            best_match=None,
+                            similarity=None,
+                            threshold=None,
+                            hit_streak=_hit_streak,
+                            result="NO_MATCH_EDGE",
+                            latched=_detection_latched,
+                            miss_streak_after_latch=_miss_streak_after_latch
+                        )
+
+                    # No local cache match, so edge/client should check.
+                    publish_embedding_to_edge(
+                        raw_bytes=raw_bytes,
+                        embedding=embedding,
+                        emb_bytes=emb_bytes,
+                        frame=frame,
+                        frame_id=frame_id,
+                        extra={
+                            "cache_ready": True,
+                            "cache_active": True,
+                            "cache_hit": False,
+                            "similarity": None,
+                            "threshold": None,
+                        }
+                    )
 
                 else:
                     threshold = best_match["threshold"]
+                    cache_hit_now = similarity >= threshold
 
-                    if similarity >= threshold:
+                    if cache_hit_now:
                         _hit_streak += 1
+                        _miss_streak_after_latch = 0
                     else:
                         _hit_streak = 0
+
+                        if _detection_latched:
+                            _miss_streak_after_latch += 1
+                            if _miss_streak_after_latch >= UNLATCH_MISSES_REQUIRED:
+                                _detection_latched = False
+                                _miss_streak_after_latch = 0
+                                print("[CACHE] Detection latch cleared because bottle is no longer matching.")
 
                     now = time.time()
                     cooldown_active = (now - _last_detection_time) < DETECTION_COOLDOWN_S
 
-                    if (
-                        similarity >= threshold
-                        and _hit_streak >= CONSECUTIVE_HITS_REQUIRED
-                        and not cooldown_active
-                    ):
-                        _last_detection_time = now
-                        _hit_streak = 0
+                    result_text = "HIT_NO_EDGE" if cache_hit_now else "MISS_EDGE"
+                    if _detection_latched and cache_hit_now:
+                        result_text = "HIT_LATCHED_NO_EDGE"
 
-                        detect_payload = {
-                            "detected": True,
-                            "label": best_match["label"],
-                            "similarity": round(similarity, 4),
-                            "threshold": threshold,
-                            "hit_streak_required": CONSECUTIVE_HITS_REQUIRED,
-                            "commands_sent": [
-                                STOP_COMMAND,
-                                AUTO_OFF_COMMAND,
-                                STOP_COMMAND,
-                            ],
-                            "dims": int(embedding.shape[-1]),
-                            "frame_id": int(frame_id),
-                            "timestamp": now,
-                            "mode": "cached_embedding",
-                            "source": "VIT.py",
-                        }
-
-                        mqtt_client.publish(
-                            TOPIC_DETECT,
-                            json.dumps(detect_payload),
-                            qos=0,
-                            retain=False
+                    if embeddings_sent % CACHE_CONFIDENCE_LOG_EVERY_N_CHECKS == 0:
+                        print_cache_confidence(
+                            frame_id=frame_id,
+                            best_match=best_match,
+                            similarity=similarity,
+                            threshold=threshold,
+                            hit_streak=_hit_streak,
+                            result=result_text,
+                            latched=_detection_latched,
+                            miss_streak_after_latch=_miss_streak_after_latch
                         )
 
-                        print(
-                            f"[DETECT] {best_match['label'].upper()} DETECTED - STOPPING | "
-                            f"similarity={similarity:.4f} | threshold={threshold} | "
-                            f"hits={CONSECUTIVE_HITS_REQUIRED} | dims={target_dims} | frame_id={frame_id}"
-                        )
+                    # If local cache HIT, do NOT send embedding to edge.
+                    # This is the cache-aware offloading behavior.
+                    if cache_hit_now:
+                        if (
+                            _hit_streak >= CONSECUTIVE_HITS_REQUIRED
+                            and not cooldown_active
+                            and not _detection_latched
+                        ):
+                            _last_detection_time = now
+                            _hit_streak = 0
+                            _detection_latched = True
+                            _miss_streak_after_latch = 0
 
-                        stop_thread = threading.Thread(
-                            target=publish_stop_and_auto_off,
-                            args=(round(similarity, 4), threshold, frame_id),
-                            daemon=True
-                        )
-                        stop_thread.start()
+                            detect_payload = {
+                                "detected": True,
+                                "label": best_match["label"],
+                                "similarity": round(similarity, 4),
+                                "threshold": threshold,
+                                "hit_streak_required": CONSECUTIVE_HITS_REQUIRED,
+                                "commands_sent": [
+                                    STOP_COMMAND,
+                                    AUTO_OFF_COMMAND,
+                                ],
+                                "dims": int(embedding.shape[-1]),
+                                "frame_id": int(frame_id),
+                                "timestamp": now,
+                                "mode": "cached_embedding",
+                                "source": "VIT.py",
+                                "cache_active": True,
+                                "cache_stays_on_until": "Cae_OFF",
+                            }
 
+                            mqtt_client.publish(
+                                TOPIC_DETECT,
+                                json.dumps(detect_payload),
+                                qos=0,
+                                retain=False
+                            )
+
+                            print(
+                                f"[DETECT] {best_match['label'].upper()} DETECTED - STOPPING | "
+                                f"similarity={similarity:.4f} | threshold={threshold} | "
+                                f"hits={CONSECUTIVE_HITS_REQUIRED} | dims={target_dims} | frame_id={frame_id}"
+                            )
+                            print("[DETECT] Cache-aware remains ON until client sends Cae_OFF.")
+
+                            stop_thread = threading.Thread(
+                                target=publish_stop_and_auto_off,
+                                args=(round(similarity, 4), threshold, frame_id),
+                                daemon=True
+                            )
+                            stop_thread.start()
+
+                        # No edge publish on cache hit.
+                        # Even if hit streak is only 1/3 or 2/3, this is still a cache hit.
+                        pass
+
+                    # If local cache MISS, edge/client should check.
                     else:
-                        payload = {
-                            "raw_bytes": len(raw_bytes),
-                            "embedding_dim": int(embedding.shape[-1]),
-                            "embedding_bytes": emb_bytes,
-                            "dtype": "float32",
-                            "frame_id": int(frame_id),
-                            "image_file_size": image_file_size,
-                            "timestamp": time.time(),
-                            "cache_hit": False,
-                            "best_label": best_match["label"],
-                            "similarity": round(similarity, 4),
-                            "threshold": threshold,
-                            "hit_streak": _hit_streak,
-                            "data": base64.b64encode(raw_bytes).decode("utf-8"),
-                        }
-
-                        mqtt_client.publish(TOPIC_CLIP, json.dumps(payload), qos=0)
+                        publish_embedding_to_edge(
+                            raw_bytes=raw_bytes,
+                            embedding=embedding,
+                            emb_bytes=emb_bytes,
+                            frame=frame,
+                            frame_id=frame_id,
+                            extra={
+                                "cache_ready": True,
+                                "cache_active": True,
+                                "cache_hit": False,
+                                "best_label": best_match["label"],
+                                "similarity": round(similarity, 4),
+                                "threshold": threshold,
+                                "hit_streak": _hit_streak,
+                            }
+                        )
 
                         if frame_id % LOG_EVERY_N_FRAMES == 0:
                             cooldown_msg = " | cooldown active" if cooldown_active else ""
@@ -896,7 +1140,8 @@ def vit_worker():
                     f"| dims={target_dims} "
                     f"| embedding size={len(raw_bytes)} B "
                     f"| frame_id={frame_id} "
-                    f"| cache_active={test_active}"
+                    f"| cache_active={test_active} "
+                    f"| latched={_detection_latched}"
                 )
 
             publish_status(
@@ -913,6 +1158,8 @@ def vit_worker():
                     "image_file_size": image_file_size,
                     "cache_ready": cache_ready,
                     "cache_active": test_active,
+                    "detection_latched": _detection_latched,
+                    "miss_streak_after_latch": _miss_streak_after_latch,
                 },
             )
 
@@ -944,11 +1191,14 @@ def main():
     print(f"[INFO] Cache file         : {CACHE_FILE_PATH}")
     print(f"[INFO] Camera topic       : {TOPIC_CAMERA_FRAME}")
     print(f"[INFO] Embedding topic    : {TOPIC_CLIP}")
-    print(f"[INFO] Command topic      : {TOPIC_COMMAND}")
+    print(f"[INFO] VIT command topic  : {TOPIC_COMMAND}")
+    print(f"[INFO] Robot command topic: {TOPIC_ROBOT_COMMAND}")
     print(f"[INFO] Ready JSON topic   : {TOPIC_READY}")
     print(f"[INFO] Ready text topic   : {TOPIC_CLIENT_READY}")
     print(f"[INFO] Detection label    : {DETECTION_LABEL}")
-    print(f"[INFO] Wait for Cae_ON    : True")
+    print(f"[INFO] Cache-aware starts : OFF")
+    print(f"[INFO] Turn ON with       : Cae_ON")
+    print(f"[INFO] Turn OFF with      : Cae_OFF")
     print("========================================")
 
     load_model()
@@ -967,7 +1217,7 @@ def main():
 
     try:
         load_cached_embeddings()
-        publish_cache_ready(True, "cache_loaded", wait=True, log=True)
+        publish_cache_ready(True, "cache_loaded_cache_aware_off", wait=True, log=True)
 
         ready_thread = threading.Thread(target=ready_heartbeat_loop, daemon=True)
         ready_thread.start()
@@ -985,10 +1235,13 @@ def main():
     worker_thread.start()
 
     print("\n[VIT] VIT.py is running.")
-    print("[VIT] Waiting for camera frames from webrtc.py...")
-    print(f"[VIT] Client will receive '{CAE_READY_COMMAND}' on {TOPIC_CLIENT_READY} when ready.")
+    print("[VIT] Waiting for camera frames from webrtc_server.py...")
+    print(f"[VIT] Client will receive '{CAE_READY_COMMAND}' on {TOPIC_CLIENT_READY} when cache is ready.")
+    print("[VIT] Cache-aware is OFF at startup.")
     print("[VIT] Send 'Cae_ON' to activate cache-aware offloading.")
     print("[VIT] Send 'Cae_OFF' to deactivate cache-aware offloading.")
+    print("[VIT] Cache-aware will NOT turn off automatically after detection.")
+    print("[VIT] Cache confidence prints only after cache-aware is ON.")
     print("[VIT] Press Ctrl+C to stop.\n")
 
     try:
