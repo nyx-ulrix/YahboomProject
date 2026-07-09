@@ -1,19 +1,23 @@
 # webrtc_server.py
+# This script:
+# 1. Opens the camera
+# 2. Streams video using WebRTC
+# 3. Publishes camera frames to MQTT for VIT.py
+
 import asyncio
 import base64
 import json
-import cv2
-import av
 import socket
 import threading
 import time
+
+import av
+import cv2
+import numpy as np
+import paho.mqtt.client as mqtt
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
-import open_clip
-import torch
-import numpy as np
-from PIL import Image
-import paho.mqtt.client as mqtt
+
 
 # =========================
 # SETTINGS
@@ -27,69 +31,27 @@ PORT = 8080
 BROKER_IP = "localhost"
 BROKER_PORT = 1883
 
-TOPIC_CLIP    = "yahboom/vit/embedding"
-TOPIC_STATUS  = "yahboom/vit/status"
-TOPIC_COMMAND = "yahboom/vit/command"  # subscribe to this
+TOPIC_CAMERA_FRAME = "yahboom/camera/frame"
 
-INFERENCE_EVERY_N_FRAMES = 5
-SHOW_PREVIEW = False
+JPEG_QUALITY = 70
+PUBLISH_FRAME_EVERY_N_FRAMES = 1
 
-# =========================
-# EMBEDDING SETTINGS
-# Options: 512 (128-dim), 1024 (256-dim), 2048 (512-dim full)
-# Can be changed at runtime via MQTT command: embds1 / embds2 / embds3
-# =========================
-EMBEDDING_BYTES_TO_DIMS = {
-    512:  128,
-    1024: 256,
-    2048: 512,
-}
-
-COMMAND_TO_EMBEDDING_BYTES = {
-    "embds1": 512,
-    "embds2": 1024,
-    "embds3": 2048,
-}
-
-# Runtime-mutable Ã¢â‚¬â€ protected by embedding_lock
-_current_embedding_bytes = 2048
-_current_target_dims     = 512
-embedding_lock = threading.Lock()
-
-def get_target_dims():
-    with embedding_lock:
-        return _current_target_dims
-
-def get_embedding_bytes():
-    with embedding_lock:
-        return _current_embedding_bytes
-
-def set_embedding_size(new_bytes):
-    """Switch embedding size at runtime. Thread-safe."""
-    global _current_embedding_bytes, _current_target_dims
-    if new_bytes not in EMBEDDING_BYTES_TO_DIMS:
-        print(f"[CMD] Invalid embedding bytes: {new_bytes}. Ignoring.")
-        return
-    with embedding_lock:
-        _current_embedding_bytes = new_bytes
-        _current_target_dims     = EMBEDDING_BYTES_TO_DIMS[new_bytes]
-    print(f"[CMD] Embedding switched -> {new_bytes} bytes | {EMBEDDING_BYTES_TO_DIMS[new_bytes]} dims")
 
 # =========================
 # GLOBALS
 # =========================
-pcs         = set()
-camera      = None
+pcs = set()
+camera = None
 latest_frame = None
-frame_lock  = threading.Lock()
-stop_event  = threading.Event()
-model       = None
-preprocess  = None
-device      = None
+frame_lock = threading.Lock()
+stop_event = threading.Event()
+
 mqtt_client = None
+mqtt_connected = False
+
 
 # =========================
-# CAMERA SETUP
+# HELPER: GET LOCAL IP
 # =========================
 def get_local_ip():
     try:
@@ -101,208 +63,149 @@ def get_local_ip():
     except Exception:
         return "127.0.0.1"
 
+
+# =========================
+# CAMERA SETUP
+# =========================
 def init_camera():
     global camera
+
     if camera is not None and camera.isOpened():
         return camera
+
     print(f"[INFO] Opening camera index {CAMERA_INDEX}...")
+
     camera = cv2.VideoCapture(CAMERA_INDEX)
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
     camera.set(cv2.CAP_PROP_FPS, FPS)
+
     if not camera.isOpened():
         raise RuntimeError(
             f"Could not open camera index {CAMERA_INDEX}. "
             f"Try changing CAMERA_INDEX to 1, 2, or 3."
         )
+
     print("[INFO] Camera opened successfully.")
     return camera
 
-# =========================
-# MODEL
-# =========================
-def load_model():
-    global model, preprocess, device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, _, preprocess = open_clip.create_model_and_transforms(
-        "MobileCLIP-S1", pretrained="datacompdr", device=device
-    )
-    model.eval()
-    print(f"[INFO] Loaded MobileCLIP-S1 on {device}")
 
 # =========================
-# MQTT
+# MQTT SETUP
 # =========================
-def publish_status(client, status, extra=None):
-    payload = {"status": status, "timestamp": time.time()}
-    if extra:
-        payload.update(extra)
-    try:
-        client.publish(TOPIC_STATUS, json.dumps(payload), qos=0)
-    except Exception as e:
-        print("WARNING: Failed to publish status:", e)
-
 def create_mqtt_client():
     try:
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
     except AttributeError:
         client = mqtt.Client()
 
-    def _on_connect(c, _ud, _flags, rc):
-        if rc == 0:
-            print(f"[MQTT] Connected to {BROKER_IP}:{BROKER_PORT}")
-            c.subscribe(TOPIC_COMMAND, qos=0)
-            print(f"[MQTT] Subscribed to command topic: {TOPIC_COMMAND}")
-            print(f"[MQTT] Publishing embeddings -> {TOPIC_CLIP}")
-            print(f"[MQTT] Publishing status    -> {TOPIC_STATUS}")
-        else:
-            print(f"[MQTT] Connect failed (rc={rc})")
+    def _on_connect(c, _userdata, _flags, rc):
+        global mqtt_connected
 
-    def _on_message(c, _ud, msg):
-        """Handle incoming MQTT commands."""
-        try:
-            command = msg.payload.decode("utf-8").strip().lower()
-            print(f"[CMD] Received command: '{command}' on {msg.topic}")
-            if command in COMMAND_TO_EMBEDDING_BYTES:
-                new_bytes = COMMAND_TO_EMBEDDING_BYTES[command]
-                set_embedding_size(new_bytes)
-                publish_status(
-                    c,
-                    "embedding_size_changed",
-                    {
-                        "command":      command,
-                        "embedding_bytes": new_bytes,
-                        "target_dims":  EMBEDDING_BYTES_TO_DIMS[new_bytes],
-                    }
-                )
-            else:
-                print(f"[CMD] Unknown command: '{command}'. Valid: embds1, embds2, embds3")
-        except Exception as e:
-            print(f"[CMD] Error handling command: {e}")
+        if rc == 0:
+            mqtt_connected = True
+            print(f"[MQTT] Connected to {BROKER_IP}:{BROKER_PORT}")
+            print(f"[MQTT] Publishing camera frames -> {TOPIC_CAMERA_FRAME}")
+        else:
+            mqtt_connected = False
+            print(f"[MQTT] Connect failed with rc={rc}")
+
+    def _on_disconnect(c, _userdata, rc):
+        global mqtt_connected
+        mqtt_connected = False
+        print(f"[MQTT] Disconnected rc={rc}")
 
     client.on_connect = _on_connect
-    client.on_message = _on_message
+    client.on_disconnect = _on_disconnect
+
     return client
 
-# =========================
-# EMBEDDING Ã¢â‚¬â€ normalize Ã¢â€ â€™ slice Ã¢â€ â€™ re-normalize
-# =========================
-def get_embedding(frame):
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(rgb)
-    img_tensor = preprocess(pil_img).unsqueeze(0).to(device)
-    with torch.no_grad():
-        emb = model.encode_image(img_tensor.float())
-    emb = emb / emb.norm(dim=-1, keepdim=True)   # normalize full 512
-    target_dims = get_target_dims()                # runtime dims
-    emb = emb[:, :target_dims]                     # slice
-    emb = emb / emb.norm(dim=-1, keepdim=True)    # re-normalize after slice
-    return emb.cpu().numpy().astype(np.float32)    # [1, target_dims]
+
+def publish_camera_frame(frame, frame_id):
+    """
+    Sends camera frame to VIT.py using MQTT.
+    Frame is compressed as JPEG first.
+    """
+
+    if mqtt_client is None or not mqtt_connected:
+        return
+
+    try:
+        encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
+        ok, jpg = cv2.imencode(".jpg", frame, encode_params)
+
+        if not ok:
+            print("[MQTT] Failed to encode camera frame.")
+            return
+
+        payload = {
+            "frame_id": frame_id,
+            "timestamp": time.time(),
+            "width": int(frame.shape[1]),
+            "height": int(frame.shape[0]),
+            "format": "jpg",
+            "jpg_b64": base64.b64encode(jpg.tobytes()).decode("utf-8"),
+        }
+
+        mqtt_client.publish(TOPIC_CAMERA_FRAME, json.dumps(payload), qos=0)
+
+    except Exception as e:
+        print(f"[MQTT] Failed to publish camera frame: {e}")
+
 
 # =========================
-# WORKERS
+# CAMERA WORKER
 # =========================
 def camera_worker():
     global latest_frame
+
     cap = init_camera()
+    frame_id = 0
+
     while not stop_event.is_set():
         ret, frame = cap.read()
+
         if not ret:
             time.sleep(0.05)
             continue
+
+        frame = cv2.resize(frame, (WIDTH, HEIGHT))
+
         with frame_lock:
             latest_frame = frame.copy()
 
-def vit_worker():
-    global mqtt_client
-    frame_count     = 0
-    embedding_count = 0
+        frame_id += 1
 
-    while not stop_event.is_set():
-        with frame_lock:
-            frame = None if latest_frame is None else latest_frame.copy()
-
-        if frame is None:
-            time.sleep(0.01)
-            continue
-
-        frame_count += 1
-
-        if frame_count % INFERENCE_EVERY_N_FRAMES == 0:
-            try:
-                embedding       = get_embedding(frame)
-                raw_bytes       = embedding.tobytes()
-                image_file_size = int(frame.nbytes)
-                emb_bytes       = get_embedding_bytes()
-                target_dims     = get_target_dims()
-
-                payload = json.dumps({
-                    "raw_bytes":       len(raw_bytes),
-                    "embedding_dim":   int(embedding.shape[-1]),
-                    "embedding_bytes": emb_bytes,
-                    "dtype":           "float32",
-                    "frame":           frame_count,
-                    "image_file_size": image_file_size,
-                    "data":            base64.b64encode(raw_bytes).decode("utf-8"),
-                })
-
-                mqtt_client.publish(TOPIC_CLIP, payload, qos=0)
-                embedding_count += 1
-
-                if embedding_count % 10 == 0:
-                    print(
-                        f"[VIT] Published {embedding_count} embeddings "
-                        f"| dims={target_dims} "
-                        f"| embedding size={len(raw_bytes)} B "
-                        f"| frame={frame_count}"
-                    )
-
-                publish_status(
-                    mqtt_client,
-                    "running",
-                    {
-                        "frames_seen":         frame_count,
-                        "embeddings_sent":      embedding_count,
-                        "embedding_shape":      list(embedding.shape),
-                        "embedding_bytes":      emb_bytes,
-                        "embedding_size_bytes": len(raw_bytes),
-                        "dtype":                str(embedding.dtype),
-                        "topic":                TOPIC_CLIP,
-                        "image_file_size":      image_file_size,
-                        "data":            base64.b64encode(raw_bytes).decode("utf-8"),
-                    },
-                )
-
-            except Exception as e:
-                print("ERROR during embedding publish:", e)
-                publish_status(
-                    mqtt_client,
-                    "embedding_error",
-                    {"error": str(e), "frame_count": frame_count},
-                )
+        if frame_id % PUBLISH_FRAME_EVERY_N_FRAMES == 0:
+            publish_camera_frame(frame, frame_id)
 
         time.sleep(0.001)
+
 
 # =========================
 # WEBRTC VIDEO TRACK
 # =========================
 class CameraVideoTrack(VideoStreamTrack):
-    """Sends camera frames to the browser using WebRTC."""
-
     def __init__(self):
         super().__init__()
 
     async def recv(self):
         pts, time_base = await self.next_timestamp()
+
         with frame_lock:
             frame = None if latest_frame is None else latest_frame.copy()
+
         if frame is None:
             frame = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
+
         frame = cv2.resize(frame, (WIDTH, HEIGHT))
+
         video_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
         video_frame.pts = pts
         video_frame.time_base = time_base
+
         return video_frame
+
 
 # =========================
 # WEB PAGE
@@ -313,99 +216,179 @@ async def index(request):
 <head>
   <title>Yahboom WebRTC Video</title>
   <style>
-    body { font-family: Arial, sans-serif; background: #111; color: white; text-align: center; margin: 0; padding: 20px; }
-    video { width: 90%; max-width: 900px; background: black; border: 3px solid white; border-radius: 12px; }
-    button { margin-top: 18px; padding: 12px 24px; font-size: 18px; border-radius: 8px; border: none; cursor: pointer; }
-    #status { margin-bottom: 20px; font-size: 18px; color: #ccc; }
+    body {
+      font-family: Arial, sans-serif;
+      background: #111;
+      color: white;
+      text-align: center;
+      margin: 0;
+      padding: 20px;
+    }
+    video {
+      width: 90%;
+      max-width: 900px;
+      background: black;
+      border: 3px solid white;
+      border-radius: 12px;
+    }
+    button {
+      margin-top: 18px;
+      padding: 12px 24px;
+      font-size: 18px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+    }
+    #status {
+      margin-bottom: 20px;
+      font-size: 18px;
+      color: #ccc;
+    }
   </style>
 </head>
+
 <body>
   <h1>Yahboom WebRTC Live Video</h1>
   <div id="status">Starting video...</div>
   <video id="video" autoplay playsinline muted></video><br>
   <button onclick="restartVideo()">Restart Video</button>
+
 <script>
 let pc = null;
+
 async function startVideo() {
   try {
     document.getElementById("status").innerText = "Creating WebRTC connection...";
+
     pc = new RTCPeerConnection();
+
     pc.ontrack = function(event) {
       const video = document.getElementById("video");
       video.srcObject = event.streams[0];
       document.getElementById("status").innerText = "Video connected";
     };
+
     pc.onconnectionstatechange = function() {
-      document.getElementById("status").innerText = "Connection state: " + pc.connectionState;
+      document.getElementById("status").innerText =
+        "Connection state: " + pc.connectionState;
     };
+
     pc.addTransceiver("video", { direction: "recvonly" });
+
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+
     const response = await fetch("/offer", {
       method: "POST",
-      body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
-      headers: { "Content-Type": "application/json" }
+      body: JSON.stringify({
+        sdp: pc.localDescription.sdp,
+        type: pc.localDescription.type
+      }),
+      headers: {
+        "Content-Type": "application/json"
+      }
     });
-    if (!response.ok) throw new Error(await response.text());
+
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+
     const answer = await response.json();
     await pc.setRemoteDescription(answer);
+
   } catch (error) {
-    document.getElementById("status").innerText = "Failed to start video: " + error.message;
+    document.getElementById("status").innerText =
+      "Failed to start video: " + error.message;
   }
 }
+
 async function restartVideo() {
-  if (pc) pc.close();
+  if (pc) {
+    pc.close();
+  }
+
   pc = null;
   document.getElementById("video").srcObject = null;
   document.getElementById("status").innerText = "Restarting video...";
+
   await startVideo();
 }
+
 window.onload = startVideo;
 </script>
 </body>
 </html>"""
+
     return web.Response(content_type="text/html", text=html)
 
+
 # =========================
-# ROUTES
+# WEBRTC OFFER ROUTE
 # =========================
 async def offer(request):
     try:
         params = await request.json()
-        offer_desc = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+
+        offer_desc = RTCSessionDescription(
+            sdp=params["sdp"],
+            type=params["type"]
+        )
+
         pc = RTCPeerConnection()
         pcs.add(pc)
 
         @pc.on("connectionstatechange")
         async def on_connectionstatechange():
+            print(f"[WEBRTC] Connection state: {pc.connectionState}")
+
             if pc.connectionState in ("failed", "closed", "disconnected"):
                 await pc.close()
                 pcs.discard(pc)
 
         pc.addTrack(CameraVideoTrack())
+
         await pc.setRemoteDescription(offer_desc)
+
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
 
         return web.Response(
             content_type="application/json",
-            text=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}),
+            text=json.dumps({
+                "sdp": pc.localDescription.sdp,
+                "type": pc.localDescription.type
+            }),
         )
+
     except Exception as e:
         return web.Response(status=500, text=str(e))
 
+
+# =========================
+# SHUTDOWN
+# =========================
 async def on_shutdown(app):
     stop_event.set()
+
     coros = [pc.close() for pc in pcs]
     await asyncio.gather(*coros, return_exceptions=True)
     pcs.clear()
+
     global camera, mqtt_client
+
     if camera is not None:
         camera.release()
         camera = None
+        print("[INFO] Camera released.")
+
     if mqtt_client is not None:
-        mqtt_client.loop_stop()
-        mqtt_client.disconnect()
+        try:
+            mqtt_client.loop_stop()
+            mqtt_client.disconnect()
+            print("[MQTT] Disconnected.")
+        except Exception:
+            pass
+
 
 # =========================
 # MAIN
@@ -413,48 +396,32 @@ async def on_shutdown(app):
 def main():
     global mqtt_client
 
-    load_model()
-
     mqtt_client = create_mqtt_client()
+
     try:
         mqtt_client.connect(BROKER_IP, BROKER_PORT, 60)
         mqtt_client.loop_start()
     except Exception as exc:
-        print(f"[MQTT] ERROR: could not reach broker at {BROKER_IP}:{BROKER_PORT}: {exc}")
-        raise
-
-    publish_status(
-        mqtt_client,
-        "vit_encoder_started",
-        {
-            "model":                    "MobileCLIP-S1",
-            "device":                   str(device),
-            "embedding_topic":          TOPIC_CLIP,
-            "command_topic":            TOPIC_COMMAND,
-            "embedding_shape":          [1, get_target_dims()],
-            "embedding_bytes":          get_embedding_bytes(),
-            "dtype":                    "float32",
-            "inference_every_n_frames": INFERENCE_EVERY_N_FRAMES,
-            "valid_commands":           list(COMMAND_TO_EMBEDDING_BYTES.keys()),
-        },
-    )
+        print(f"[MQTT] WARNING: Could not connect to broker: {exc}")
+        print("[MQTT] WebRTC still runs, but VIT.py will not receive frames.")
 
     threading.Thread(target=camera_worker, daemon=True).start()
-    threading.Thread(target=vit_worker,    daemon=True).start()
 
     app = web.Application()
-    app.router.add_get("/",       index)
+    app.router.add_get("/", index)
     app.router.add_post("/offer", offer)
     app.on_shutdown.append(on_shutdown)
 
-    ip_address    = get_local_ip()
+    ip_address = get_local_ip()
     dashboard_url = f"http://{ip_address}:{PORT}"
+
     print(f"\n[DASHBOARD] {dashboard_url}\n")
+    print("[INFO] Run VIT separately using:")
+    print("       python3 VIT.py\n")
 
     web.run_app(app, host="0.0.0.0", port=PORT)
 
+
 if __name__ == "__main__":
     main()
-
-
 
