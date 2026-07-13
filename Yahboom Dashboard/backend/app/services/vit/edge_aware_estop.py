@@ -62,8 +62,12 @@ class EdgeAwareEstopService:
                 "cooldown_sec": _COOLDOWN_SEC,
             }
 
-    def on_vit_results(self, results: list[tuple[str, float]]) -> None:
-        """Stop-label stop is handled on the dashboard client via stop command."""
+    def on_vit_results(
+        self,
+        results: list[tuple[str, float]],
+        reference_match=None,
+    ) -> None:
+        """Stop is handled on the dashboard client via reference match polling."""
         return
 
 

@@ -95,6 +95,23 @@ VIT_COMMAND_TOPIC = os.getenv("MQTT_VIT_COMMAND_TOPIC",  "yahboom/vit/command")
 VIT_CONFIDENCE_THRESHOLD = float(os.getenv("VIT_CONFIDENCE_THRESHOLD", "60.0"))
 # Optional: set VIT_EMBED_DIM in .env to force 128/256/512-dim decode (default: auto per payload).
 
+# Edge image-to-image reference matching (vit_service.py — copy Pi cache_embeddings.json)
+_VIT_SERVICES_DIR = Path(__file__).resolve().parent / "app" / "services" / "vit"
+VIT_REFERENCE_EMBEDDINGS_FILE = os.getenv(
+    "VIT_REFERENCE_EMBEDDINGS_FILE",
+    str(_VIT_SERVICES_DIR / "reference_embeddings.json"),
+)
+VIT_REFERENCE_LABEL = os.getenv("VIT_REFERENCE_LABEL", "bottle")
+VIT_REFERENCE_MATCH_ENABLED = os.getenv(
+    "VIT_REFERENCE_MATCH_ENABLED", "true"
+).lower() in ("true", "1", "yes", "on")
+VIT_REFERENCE_DEFAULT_THRESHOLD = float(
+    os.getenv("VIT_REFERENCE_DEFAULT_THRESHOLD", "0.70")
+)
+EDGE_AWARE_REFERENCE_THRESHOLD = float(
+    os.getenv("EDGE_AWARE_REFERENCE_THRESHOLD", "0.75")
+)
+
 # SLAM settings
 # yahboom/scan  – raw LaserScan JSON (angle_min, angle_increment, ranges[])
 # yahboom/grid  – existing occupancy-grid JSON (fallback, same as GRID_TOPIC)

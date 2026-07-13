@@ -1097,10 +1097,26 @@ type VitStatusResponse = {
   embedding_command_active?: boolean;
   session_count: number;
   activity?: VitActivity;
+  reference_ready?: boolean;
+  reference_count?: number;
+  reference_file?: string;
+  reference_error?: string | null;
+  reference_match_enabled?: boolean;
+  reference_stop_threshold?: number;
   latest: {
     top_label: string;
     top_confidence: number;
     alert: boolean;
+    match_mode?: string;
+    reference_match?: {
+      label: string;
+      sample_id?: number | null;
+      similarity: number;
+      similarity_percent: number;
+      threshold: number;
+      hit: boolean;
+    };
+    text_results?: VitDetection[];
     results: VitDetection[];
     embedding_size: number | null;
     embedding_dim: number | null;
@@ -1339,7 +1355,13 @@ function VitDecoderWidget() {
   const latest = status?.latest ?? null;
   // Show detections while SSH or MQTT confirms the encoder pipeline is active.
   const displayLatest = encoderLive ? latest : null;
-  const threshold = status?.confidence_threshold ?? 60;
+  const isReferenceMatch = displayLatest?.match_mode === 'reference_embedding';
+  const referenceMatch = displayLatest?.reference_match;
+  const referenceStopThresholdPct =
+    (status?.reference_stop_threshold ?? 0.75) * 100;
+  const threshold = isReferenceMatch
+    ? referenceStopThresholdPct
+    : (status?.confidence_threshold ?? 60);
   const topConf = displayLatest?.top_confidence ?? null;
   const confColor =
     topConf == null ? 'var(--text-muted)'
@@ -1362,14 +1384,25 @@ function VitDecoderWidget() {
     activity: status?.activity,
   });
 
-  const detectionHint = vitDetectionHint({
-    serverRunning: serverActive,
-    encoderLive,
-    linkUp,
-    modelReady,
-    activity: status?.activity,
-    latestLabel: displayLatest?.top_label,
-  });
+  const detectionHint = (() => {
+    if (!status?.reference_ready && status?.reference_match_enabled) {
+      return 'Reference file missing — copy cache_embeddings.json from Pi';
+    }
+    if (isReferenceMatch && referenceMatch) {
+      const sample = referenceMatch.sample_id != null
+        ? ` (sample ${referenceMatch.sample_id})`
+        : '';
+      return `${referenceMatch.label} — reference match${sample}`;
+    }
+    return vitDetectionHint({
+      serverRunning: serverActive,
+      encoderLive,
+      linkUp,
+      modelReady,
+      activity: status?.activity,
+      latestLabel: displayLatest?.top_label,
+    });
+  })();
 
   const sessionCount = status?.session_count ?? 0;
   const latestEmbedBytes = status?.latest?.embedding_size ?? null;
@@ -1404,7 +1437,7 @@ function VitDecoderWidget() {
       <div className="flex-shrink-0 rounded-xl px-3 py-2"
         style={{ background: 'rgba(0,0,0,0.18)', border: '1px solid var(--stroke-subtle)' }}>
         <div className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
-          Detected Object
+          {isReferenceMatch ? 'Reference Match' : 'Detected Object'}
         </div>
         <div className="truncate" style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.25 }}>
           {detectionHint}
@@ -1415,19 +1448,27 @@ function VitDecoderWidget() {
           </span>
           <span style={{ fontSize: 12, fontWeight: 700, color: confColor }}>%</span>
           <span className="uppercase" style={{ fontSize: 8, color: 'var(--text-muted)', marginLeft: 4 }}>
-            confidence
+            {isReferenceMatch ? 'similarity' : 'confidence'}
           </span>
-          {displayLatest?.embedding_dim != null && (
-            <span className="uppercase" style={{ fontSize: 8, color: 'var(--text-muted)', marginLeft: 6 }}>
-              {`dims ${displayLatest.embedding_dim}`}
+          {isReferenceMatch && referenceMatch?.hit && (
+            <span className="pill" style={{
+              marginLeft: 'auto', padding: '1px 6px', fontSize: 8, fontWeight: 700,
+              background: 'rgba(34,197,94,0.18)', color: accents.green,
+            }}>
+              HIT
             </span>
           )}
-          {displayLatest?.alert && (
+          {!isReferenceMatch && displayLatest?.alert && (
             <span className="pill" style={{
               marginLeft: 'auto', padding: '1px 6px', fontSize: 8, fontWeight: 700,
               background: 'rgba(244,63,94,0.18)', color: accents.red,
             }}>
               LOW / UNKNOWN
+            </span>
+          )}
+          {displayLatest?.embedding_dim != null && (
+            <span className="uppercase" style={{ fontSize: 8, color: 'var(--text-muted)', marginLeft: 6 }}>
+              {`dims ${displayLatest.embedding_dim}`}
             </span>
           )}
         </div>
@@ -1460,8 +1501,10 @@ function VitDecoderWidget() {
           <div className="flex-1 flex items-center justify-center text-center px-2" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             {!encoderLive
               ? 'Start webrtc_server.py on the Pi for video and VIT embeddings'
+              : !status?.reference_ready && status?.reference_match_enabled
+                ? 'Copy cache_embeddings.json from Pi to reference_embeddings.json on the dashboard'
               : !displayLatest
-                ? 'Embeddings arriving — decoded labels will appear here'
+                ? 'Embeddings arriving — reference similarity will appear here'
                 : 'No detections in this session yet'}
           </div>
         )}
@@ -2523,7 +2566,7 @@ function StopTestBenchWidget() {
         : 'Waiting for Raspberry Pi to confirm cache-aware ready — Start is disabled.';
     }
     if (effectiveStopMode === 'edge_aware') {
-      return 'Edge Stop sends auto_off + stop on bottle detection. Requires VIT and video.';
+      return 'Edge Stop sends auto_off + stop on reference embedding match (≥ 75% similarity). Requires reference_embeddings.json, VIT, and video. Keep Cae_OFF on the Pi.';
     }
     return '';
   })();

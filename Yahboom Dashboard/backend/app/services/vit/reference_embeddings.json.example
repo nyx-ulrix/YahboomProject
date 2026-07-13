@@ -1,0 +1,17 @@
+{
+  "objects": [
+    {
+      "label": "bottle",
+      "sample_id": 1,
+      "model": "MobileCLIP-S1",
+      "pretrained": "datacompdr",
+      "embedding_dim": 512,
+      "threshold": 0.70,
+      "normalised": true,
+      "dtype": "float32",
+      "source": "live_camera_snapshot",
+      "data": "<paste base64 float32 bytes from Pi cache_embeddings.json>",
+      "created_at": 0
+    }
+  ]
+}

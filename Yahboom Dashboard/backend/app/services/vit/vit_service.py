@@ -18,6 +18,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional
 
 import paho.mqtt.client as mqtt
@@ -25,6 +26,21 @@ import paho.mqtt.client as mqtt
 # ── bootstrap path / env ──────────────────────────────────────────────────────
 _HERE = Path(__file__).resolve().parent          # backend/app/services/vit
 _BACKEND_ROOT = _HERE.parents[2]                  # backend/
+
+try:
+    from config import (
+        EDGE_AWARE_REFERENCE_THRESHOLD,
+        VIT_REFERENCE_DEFAULT_THRESHOLD,
+        VIT_REFERENCE_EMBEDDINGS_FILE,
+        VIT_REFERENCE_LABEL,
+        VIT_REFERENCE_MATCH_ENABLED,
+    )
+except Exception:  # pragma: no cover - standalone import fallback
+    VIT_REFERENCE_EMBEDDINGS_FILE = str(_HERE / "reference_embeddings.json")
+    VIT_REFERENCE_LABEL = "bottle"
+    VIT_REFERENCE_MATCH_ENABLED = True
+    VIT_REFERENCE_DEFAULT_THRESHOLD = 0.70
+    EDGE_AWARE_REFERENCE_THRESHOLD = 0.75
 
 try:
     from dotenv import load_dotenv
@@ -183,6 +199,201 @@ def _infer_target_dims(raw_bytes: bytes, meta: dict | None = None) -> int:
         f"{sorted(_ALLOWED_EMBED_BYTES)} ({size_hint}). "
         f"Check sender EMBEDDING_BYTES matches decoder."
     )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Reference embedding store (image-to-image matching on the edge)
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class ReferenceMatch:
+    label: str
+    sample_id: int | None
+    similarity: float
+    threshold: float
+    hit: bool
+
+    @property
+    def similarity_percent(self) -> float:
+        return round(self.similarity * 100, 2)
+
+    def to_dict(self) -> dict:
+        return {
+            "label": self.label,
+            "sample_id": self.sample_id,
+            "similarity": round(self.similarity, 4),
+            "similarity_percent": self.similarity_percent,
+            "threshold": self.threshold,
+            "hit": self.hit,
+        }
+
+
+class ReferenceEmbeddingStore:
+    """
+    Loads Pi-compatible reference embeddings and matches live MQTT vectors
+    via L2-normalized cosine similarity (dot product).
+    """
+
+    def __init__(
+        self,
+        file_path: str | Path,
+        *,
+        label: str = VIT_REFERENCE_LABEL,
+        enabled: bool = VIT_REFERENCE_MATCH_ENABLED,
+        default_threshold: float = VIT_REFERENCE_DEFAULT_THRESHOLD,
+        stop_threshold: float = EDGE_AWARE_REFERENCE_THRESHOLD,
+    ) -> None:
+        self.file_path = Path(file_path)
+        self.label = label
+        self.enabled = enabled
+        self.default_threshold = default_threshold
+        self.stop_threshold = stop_threshold
+        self.ready = False
+        self.error: str | None = None
+        self._objects: list[dict] = []
+        self._lock = threading.Lock()
+        if self.enabled:
+            self.reload()
+
+    def reload(self) -> bool:
+        with self._lock:
+            self._objects = []
+            self.ready = False
+            self.error = None
+
+            if not self.enabled:
+                self.error = "reference matching disabled"
+                return False
+
+            if not self.file_path.exists():
+                self.error = f"reference file not found: {self.file_path}"
+                log.info("Reference embeddings not loaded — %s", self.error)
+                return False
+
+            try:
+                data = json.loads(self.file_path.read_text(encoding="utf-8"))
+                objects = data.get("objects", []) if isinstance(data, dict) else []
+                if not objects:
+                    raise ValueError("no objects in reference file")
+
+                loaded: list[dict] = []
+                for obj in objects:
+                    if not isinstance(obj, dict):
+                        continue
+                    if obj.get("label", "unknown") != self.label:
+                        continue
+                    embedding = self._decode_cached_embedding(obj)
+                    declared_dim = int(obj.get("embedding_dim", len(embedding)))
+                    if declared_dim != len(embedding):
+                        raise ValueError(
+                            f"embedding dimension mismatch for '{self.label}': "
+                            f"json={declared_dim}, decoded={len(embedding)}"
+                        )
+                    threshold = float(obj.get("threshold", self.default_threshold))
+                    loaded.append({
+                        "label": self.label,
+                        "sample_id": obj.get("sample_id"),
+                        "embedding": embedding,
+                        "embedding_dim": len(embedding),
+                        "threshold": threshold,
+                    })
+
+                if not loaded:
+                    raise ValueError(
+                        f"no reference embeddings for label '{self.label}'"
+                    )
+
+                self._objects = loaded
+                self.ready = True
+                log.info(
+                    "Reference embeddings ready: %d sample(s) from %s",
+                    len(self._objects),
+                    self.file_path,
+                )
+                return True
+            except Exception as exc:
+                self.error = str(exc)
+                log.warning("Failed to load reference embeddings: %s", exc)
+                return False
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return len(self._objects)
+
+    @staticmethod
+    def _normalise_embedding(embedding):
+        import numpy as np
+        embedding = embedding.astype(np.float32)
+        norm = np.linalg.norm(embedding)
+        if norm <= 1e-12:
+            return embedding
+        return embedding / norm
+
+    def _decode_cached_embedding(self, obj: dict):
+        import numpy as np
+        if "data" in obj:
+            raw_bytes = base64.b64decode(obj["data"])
+            embedding = np.frombuffer(raw_bytes, dtype=np.float32).copy()
+        elif "embedding" in obj:
+            embedding = np.array(obj["embedding"], dtype=np.float32)
+        else:
+            raise ValueError("reference object has no 'data' or 'embedding' field")
+        return self._normalise_embedding(embedding)
+
+    def match(
+        self,
+        raw_bytes: bytes,
+        envelope_meta: dict | None = None,
+    ) -> ReferenceMatch | None:
+        if not self.enabled or not self.ready:
+            return None
+
+        try:
+            target_dims = _infer_target_dims(raw_bytes, envelope_meta)
+        except ValueError:
+            return None
+
+        import numpy as np
+        live = np.frombuffer(raw_bytes, dtype=np.float32).copy()
+        if len(live) != target_dims:
+            return None
+        live = self._normalise_embedding(live)
+
+        with self._lock:
+            objects = list(self._objects)
+
+        best_match = None
+        best_similarity = -1.0
+
+        for obj in objects:
+            if obj["embedding_dim"] != len(live):
+                log.debug(
+                    "Skipping reference sample %s — dim %d vs live %d",
+                    obj.get("sample_id"),
+                    obj["embedding_dim"],
+                    len(live),
+                )
+                continue
+            similarity = float(np.dot(live, obj["embedding"]))
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_match = obj
+
+        if best_match is None:
+            return None
+
+        threshold = float(best_match["threshold"])
+        effective_threshold = max(threshold, self.stop_threshold)
+        hit = best_similarity >= effective_threshold
+        sample_id = best_match.get("sample_id")
+        return ReferenceMatch(
+            label=str(best_match["label"]),
+            sample_id=int(sample_id) if sample_id is not None else None,
+            similarity=best_similarity,
+            threshold=effective_threshold,
+            hit=hit,
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -362,6 +573,7 @@ class VITService:
 
         labels = _load_labels()
         self._decoder = MobileClipDecoder(labels) if _ENABLE_MODEL else None
+        self._reference_store = ReferenceEmbeddingStore(VIT_REFERENCE_EMBEDDINGS_FILE)
 
         self._monitor_thread: threading.Thread | None = None
         self._model_thread: threading.Thread | None = None
@@ -499,8 +711,8 @@ class VITService:
 
     def _handle_embedding(self, payload: bytes) -> None:
         """
-        Decode embedding bytes locally (only when the model is loaded), record for
-        the widget/CSV, and re-publish to the result topic.
+        Match live embeddings against reference vectors (image-to-image) and/or
+        decode against text labels. Record for the widget/CSV and publish result.
 
         Accepts legacy raw float32 payloads or robotsender_mqttv2 JSON envelopes:
         {"raw_bytes", "embedding_dim", "data": "<base64>", "image_file_size", ...}
@@ -529,21 +741,45 @@ class VITService:
                 sorted(envelope_meta.keys()) if envelope_meta else [],
             )
 
-        decoder = self._decoder
-        if decoder is None or not decoder.ready:
-            # No local model: results arrive via the result topic instead.
-            return
+        reference_match: ReferenceMatch | None = None
         try:
-            results, embedding_dim = decoder.decode(
+            reference_match = self._reference_store.match(
                 raw_bytes, envelope_meta=envelope_meta,
             )
         except Exception as exc:
-            with self._lock:
-                self._decode_failures += 1
-                err = self._sanitize_decode_error(str(exc)[:120])
-                if err:
-                    self._last_decode_error = err
-            log.debug("Embedding decode failed: %s", exc)
+            log.debug("Reference match failed: %s", exc)
+
+        text_results: list[tuple[str, float]] = []
+        embedding_dim: int | None = None
+        decoder = self._decoder
+        if decoder is not None and decoder.ready:
+            try:
+                text_results, embedding_dim = decoder.decode(
+                    raw_bytes, envelope_meta=envelope_meta,
+                )
+            except Exception as exc:
+                with self._lock:
+                    self._decode_failures += 1
+                    err = self._sanitize_decode_error(str(exc)[:120])
+                    if err:
+                        self._last_decode_error = err
+                log.debug("Text embedding decode failed: %s", exc)
+
+        if embedding_dim is None:
+            try:
+                embedding_dim = _infer_target_dims(raw_bytes, envelope_meta)
+            except ValueError as exc:
+                log.debug("Embedding dim inference failed: %s", exc)
+                if reference_match is None:
+                    return
+
+        if reference_match is not None:
+            results = [(reference_match.label, reference_match.similarity_percent)]
+            match_mode = "reference_embedding"
+        elif text_results:
+            results = text_results
+            match_mode = "text_label"
+        else:
             return
 
         emb_size = envelope_meta.get("embedding_size") or len(raw_bytes)
@@ -551,19 +787,25 @@ class VITService:
         with self._lock:
             self._decodes_succeeded += 1
             self._last_decode_at = _now_iso()
-            self._last_decode_error = None
+            if reference_match is not None or text_results:
+                self._last_decode_error = None
         self._record(
             results,
             embedding_size=emb_size,
             embedding_dim=embedding_dim,
             image_file_size=img_size,
             source="embedding",
+            reference_match=reference_match,
+            match_mode=match_mode,
+            text_results=text_results,
         )
         self._publish_result(
             results,
             embedding_size=emb_size,
             embedding_dim=embedding_dim,
             image_file_size=img_size,
+            reference_match=reference_match,
+            match_mode=match_mode,
         )
 
     def _publish_result(
@@ -572,6 +814,8 @@ class VITService:
         embedding_size: Optional[int] = None,
         embedding_dim: Optional[int] = None,
         image_file_size: Optional[int] = None,
+        reference_match: ReferenceMatch | None = None,
+        match_mode: str | None = None,
     ) -> None:
         """
         Publish a decoded result to ``yahboom/vit/result`` in the same shape as
@@ -591,6 +835,10 @@ class VITService:
             "results": [{"label": l, "confidence": c} for l, c in results],
             "timestamp": time.time(),
         }
+        if match_mode:
+            msg["match_mode"] = match_mode
+        if reference_match is not None:
+            msg["reference_match"] = reference_match.to_dict()
         if embedding_size is not None:
             msg["embedding_size"] = embedding_size
         if embedding_dim is not None:
@@ -679,6 +927,9 @@ class VITService:
         embedding_dim: Optional[int] = None,
         image_file_size: Optional[int] = None,
         source: str = "embedding",
+        reference_match: ReferenceMatch | None = None,
+        match_mode: str | None = None,
+        text_results: list[tuple[str, float]] | None = None,
     ) -> None:
         if not results:
             return
@@ -694,7 +945,7 @@ class VITService:
                 dim = _EMBEDDING_BYTES_TO_DIMS[emb]
             img = image_file_size if image_file_size is not None else meta.get("image_file_size")
 
-            self._latest = {
+            latest: dict = {
                 "top_label": top_label,
                 "top_confidence": top_conf,
                 "alert": alert,
@@ -705,6 +956,16 @@ class VITService:
                 "source": source,
                 "timestamp": ts,
             }
+            if match_mode:
+                latest["match_mode"] = match_mode
+            if reference_match is not None:
+                latest["reference_match"] = reference_match.to_dict()
+            if text_results:
+                latest["text_results"] = [
+                    {"label": l, "confidence": c} for l, c in text_results
+                ]
+
+            self._latest = latest
 
             self._session.append({
                 "timestamp": ts,
@@ -713,13 +974,18 @@ class VITService:
                 "embedding_size": emb,
                 "embedding_dim": dim,
                 "image_file_size": img,
+                "match_mode": match_mode or "",
+                "reference_hit": bool(reference_match.hit) if reference_match else False,
+                "reference_similarity": (
+                    reference_match.similarity if reference_match else None
+                ),
             })
             if _SESSION_MAX > 0 and len(self._session) > _SESSION_MAX:
                 self._session = self._session[-_SESSION_MAX:]
 
         try:
             from app.services.vit.edge_aware_estop import edge_aware_estop
-            edge_aware_estop.on_vit_results(results)
+            edge_aware_estop.on_vit_results(results, reference_match=reference_match)
         except Exception as exc:
             log.debug("Edge-aware estop hook failed: %s", exc)
 
@@ -776,6 +1042,7 @@ class VITService:
                 "last_decode_error": self._sanitize_decode_error(self._last_decode_error),
             }
         server_on = stream_on or encoder_live
+        ref_store = self._reference_store
         return {
             "connected": self._broker_link_up(),
             "broker_ip": self._broker_ip,
@@ -791,6 +1058,12 @@ class VITService:
             "session_count": session_count,
             "latest": latest,
             "activity": activity,
+            "reference_ready": ref_store.ready,
+            "reference_count": ref_store.count,
+            "reference_file": str(ref_store.file_path),
+            "reference_error": ref_store.error,
+            "reference_match_enabled": ref_store.enabled,
+            "reference_stop_threshold": EDGE_AWARE_REFERENCE_THRESHOLD,
         }
 
     def _embedding_command_active(self) -> bool:

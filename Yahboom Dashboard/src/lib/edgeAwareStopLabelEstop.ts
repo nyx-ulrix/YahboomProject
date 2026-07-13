@@ -3,17 +3,26 @@ import { useMetricsStore } from '../app/store';
 import { benchModeHasDashboardBottleStop } from './testBenchSession';
 import { notifyTestBenchStopLabelStop } from './testBenchSession';
 
-/** VIT label from labels.json — edge-aware stop triggers on this class only. */
-export const EDGE_AWARE_STOP_LABEL = 'bottle';
-
-/** Minimum bottle confidence (%) before edge-aware dashboard stop fires. */
-const EDGE_AWARE_MIN_CONFIDENCE = 75;
+/** Minimum reference similarity (%) before edge-aware dashboard stop fires. */
+export const EDGE_AWARE_MIN_CONFIDENCE = 75;
 const EDGE_AWARE_COOLDOWN_MS = 5_000;
 
+export type VitReferenceMatch = {
+  label: string;
+  sample_id?: number | null;
+  similarity: number;
+  similarity_percent: number;
+  threshold: number;
+  hit: boolean;
+};
+
 export type VitStatusForStopLabel = {
+  reference_ready?: boolean;
   latest?: {
     top_label?: string;
     top_confidence?: number;
+    match_mode?: string;
+    reference_match?: VitReferenceMatch;
     results?: { label: string; confidence: number }[];
     timestamp?: string;
   } | null;
@@ -24,10 +33,6 @@ let edgeAwareEnabled = false;
 let stopLabelEstopArmed = false;
 let lastHandledKey: string | null = null;
 let lastTriggerAt = 0;
-
-export function isStopLabel(label: string): boolean {
-  return label.trim().toLowerCase() === EDGE_AWARE_STOP_LABEL.toLowerCase();
-}
 
 /** Called when the test bench stop-mode toggle changes (or loads from backend). */
 export function setEdgeAwareStopEnabled(enabled: boolean) {
@@ -50,7 +55,7 @@ export function vitDecodeEventKey(vit: VitStatusForStopLabel): string | null {
 }
 
 /**
- * Arm stop-label stop only while a test-bench session is active (after START).
+ * Arm reference-match stop only while a test-bench session is active (after START).
  * Pass ignoreCurrentDecodeKey (from vitDecodeEventKey) to skip the decode already
  * visible when START was pressed — only new decodes after START can trigger.
  */
@@ -63,34 +68,23 @@ export function setStopLabelEstopArmed(armed: boolean, ignoreCurrentDecodeKey?: 
   }
 }
 
-/** All label/confidence rows from the latest decode (ranking ignored). */
-function labelRows(latest: NonNullable<VitStatusForStopLabel['latest']>) {
-  const rows = [...(latest.results ?? [])];
-  const topLabel = latest.top_label?.trim();
-  if (topLabel && !rows.some((r) => r.label === topLabel)) {
-    rows.push({ label: topLabel, confidence: latest.top_confidence ?? 0 });
-  }
-  return rows;
+/** Reference similarity (%) on the latest decode when a match exists. */
+export function bestReferenceMatchConfidence(vit: VitStatusForStopLabel): number | null {
+  const ref = vit.latest?.reference_match;
+  if (!ref) return null;
+  return ref.similarity_percent;
 }
 
-/** Highest bottle confidence on the latest decode, if any. */
-export function bestStopLabelConfidence(vit: VitStatusForStopLabel): number | null {
-  const latest = vit.latest;
-  if (!latest) return null;
-  const bottleRows = labelRows(latest).filter((row) => isStopLabel(row.label));
-  if (!bottleRows.length) return null;
-  return Math.max(...bottleRows.map((row) => row.confidence));
-}
-
-/** True when any stop-label row meets the confidence threshold (any rank). */
-export function hasQualifyingStopLabel(vit: VitStatusForStopLabel): boolean {
-  const confidence = bestStopLabelConfidence(vit);
-  return confidence != null && confidence >= EDGE_AWARE_MIN_CONFIDENCE;
+/** True when the latest reference match is a qualifying hit. */
+export function hasQualifyingReferenceMatch(vit: VitStatusForStopLabel): boolean {
+  const ref = vit.latest?.reference_match;
+  if (!ref?.hit) return false;
+  return ref.similarity_percent >= EDGE_AWARE_MIN_CONFIDENCE;
 }
 
 /**
- * When edge-aware mode is on, session is armed, and stop label meets threshold, send
- * stop (same as manual stop). Returns true if triggered.
+ * When edge-aware mode is on, session is armed, and reference match hits threshold,
+ * send stop (same as manual stop). Returns true if triggered.
  */
 export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): boolean {
   if (!edgeAwareEnabled || !stopLabelEstopArmed || !benchModeHasDashboardBottleStop()) return false;
@@ -99,13 +93,13 @@ export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): b
   const key = vitDecodeEventKey(vit);
   if (!latest || !key || key === lastHandledKey) return false;
 
-  const confidence = bestStopLabelConfidence(vit);
-  if (confidence == null || confidence < EDGE_AWARE_MIN_CONFIDENCE) return false;
+  const ref = latest.reference_match;
+  if (!ref?.hit || ref.similarity_percent < EDGE_AWARE_MIN_CONFIDENCE) return false;
 
-  return triggerStopLabelStop(key, confidence);
+  return triggerStopLabelStop(key, ref.similarity_percent, ref.label);
 }
 
-function triggerStopLabelStop(key: string, confidence: number): boolean {
+function triggerStopLabelStop(key: string, confidence: number, label: string): boolean {
   const now = Date.now();
   if (now - lastTriggerAt < EDGE_AWARE_COOLDOWN_MS) return false;
   if (useMetricsStore.getState().estopActive) return false;
@@ -116,7 +110,7 @@ function triggerStopLabelStop(key: string, confidence: number): boolean {
   sendDashboardBottleStop();
   useMetricsStore.getState().pushEvent(
     'warning',
-    `Edge Stop — bottle ${confidence.toFixed(2)} percent (minimum ${EDGE_AWARE_MIN_CONFIDENCE} percent), mission ended`,
+    `Edge Stop — ${label} reference match ${confidence.toFixed(2)} percent (minimum ${EDGE_AWARE_MIN_CONFIDENCE} percent), mission ended`,
     'yahboom/vit/status',
   );
   return true;

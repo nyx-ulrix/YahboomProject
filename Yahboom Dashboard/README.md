@@ -77,6 +77,10 @@ A `.env` file in the project root configures both frontend and backend. Common v
 | `PI_CACHE_AWARE_LOG` | Pi log file for cache-aware script (default `/tmp/yahboom_cache_aware.log`) |
 | `CACHE_SCRIPT_EMBEDDING_READY_SNIPPET` | Log substring that unlocks START in cache/hybrid mode |
 | `MQTT_CACHE_AWARE_READY_TOPIC` | Retained MQTT topic for embedding-ready (default `yahboom/cache_aware/ready`) |
+| `VIT_REFERENCE_EMBEDDINGS_FILE` | Path to edge reference embeddings JSON (default `backend/app/services/vit/reference_embeddings.json`) |
+| `VIT_REFERENCE_LABEL` | Label filter inside the reference file (default `bottle`) |
+| `VIT_REFERENCE_MATCH_ENABLED` | Enable image-to-image matching on the dashboard (default `true`) |
+| `EDGE_AWARE_REFERENCE_THRESHOLD` | Minimum cosine similarity for a reference hit (default `0.75`) |
 
 ## Build
 
@@ -108,7 +112,7 @@ Default: **Edge** (right). Preference is saved in browser `localStorage` (`yahbo
 |------|-----------|-----------|
 | **Cache** (left) | `cache_aware_offloading` | Pi runs `cache_aware_offloading.py` in lxterminal. Bottle stop is detected on the Pi (CLIP embeddings via MQTT). Dashboard does **not** send `auto_off` on stop. |
 | **Hybrid** (center) | `hybrid` | Pi script **and** dashboard VIT bottle stop are both armed. **First trigger wins**; run records which path stopped (`Pi script · bottle` vs `Dashboard VIT · bottle`). |
-| **Edge** (right, default) | `edge_aware` | Dashboard VIT scene decoder sends `auto_off` + `stop` when the **bottle** label is detected (≥ 75% after START). Pi cache script is **stopped** when this mode is selected. |
+| **Edge** (right, default) | `edge_aware` | Dashboard compares live embeddings to **reference embeddings** (image-to-image). Sends `auto_off` + `stop` when similarity ≥ 75% after START. Pi cache script is **stopped** when this mode is selected. |
 
 Changing to Cache or Hybrid starts the Pi script once (one lxterminal per slider change). Switching between Cache and Hybrid does **not** restart the script. Switching to Edge kills the Pi script and closes its terminal.
 
@@ -136,11 +140,25 @@ VIT encoder and video must be running on the Pi (`webrtc_server.py`) so the Pi s
 4. **Stop** — Pi drive-status halt, e-stop, or bottle detection (Pi script and/or dashboard VIT per mode).
 5. Enter **stopping distance** (m) per row after each run.
 
-#### Edge-aware stop label (dashboard VIT)
+#### Edge-aware reference matching (dashboard VIT)
 
-- Trigger class: `bottle` (`EDGE_AWARE_STOP_LABEL` in `edgeAwareStopLabelEstop.ts`).
-- Polls `GET /api/vit/status` every 500 ms. On a **new** decode after START with ≥ 75% confidence, sends `auto_off` + `stop`.
+Edge stop uses **image-to-image** matching, not CLIP text labels. The dashboard loads reference embeddings from `reference_embeddings.json` (same format as Pi `cache_embeddings.json`) and compares each live MQTT embedding via cosine similarity.
+
+**Full guide:** [docs/EDGE_REFERENCE_MATCHING.md](docs/EDGE_REFERENCE_MATCHING.md)
+
+**Setup (copy from Pi):**
+
+1. On the Pi, run `capture_bottle_cache_multi.py` while `VIT.py` publishes `yahboom/vit/embedding`.
+2. Copy `/home/pi/cache_embeddings.json` to `Yahboom Dashboard/backend/app/services/vit/reference_embeddings.json`.
+3. Restart the Flask backend.
+4. Keep **`Cae_OFF`** on the Pi so cache hits do not suppress embedding publish to the edge.
+
+**Stop rule:**
+
+- Polls `GET /api/vit/status` every 500 ms.
+- On a **new** decode after START with `reference_match.hit === true` and `similarity_percent` ≥ 75%, sends `auto_off` + `stop`.
 - Armed only after START (pre-START detections are ignored).
+- Implemented in `edgeAwareStopLabelEstop.ts`; matching in `vit_service.py` (`ReferenceEmbeddingStore`).
 
 #### Timing and CSV
 
@@ -181,7 +199,7 @@ Implemented in `backend/app/routes/test_bench_routes.py`, `backend/app/services/
 | `GET` | `/api/stream_status` | Pi video state (`?force=1` for live HTTP probe) |
 | `POST` | `/api/webrtc/offer` | WebRTC SDP proxy to Pi `webrtc_server.py` |
 | `GET` | `/api/video_feed` | MJPEG relay (when `VIDEO_USE_MJPEG_RELAY=true`) |
-| `GET` | `/api/vit/status` | VIT decoder status, latest labels, encoder activity |
+| `GET` | `/api/vit/status` | VIT status: reference match, encoder activity, `reference_ready`, `reference_count` |
 | `POST` | `/api/vit/config` | Set embedding size (512 / 1024 / 2048 B) |
 | `POST` | `/api/vit/clear` | Clear VIT session history |
 | `GET` | `/api/vit/export` | Download session CSV |
