@@ -24,6 +24,9 @@ venv/
 "Yahboom Dashboard"/backend/slam_map.json
 "Yahboom Dashboard"/backend/slam_map.tmp
 
+## Captured reference embedding snapshots (synced from Pi)
+"Yahboom Dashboard"/backend/app/services/vit/reference_library/**/cache_embeddings.json
+
 ## Python cache files
 **/__pycache__/
 **/*.pyc

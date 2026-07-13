@@ -21,17 +21,19 @@ from app.services.pi_remote_launch import (
     start_lxterminal,
     write_launcher,
 )
+from app.services.pi_ssh import (
+    expand_pi_path,
+    pi_home,
+    resolved_host,
+    ssh_client,
+)
 from config import (
     CACHE_SCRIPT_EMBEDDING_READY_SNIPPET,
     CACHE_SCRIPT_START_POLL_SEC,
     CACHE_SCRIPT_START_TIMEOUT_SEC,
-    DEFAULT_BROKER_IP,
     PI_CACHE_AWARE_LOG,
     PI_CACHE_AWARE_SCRIPT_PATH,
     PI_CACHE_AWARE_TERMINAL_TITLE,
-    PI_SSH_KEY_PATH,
-    PI_SSH_PASSWORD,
-    PI_SSH_USER,
     PI_TERMINAL,
     PROBE_CACHE_TTL_SEC,
 )
@@ -87,7 +89,7 @@ def _pkill_patterns() -> str:
 
 def _close_pi_cache_session(client: paramiko.SSHClient) -> None:
     """Kill cache_aware_offloading.py and close its lxterminal on the Pi (Wayland or X11)."""
-    home = _pi_home()
+    home = pi_home()
     _, stdout, _ = client.exec_command(_pkill_patterns(), timeout=10)
     stdout.channel.recv_exit_status()
     close_lxterminal(
@@ -98,42 +100,14 @@ def _close_pi_cache_session(client: paramiko.SSHClient) -> None:
     )
 
 
-def _resolved_host() -> str:
-    return mqtt_service.broker_ip or DEFAULT_BROKER_IP
-
-
-def _pi_home() -> str:
-    return "/root" if PI_SSH_USER == "root" else f"/home/{PI_SSH_USER}"
-
-
-def _expand_pi_path(path: str, home: str) -> str:
-    if path.startswith("~/"):
-        return f"{home}/{path[2:]}"
-    if path.startswith("~"):
-        return path.replace("~", home, 1)
-    return path
-
-
 def _pi_paths() -> tuple[str, str, str, str]:
-    home = _pi_home()
-    log = _expand_pi_path(PI_CACHE_AWARE_LOG, home)
-    script = _expand_pi_path(PI_CACHE_AWARE_SCRIPT_PATH, home)
+    home = pi_home()
+    log = expand_pi_path(PI_CACHE_AWARE_LOG, home)
+    script = expand_pi_path(PI_CACHE_AWARE_SCRIPT_PATH, home)
     if not script.startswith("/"):
         script = f"{home}/{script}"
     workdir = str(PurePosixPath(script).parent) or home
     return home, workdir, script, log
-
-
-def _ssh_client(host: str) -> paramiko.SSHClient:
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    connect_kwargs: dict = {"username": PI_SSH_USER, "timeout": 10}
-    if PI_SSH_KEY_PATH:
-        connect_kwargs["key_filename"] = PI_SSH_KEY_PATH
-    else:
-        connect_kwargs["password"] = PI_SSH_PASSWORD
-    client.connect(host, **connect_kwargs)
-    return client
 
 
 def _log(message: str, level: str = "info") -> None:
@@ -276,7 +250,7 @@ def _invalidate_probe_cache() -> None:
 
 
 def probe_cache_aware_script(*, force: bool = False) -> dict:
-    host = _resolved_host()
+    host = resolved_host()
     now = time.monotonic()
     if (
         not force
@@ -287,7 +261,7 @@ def probe_cache_aware_script(*, force: bool = False) -> dict:
 
     result: dict = _probe_meta(host, running=False)
     try:
-        client = _ssh_client(host)
+        client = ssh_client(host)
         result = _probe_on_pi(client, host)
         cached_mode = (_probe_cache.get("result") or {}).get("launch_mode")
         if result.get("running") and cached_mode:
@@ -311,11 +285,11 @@ def _wait_until_running(client: paramiko.SSHClient, host: str) -> bool:
 
 def start_cache_aware_script(*, wait: bool = True) -> dict:
     """SSH into the Pi, open terminal running cache_aware_offloading.py (one terminal per call)."""
-    host = _resolved_host()
+    host = resolved_host()
     script_name = _script_name()
     _invalidate_probe_cache()
-    client = _ssh_client(host)
-    home = _pi_home()
+    client = ssh_client(host)
+    home = pi_home()
 
     existing = _probe_on_pi(client, host)
     if existing.get("running"):
@@ -375,11 +349,11 @@ def start_cache_aware_script(*, wait: bool = True) -> dict:
 
 def stop_cache_aware_script() -> dict:
     """SSH into the Pi, kill cache_aware_offloading.py and close its terminal."""
-    host = _resolved_host()
+    host = resolved_host()
     _invalidate_probe_cache()
     mqtt_service.clear_cache_aware_ready()
     mqtt_service.latest_cache_detection = None
-    client = _ssh_client(host)
+    client = ssh_client(host)
     _close_pi_cache_session(client)
     probe = _probe_on_pi(client, host)
     client.close()

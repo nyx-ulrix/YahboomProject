@@ -15,6 +15,7 @@ from app.services.vit.edge_aware_estop import (
     STOP_MODES,
     edge_aware_estop,
 )
+from app.services.vit.vit_service import vit_service
 
 test_bench_bp = Blueprint("test_bench", __name__, url_prefix="/api/test_bench")
 
@@ -59,7 +60,9 @@ def set_cache_aware():
     on = bool(data.get("on"))
 
     success, message = mqtt_service.publish_cache_aware_command(on)
-    edge_aware_estop.set_mode(STOP_MODE_CACHE if on else STOP_MODE_EDGE)
+    mode = STOP_MODE_CACHE if on else STOP_MODE_EDGE
+    edge_aware_estop.set_mode(mode)
+    vit_service.set_detection_mode(mode)
 
     payload = {
         "status": "ok" if success else "error",
@@ -81,6 +84,7 @@ def set_stop_mode():
         }), 400
 
     applied = edge_aware_estop.set_mode(mode)
+    vit_service.set_detection_mode(applied)
     return jsonify({
         "status": "ok",
         **_stop_mode_payload(),

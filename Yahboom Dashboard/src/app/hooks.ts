@@ -8,6 +8,7 @@ import {
   processVitStatusForStopLabelEstop,
   setEdgeAwareStopEnabled,
 } from '../lib/edgeAwareStopLabelEstop';
+import { useEdgeFrameEncoder } from '../lib/useEdgeFrameEncoder';
 import type { LiveGridData, MetricsState } from './types';
 
 // Polls /api/status every 3 s and writes the backend's
@@ -475,11 +476,16 @@ export function useKeyboardCamera(onChange?: (v: { pan: number; tilt: number }) 
   }, []);
 }
 
-/** Edge-aware bottle stop is always enabled; it only fires while a mission is armed. */
+/**
+ * Image-to-image bottle stop. Matching runs on the backend for both modes:
+ * Edge Only encodes browser-forwarded WebRTC frames (useEdgeFrameEncoder);
+ * Cache Aware matches Pi cache-miss MQTT embeddings. Both surface the result on
+ * /api/vit/status, which this hook polls. Stop only fires while armed.
+ */
 export function useEdgeAwareStopLabelEstop() {
+  useEdgeFrameEncoder();
+
   useEffect(() => {
-    // Edge-aware stop has no toggle — always on. Triggering is still bounded by
-    // the test-bench session arming (stopLabelEstopArmed) inside processVitStatus…
     setEdgeAwareStopEnabled(true);
 
     let alive = true;

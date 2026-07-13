@@ -56,9 +56,26 @@ source ~/vit_env/bin/activate
 python3 webrtc_server.py
 ```
 
-The backend detects a running stream with an **HTTP probe** to port `8080` (`VIDEO_SERVER_PORT`) and exposes WebRTC via `/api/webrtc/offer`. VIT scene decoding uses MQTT embeddings from the running server (`vit_service.py`).
+The backend detects a running stream with an **HTTP probe** to port `8080` (`VIDEO_SERVER_PORT`) and exposes WebRTC via `/api/webrtc/offer`.
 
 **Removed API routes:** `POST /api/start_stream`, `POST /api/stop_stream`, `POST /api/vit/start_server`, `POST /api/vit/stop_server`.
+
+## MobileCLIP detection (backend encoding)
+
+Object detection is **image-to-image** and all MobileCLIP encoding + matching runs on the **backend** — the backend no longer text-decodes for the UI (`VIT_ENABLE_MODEL` defaults to `false`). The Stop Test Bench has a mutually exclusive **Detection Mode** toggle:
+
+| Mode | Embedding source | Matching | Pi `Cae_*` | Who stops |
+|------|------------------|----------|-----------|-----------|
+| **Edge Only** | Browser forwards WebRTC frames to the backend, which encodes them with MobileCLIP-S1 (`open_clip`) | Backend i2i | `Cae_OFF` | Dashboard on i2i hit |
+| **Cache Aware Offloading** | Pi MQTT embedding on cache **miss** | Backend i2i | `Cae_ON` | Pi on cache **hit**; dashboard on cache **miss** + i2i hit |
+
+Flow:
+
+- **Edge Only:** `src/lib/useEdgeFrameEncoder.ts` samples the WebRTC `<video>` at `VITE_CLIENT_EDGE_FPS`, uploads a JPEG to `POST /api/vit/edge/encode`; `vit_service.encode_frame_and_match()` encodes + matches and records the result on `/api/vit/status`.
+- **Cache Aware:** the Pi publishes cache-miss embeddings on MQTT; `vit_service._handle_embedding()` matches them (Edge Only ignores MQTT embeddings).
+- **Stop:** `useEdgeAwareStopLabelEstop()` polls `/api/vit/status` and fires on `reference_match.hit` ≥ 75% (`src/lib/edgeAwareStopLabelEstop.ts`).
+
+**Backend encoding needs `torch` + `open_clip_torch` + `Pillow`** on the dashboard host (already in `requirements.txt`). No model ships to the browser. Full guide: [docs/EDGE_REFERENCE_MATCHING.md](docs/EDGE_REFERENCE_MATCHING.md).
 
 ## Environment
 
@@ -75,12 +92,16 @@ A `.env` file in the project root configures both frontend and backend. Common v
 | `PI_VIT_VENV` | Pi venv path for `cache_aware_offloading.py` (default `~/vit_env/bin/activate`) |
 | `PI_CACHE_AWARE_SCRIPT_PATH` | Path on Pi to `cache_aware_offloading.py` |
 | `PI_CACHE_AWARE_LOG` | Pi log file for cache-aware script (default `/tmp/yahboom_cache_aware.log`) |
-| `CACHE_SCRIPT_EMBEDDING_READY_SNIPPET` | Log substring that unlocks START in cache/hybrid mode |
+| `CACHE_SCRIPT_EMBEDDING_READY_SNIPPET` | Log substring that unlocks START in Cache Aware mode |
 | `MQTT_CACHE_AWARE_READY_TOPIC` | Retained MQTT topic for embedding-ready (default `yahboom/cache_aware/ready`) |
 | `VIT_REFERENCE_EMBEDDINGS_FILE` | Path to edge reference embeddings JSON (default `backend/app/services/vit/reference_embeddings.json`) |
 | `VIT_REFERENCE_LABEL` | Label filter inside the reference file (default `bottle`) |
-| `VIT_REFERENCE_MATCH_ENABLED` | Enable image-to-image matching on the dashboard (default `true`) |
+| `VIT_REFERENCE_MATCH_ENABLED` | Enable image-to-image matching (default `true`) |
 | `EDGE_AWARE_REFERENCE_THRESHOLD` | Minimum cosine similarity for a reference hit (default `0.75`) |
+| `VIT_ENABLE_MODEL` | Backend CLIP text-label decode — off; detection is i2i (default `false`) |
+| `VIT_ENABLE_EDGE_ENCODER` | Backend MobileCLIP image encoder for Edge Only frames (default `true`) |
+| `VIT_CLIENT_DETECTION_MODE` | Default mode mirrored to `vit_service` (`edge_aware` \| `cache_aware_offloading`) |
+| `VIT_CLIENT_EDGE_FPS` / `VITE_CLIENT_EDGE_FPS` | Browser frame-forward rate for Edge Only (default `5`) |
 
 ## Build
 
@@ -100,21 +121,20 @@ Widgets are added from the picker (**P**). Key control widgets:
 
 ### Stop-Time Test Bench
 
-Located in `src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode logic: `backend/app/routes/test_bench_routes.py`, `backend/app/services/vit/edge_aware_estop.py`, `backend/app/services/test_bench/cache_aware_ssh.py`. Edge-aware bottle stop on the client: `src/lib/edgeAwareStopLabelEstop.ts` via `useEdgeAwareStopLabelEstop()` in `src/app/hooks.ts`.
+Located in `src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode logic: `backend/app/routes/test_bench_routes.py`, `backend/app/services/vit/edge_aware_estop.py`, `backend/app/services/test_bench/cache_aware_ssh.py`. Backend image-to-image detection: `vit_service.py`; Edge Only frame forwarding: `src/lib/useEdgeFrameEncoder.ts`; bottle stop: `src/lib/edgeAwareStopLabelEstop.ts` via `useEdgeAwareStopLabelEstop()` in `src/app/hooks.ts`.
 
 **Purpose:** Run repeated stop-time experiments, compare stop modes, and export results as CSV.
 
-#### Stop modes (3-position slider)
+#### Detection modes (mutually exclusive)
 
-Default: **Edge** (right). Preference is saved in browser `localStorage` (`yahboom_stop_bench_mode`).
+Default: **Edge Only**. Preference is saved in browser `localStorage` (`yahboom_stop_bench_mode`).
 
 | Mode | API value | Behaviour |
 |------|-----------|-----------|
-| **Cache** (left) | `cache_aware_offloading` | Pi runs `cache_aware_offloading.py` in lxterminal. Bottle stop is detected on the Pi (CLIP embeddings via MQTT). Dashboard does **not** send `auto_off` on stop. |
-| **Hybrid** (center) | `hybrid` | Pi script **and** dashboard VIT bottle stop are both armed. **First trigger wins**; run records which path stopped (`Pi script · bottle` vs `Dashboard VIT · bottle`). |
-| **Edge** (right, default) | `edge_aware` | Dashboard compares live embeddings to **reference embeddings** (image-to-image). Sends `auto_off` + `stop` when similarity ≥ 75% after START. Pi cache script is **stopped** when this mode is selected. |
+| **Edge Only** (default) | `edge_aware` | Browser forwards WebRTC frames to the backend, which encodes them with MobileCLIP and compares to the active reference library (image-to-image). Sends `auto_off` + `stop` when similarity ≥ 75% after START. Publishes `Cae_OFF`. |
+| **Cache Aware Offloading** | `cache_aware_offloading` | Pi checks its own cache and stops on a **hit**. On a **cache miss** the Pi publishes the embedding over MQTT; the **backend** runs the i2i match and the dashboard stops. Publishes `Cae_ON`; START waits for `Cae_Ready`. |
 
-Changing to Cache or Hybrid starts the Pi script once (one lxterminal per slider change). Switching between Cache and Hybrid does **not** restart the script. Switching to Edge kills the Pi script and closes its terminal.
+Selecting a mode publishes the matching `Cae_ON` / `Cae_OFF` command and mirrors the mode into `vit_service` (`POST /api/test_bench/cache_aware`).
 
 #### START button gating
 
@@ -122,43 +142,34 @@ START is disabled when:
 
 - A test session is already active
 - E-stop is latched
-- Stop mode is switching (`SCRIPT…` pill)
-- **Cache or Hybrid:** Pi script is not running, or bottle embedding is not ready
+- Detection mode is switching (`SENDING COMMAND` pill)
+- **Cache Aware Offloading:** the Pi has not confirmed cache-aware ready yet
 
-For Cache/Hybrid, START unlocks when the backend reports both:
-
-- `cache_script_running: true` — `cache_aware_offloading.py` process on the Pi
-- `cache_script_detection_ready: true` — `[DETECT] Text embedding ready: 'a water bottle'…` in the Pi log **or** retained MQTT on `yahboom/cache_aware/ready`
-
-VIT encoder and video must be running on the Pi (`webrtc_server.py`) so the Pi script receives embeddings. Status pill shows **WARMUP** while the script is up but embedding is not ready yet.
+In Cache Aware Offloading, START unlocks when the Pi confirms readiness (`Cae_Ready`, surfaced via retained MQTT on `yahboom/cache_aware/ready`). VIT encoder and video must be running on the Pi (`webrtc_server.py`) so the Pi produces embeddings.
 
 #### How a run works
 
 1. Select **network type** and **stop mode**, then press **START** — sends `auto_on` (same as **EXPLORE**).
 2. **Command time** — Pi clock when START is pressed.
 3. **Movement start** — when the Pi publishes a movement drive-status on `yahboom/drive/status`.
-4. **Stop** — Pi drive-status halt, e-stop, or bottle detection (Pi script and/or dashboard VIT per mode).
+4. **Stop** — Pi drive-status halt, e-stop, or bottle detection (Pi cache hit and/or client i2i per mode).
 5. Enter **stopping distance** (m) per row after each run.
 
-#### Edge-aware reference matching (dashboard VIT)
+#### Image-to-image reference matching (backend)
 
-Edge stop uses **image-to-image** matching, not CLIP text labels. The dashboard loads reference embeddings from `reference_embeddings.json` (same format as Pi `cache_embeddings.json`) and compares each live MQTT embedding via cosine similarity.
+Detection uses **image-to-image** matching, not CLIP text labels, and all encoding + matching runs on the **backend** (`ReferenceEmbeddingStore` in `vit_service.py`). Reference vectors are captured on the Pi and activated on the dashboard (same format as Pi `cache_embeddings.json`).
 
 **Full guide:** [docs/EDGE_REFERENCE_MATCHING.md](docs/EDGE_REFERENCE_MATCHING.md)
 
-**Setup (copy from Pi):**
-
-1. On the Pi, run `capture_bottle_cache_multi.py` while `VIT.py` publishes `yahboom/vit/embedding`.
-2. Copy `/home/pi/cache_embeddings.json` to `Yahboom Dashboard/backend/app/services/vit/reference_embeddings.json`.
-3. Restart the Flask backend.
-4. Keep **`Cae_OFF`** on the Pi so cache hits do not suppress embedding publish to the edge.
+**Setup:** Use the **Reference Capture** panel in the VIT Scene Decoder widget to SSH-capture snapshots into categorized folders, sync them to the dashboard, and **Activate** a category. Keep **`Cae_OFF`** for Edge Only so every frame is available; Cache Aware uses `Cae_ON` and only offloads cache misses.
 
 **Stop rule:**
 
-- Polls `GET /api/vit/status` every 500 ms.
-- On a **new** decode after START with `reference_match.hit === true` and `similarity_percent` ≥ 75%, sends `auto_off` + `stop`.
+- **Edge Only:** the browser forwards WebRTC frames (~`VIT_CLIENT_EDGE_FPS`) to `POST /api/vit/edge/encode`; the backend encodes + matches vs the active library.
+- **Cache Aware:** the backend matches Pi cache-miss embeddings from MQTT (`_handle_embedding`).
+- Both surface `reference_match` on `/api/vit/status`; the dashboard polls it and, on `hit === true` and `similarity_percent` ≥ 75% after START, sends `auto_off` + `stop`.
 - Armed only after START (pre-START detections are ignored).
-- Implemented in `edgeAwareStopLabelEstop.ts`; matching in `vit_service.py` (`ReferenceEmbeddingStore`).
+- Implemented in `useEdgeFrameEncoder.ts` (frame forward) + `edgeAwareStopLabelEstop.ts` (`processVitStatusForStopLabelEstop`).
 
 #### Timing and CSV
 
@@ -181,14 +192,14 @@ Client-side explore autopilot (`CLIENT AUTO` widget, `useClientAutoPilot()`, `to
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/test_bench/stop_mode` | Current mode and Pi script status. Use `?force=1` to bypass probe cache. |
-| `POST` | `/api/test_bench/stop_mode` | Body `{ "mode": "cache_aware_offloading" \| "hybrid" \| "edge_aware" }` — set mode and start/stop Pi script. |
+| `GET` | `/api/test_bench/stop_mode` | Current mode and Pi cache-aware status. Use `?force=1` to bypass probe cache. |
+| `POST` | `/api/test_bench/stop_mode` | Body `{ "mode": "cache_aware_offloading" \| "edge_aware" }` — set mode; mirrors into `vit_service`. |
+| `POST` | `/api/test_bench/cache_aware` | Body `{ "on": true \| false }` — publish `Cae_ON` / `Cae_OFF` and set the mode. |
 
-**GET response fields (cache/hybrid):**
+**GET response fields:**
 
 - `mode`, `edge_aware_enabled`, `needs_pi_cache_script`
-- `cache_script_running`, `cache_script_detection_ready`
-- `cache_script_log`, `cache_script_launch_mode` (when applicable)
+- `cache_script_running`, `cache_script_detection_ready` (cache-aware readiness)
 
 Implemented in `backend/app/routes/test_bench_routes.py`, `backend/app/services/vit/edge_aware_estop.py`, `backend/app/services/test_bench/cache_aware_ssh.py`.
 
@@ -199,7 +210,8 @@ Implemented in `backend/app/routes/test_bench_routes.py`, `backend/app/services/
 | `GET` | `/api/stream_status` | Pi video state (`?force=1` for live HTTP probe) |
 | `POST` | `/api/webrtc/offer` | WebRTC SDP proxy to Pi `webrtc_server.py` |
 | `GET` | `/api/video_feed` | MJPEG relay (when `VIDEO_USE_MJPEG_RELAY=true`) |
-| `GET` | `/api/vit/status` | VIT status: reference match, encoder activity, `reference_ready`, `reference_count` |
+| `GET` | `/api/vit/status` | VIT status: `detection_mode`, `edge_encoder_ready`, `reference_ready`, `reference_active_category`, `reference_stop_threshold` |
+| `POST` | `/api/vit/edge/encode` | Edge Only: upload a WebRTC frame (JPEG) for backend encode + match |
 | `POST` | `/api/vit/config` | Set embedding size (512 / 1024 / 2048 B) |
 | `POST` | `/api/vit/clear` | Clear VIT session history |
 | `GET` | `/api/vit/export` | Download session CSV |

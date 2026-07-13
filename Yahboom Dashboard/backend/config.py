@@ -112,6 +112,34 @@ EDGE_AWARE_REFERENCE_THRESHOLD = float(
     os.getenv("EDGE_AWARE_REFERENCE_THRESHOLD", "0.75")
 )
 
+# Pi reference snapshot capture (SSH from dashboard — see reference_capture_ssh.py)
+PI_REFERENCE_CAPTURE_SCRIPT_PATH = os.getenv(
+    "PI_REFERENCE_CAPTURE_SCRIPT_PATH",
+    "~/Yahboom Car/Used/capture_reference_snapshot.py",
+)
+PI_REFERENCE_LIBRARY_DIR = os.getenv(
+    "PI_REFERENCE_LIBRARY_DIR",
+    "~/reference_library",
+)
+VIT_REFERENCE_LIBRARY_DIR = os.getenv(
+    "VIT_REFERENCE_LIBRARY_DIR",
+    str(_VIT_SERVICES_DIR / "reference_library"),
+)
+PI_REFERENCE_CAPTURE_WAIT_SEC = float(
+    os.getenv("PI_REFERENCE_CAPTURE_WAIT_SEC", "10")
+)
+
+# MobileCLIP detection. Text-label decode is OFF by default; detection is
+# image-to-image only. Edge Only encodes browser-forwarded WebRTC frames on the
+# backend (needs torch + open_clip on the dashboard host); Cache Aware matches
+# the Pi's cache-miss MQTT embeddings.
+VIT_ENABLE_MODEL = os.getenv("VIT_ENABLE_MODEL", "false").lower() in ("true", "1", "yes", "on")
+VIT_ENABLE_EDGE_ENCODER = os.getenv("VIT_ENABLE_EDGE_ENCODER", "true").lower() in ("true", "1", "yes", "on")
+# Default detection mode mirrored to vit_service (edge_aware | cache_aware_offloading).
+VIT_CLIENT_DETECTION_MODE = os.getenv("VIT_CLIENT_DETECTION_MODE", "edge_aware")
+# Max edge encode rate — browser samples frames at this FPS (via VITE_CLIENT_EDGE_FPS).
+VIT_CLIENT_EDGE_FPS = float(os.getenv("VIT_CLIENT_EDGE_FPS", "5"))
+
 # SLAM settings
 # yahboom/scan  – raw LaserScan JSON (angle_min, angle_increment, ranges[])
 # yahboom/grid  – existing occupancy-grid JSON (fallback, same as GRID_TOPIC)

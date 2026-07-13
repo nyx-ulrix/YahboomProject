@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Activity, FlaskConical, Joystick, Loader2, Network, Octagon, Play,
+  Activity, Camera, FlaskConical, Joystick, Loader2, Network, Octagon, Play,
   Radar, ScanEye, Download, Trash2,
   Signal, Timer, Video, type LucideIcon,
 } from 'lucide-react';
@@ -1103,6 +1103,11 @@ type VitStatusResponse = {
   reference_error?: string | null;
   reference_match_enabled?: boolean;
   reference_stop_threshold?: number;
+  reference_active_category?: string | null;
+  reference_snapshot_count?: number;
+  detection_mode?: 'edge_aware' | 'cache_aware_offloading';
+  edge_encoder_ready?: boolean;
+  edge_encodes?: number;
   latest: {
     top_label: string;
     top_confidence: number;
@@ -1125,6 +1130,18 @@ type VitStatusResponse = {
     timestamp: string;
   } | null;
 };
+
+type VitReferenceCategory = {
+  category: string;
+  snapshot_count: number;
+  active?: boolean;
+};
+
+const REFERENCE_CATEGORY_RE = /^[a-z0-9_-]{1,48}$/;
+
+function normalizeReferenceCategory(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, '_');
+}
 
 const VIT_EMBED_SIZE_OPTIONS = [512, 1024, 2048] as const;
 /** Slider uses equal-spaced indices 0|1|2 so 1024 B is always at 50% (not linear 512–2048). */
@@ -1271,6 +1288,11 @@ function VitDecoderWidget() {
   const fileSizeInitRef = useRef(false);
   const lastEmbedCommitRef = useRef<number | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [refCategory, setRefCategory] = useState('bottle');
+  const [refCategories, setRefCategories] = useState<VitReferenceCategory[]>([]);
+  const [capturingRef, setCapturingRef] = useState(false);
+  const [activatingRef, setActivatingRef] = useState(false);
+  const [refMessage, setRefMessage] = useState<string | null>(null);
 
   const serverActive = streamRunning || (status?.vit_server_running ?? false);
   const encoderLive = status?.encoder_live ?? serverActive;
@@ -1294,6 +1316,99 @@ function VitDecoderWidget() {
     const id = setInterval(poll, 500);
     return () => { alive = false; clearInterval(id); };
   }, []);
+
+  useEffect(() => {
+    let alive = true;
+    const loadCategories = async () => {
+      try {
+        const res = await fetch('/api/vit/reference/categories', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json() as { categories?: VitReferenceCategory[] };
+        if (!alive) return;
+        setRefCategories(data.categories ?? []);
+      } catch { /* ignore */ }
+    };
+    loadCategories();
+    const id = setInterval(loadCategories, 3000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  useEffect(() => {
+    if (status?.reference_active_category) {
+      setRefCategory(status.reference_active_category);
+    }
+  }, [status?.reference_active_category]);
+
+  const normalizedRefCategory = normalizeReferenceCategory(refCategory);
+  const refCategoryValid = REFERENCE_CATEGORY_RE.test(normalizedRefCategory);
+
+  const captureReferenceSnapshot = async () => {
+    if (!refCategoryValid || capturingRef) return;
+    setCapturingRef(true);
+    setRefMessage(null);
+    try {
+      const res = await fetch('/api/vit/reference/capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: normalizedRefCategory, label: 'bottle' }),
+      });
+      const data = await res.json() as {
+        status?: string;
+        message?: string;
+        sample_id?: number;
+        total?: number;
+        category?: string;
+      };
+      if (!res.ok || data.status === 'error') {
+        setRefMessage(data.message ?? 'Capture failed');
+        return;
+      }
+      setRefMessage(
+        `Saved sample ${data.sample_id ?? '?'} (${data.total ?? '?'} in ${data.category ?? normalizedRefCategory})`,
+      );
+      const catRes = await fetch('/api/vit/reference/categories', { cache: 'no-store' });
+      if (catRes.ok) {
+        const catData = await catRes.json() as { categories?: VitReferenceCategory[] };
+        setRefCategories(catData.categories ?? []);
+      }
+    } catch {
+      setRefMessage('Capture failed — SSH or Pi encoder unavailable');
+    } finally {
+      setCapturingRef(false);
+    }
+  };
+
+  const activateReferenceCategory = async () => {
+    if (!refCategoryValid || activatingRef) return;
+    setActivatingRef(true);
+    setRefMessage(null);
+    try {
+      const res = await fetch('/api/vit/reference/activate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: normalizedRefCategory }),
+      });
+      const data = await res.json() as { status?: string; message?: string; category?: string };
+      if (!res.ok || data.status === 'error') {
+        setRefMessage(data.message ?? 'Activate failed — capture and sync first');
+        return;
+      }
+      setRefMessage(`Active: ${data.category ?? normalizedRefCategory}`);
+      const statusRes = await fetch('/api/vit/status', { cache: 'no-store' });
+      if (statusRes.ok) {
+        setStatus(await statusRes.json() as VitStatusResponse);
+      }
+      const catRes = await fetch('/api/vit/reference/categories', { cache: 'no-store' });
+      if (catRes.ok) {
+        const catData = await catRes.json() as { categories?: VitReferenceCategory[] };
+        setRefCategories(catData.categories ?? []);
+      }
+    } catch {
+      setRefMessage('Activate failed');
+    } finally {
+      setActivatingRef(false);
+    }
+  };
 
   useEffect(() => {
     if (!status?.embedding_command_active) {
@@ -1355,26 +1470,45 @@ function VitDecoderWidget() {
   const latest = status?.latest ?? null;
   // Show detections while SSH or MQTT confirms the encoder pipeline is active.
   const displayLatest = encoderLive ? latest : null;
+
+  // Detection is image-to-image and runs on the backend for both modes:
+  // Edge Only encodes browser-forwarded WebRTC frames; Cache Aware matches Pi
+  // cache-miss MQTT embeddings. The widget shows the backend reference match.
+  const detectionMode = status?.detection_mode ?? 'edge_aware';
+  const referenceReady = status?.reference_ready ?? false;
+  const edgeEncoderReady = status?.edge_encoder_ready ?? false;
+
   const isReferenceMatch = displayLatest?.match_mode === 'reference_embedding';
-  const referenceMatch = displayLatest?.reference_match;
+  const referenceMatch = isReferenceMatch ? displayLatest?.reference_match ?? null : null;
   const referenceStopThresholdPct =
     (status?.reference_stop_threshold ?? 0.75) * 100;
   const threshold = isReferenceMatch
     ? referenceStopThresholdPct
     : (status?.confidence_threshold ?? 60);
-  const topConf = displayLatest?.top_confidence ?? null;
+  const topConf = referenceMatch ? referenceMatch.similarity_percent : null;
   const confColor =
     topConf == null ? 'var(--text-muted)'
     : topConf >= threshold ? accents.green
     : topConf >= threshold * 0.6 ? accents.yellow
     : accents.red;
 
+  const matchSource = displayLatest?.source === 'edge_frame'
+    ? 'backend-encoded frame'
+    : 'Pi cache-miss embedding';
+
+  const modeStatusLabel = (() => {
+    if (detectionMode === 'cache_aware_offloading') return 'CACHE AWARE — PI EMBEDDINGS';
+    if (!edgeEncoderReady) return 'EDGE — BACKEND ENCODER OFF';
+    if (!encoderLive) return 'EDGE — WAITING VIDEO';
+    return 'EDGE — BACKEND ENCODING';
+  })();
+
   // Decoder activity pill — "MODEL READY" only while actively decoding; otherwise
   // shows what the server is doing (waiting, receiving embeddings, errors, etc.).
   const modelReady = status?.model_ready ?? false;
   const modelEnabled = status?.model_enabled ?? false;
   const linkUp = mqttLink === 'CONNECTED' || (status?.connected ?? false);
-  const { label: decoderLabel, color: decoderColor, dotActive } = vitDecoderPill({
+  const { dotActive } = vitDecoderPill({
     serverRunning: serverActive,
     encoderLive,
     linkUp,
@@ -1385,8 +1519,8 @@ function VitDecoderWidget() {
   });
 
   const detectionHint = (() => {
-    if (!status?.reference_ready && status?.reference_match_enabled) {
-      return 'Reference file missing — copy cache_embeddings.json from Pi';
+    if (!referenceReady) {
+      return 'Capture reference snapshots on the Pi, then activate a category';
     }
     if (isReferenceMatch && referenceMatch) {
       const sample = referenceMatch.sample_id != null
@@ -1394,14 +1528,12 @@ function VitDecoderWidget() {
         : '';
       return `${referenceMatch.label} — reference match${sample}`;
     }
-    return vitDetectionHint({
-      serverRunning: serverActive,
-      encoderLive,
-      linkUp,
-      modelReady,
-      activity: status?.activity,
-      latestLabel: displayLatest?.top_label,
-    });
+    if (detectionMode === 'edge_aware') {
+      if (!edgeEncoderReady) return 'Backend encoder unavailable — install torch + open_clip';
+      if (!encoderLive) return 'Start webrtc_server.py on the Pi for video';
+      return 'Backend encoding WebRTC frames — no match yet';
+    }
+    return 'Cache Aware — waiting for a Pi cache-miss embedding';
   })();
 
   const sessionCount = status?.session_count ?? 0;
@@ -1423,9 +1555,10 @@ function VitDecoderWidget() {
         <div className="flex items-center gap-1.5 flex-shrink-0">
           <span className="pill" style={{
             padding: '1px 6px', fontSize: 8, fontWeight: 700,
-            background: `${decoderColor}22`, color: decoderColor,
+            background: detectionMode === 'edge_aware' ? 'rgba(6,182,212,0.18)' : 'rgba(139,92,246,0.18)',
+            color: detectionMode === 'edge_aware' ? accents.cyan : accents.purple,
           }}>
-            {decoderLabel}
+            {modeStatusLabel}
           </span>
           <span className="w-1.5 h-1.5 rounded-full"
             style={{ background: dotActive ? accents.green : 'var(--text-muted)',
@@ -1437,7 +1570,7 @@ function VitDecoderWidget() {
       <div className="flex-shrink-0 rounded-xl px-3 py-2"
         style={{ background: 'rgba(0,0,0,0.18)', border: '1px solid var(--stroke-subtle)' }}>
         <div className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
-          {isReferenceMatch ? 'Reference Match' : 'Detected Object'}
+          Reference Match
         </div>
         <div className="truncate" style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.25 }}>
           {detectionHint}
@@ -1474,38 +1607,136 @@ function VitDecoderWidget() {
         </div>
       </div>
 
-      {/* Top-K breakdown with confidence bars */}
-      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1">
-        {(displayLatest?.results ?? []).map((d, i) => {
-          const c = i === 0 ? confColor : 'var(--text-secondary)';
-          return (
-            <div key={`${d.label}-${i}`} className="flex flex-col gap-0.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate" style={{ fontSize: 11, color: c }}>
-                  {`#${i + 1} ${d.label}`}
-                </span>
-                <span style={{ fontSize: 11, fontWeight: 700, color: c, fontFamily: 'monospace' }}>
-                  {d.confidence.toFixed(1)}%
-                </span>
-              </div>
-              <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--secondary)' }}>
-                <div style={{
-                  width: `${Math.max(0, Math.min(100, d.confidence))}%`,
-                  height: '100%', background: c, transition: 'width 0.2s',
-                }} />
-              </div>
+      {/* Image-to-image similarity (backend match) */}
+      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1.5">
+        {referenceMatch ? (
+          <div className="flex flex-col gap-0.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate" style={{ fontSize: 11, color: confColor }}>
+                {`${referenceMatch.label}${referenceMatch.sample_id != null ? ` · sample ${referenceMatch.sample_id}` : ''}`}
+              </span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: confColor, fontFamily: 'monospace' }}>
+                {referenceMatch.similarity_percent.toFixed(1)}%
+              </span>
             </div>
-          );
-        })}
-        {(displayLatest?.results ?? []).length === 0 && (
+            <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--secondary)' }}>
+              <div style={{
+                width: `${Math.max(0, Math.min(100, referenceMatch.similarity_percent))}%`,
+                height: '100%', background: confColor, transition: 'width 0.2s',
+              }} />
+            </div>
+            <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+              {`threshold ${referenceStopThresholdPct.toFixed(0)}% · ${matchSource}`}
+            </span>
+          </div>
+        ) : (
           <div className="flex-1 flex items-center justify-center text-center px-2" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            {!encoderLive
-              ? 'Start webrtc_server.py on the Pi for video and VIT embeddings'
-              : !status?.reference_ready && status?.reference_match_enabled
-                ? 'Copy cache_embeddings.json from Pi to reference_embeddings.json on the dashboard'
-              : !displayLatest
-                ? 'Embeddings arriving — reference similarity will appear here'
-                : 'No detections in this session yet'}
+            {!referenceReady
+              ? 'Capture reference snapshots below, then activate a category'
+              : detectionMode === 'edge_aware'
+                ? (!edgeEncoderReady
+                    ? 'Backend encoder unavailable — install torch + open_clip'
+                    : !encoderLive
+                      ? 'Start webrtc_server.py on the Pi for video'
+                      : 'Backend encoding WebRTC frames — similarity will appear here')
+                : 'Cache Aware — waiting for a Pi cache-miss embedding'}
+          </div>
+        )}
+        <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+          {referenceReady
+            ? `${status?.reference_count ?? 0} reference sample${(status?.reference_count ?? 0) === 1 ? '' : 's'} · ${status?.reference_active_category ?? 'active'}`
+            : 'no reference loaded'}
+        </span>
+      </div>
+
+      {/* Reference capture — SSH to Pi, SFTP sync to categorized folders */}
+      <div className="flex-shrink-0 rounded-xl px-3 py-2 flex flex-col gap-1.5"
+        style={{ background: 'rgba(0,0,0,0.12)', border: '1px solid var(--stroke-subtle)' }}>
+        <div className="flex items-center justify-between gap-2">
+          <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+            Reference Capture
+          </span>
+          {status?.reference_active_category && (
+            <span className="pill" style={{
+              padding: '1px 6px', fontSize: 8, fontWeight: 700,
+              background: 'rgba(34,197,94,0.14)', color: accents.green,
+            }}>
+              {`${status.reference_active_category} · ${status.reference_snapshot_count ?? 0}`}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <input
+            value={refCategory}
+            onChange={(e) => setRefCategory(e.target.value)}
+            placeholder="category e.g. black_bottle"
+            className="flex-1 min-w-0 rounded-md px-2 py-1"
+            style={{
+              fontSize: 10,
+              background: 'var(--bg-surface)',
+              border: `1px solid ${refCategoryValid ? 'var(--stroke-subtle)' : accents.red}`,
+              color: 'var(--text-primary)',
+            }}
+          />
+          {refCategories.length > 0 && (
+            <select
+              value={normalizedRefCategory}
+              onChange={(e) => setRefCategory(e.target.value)}
+              className="rounded-md px-1 py-1"
+              style={{
+                fontSize: 9,
+                maxWidth: 96,
+                background: 'var(--bg-surface)',
+                border: '1px solid var(--stroke-subtle)',
+                color: 'var(--text-secondary)',
+              }}
+            >
+              {refCategories.map((c) => (
+                <option key={c.category} value={c.category}>
+                  {`${c.category} (${c.snapshot_count})`}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => void captureReferenceSnapshot()}
+            disabled={!refCategoryValid || capturingRef || !encoderLive}
+            title={encoderLive ? 'SSH capture one embedding from Pi camera' : 'Start Pi encoder first'}
+            className="flex items-center gap-1"
+            style={{
+              padding: '3px 8px', borderRadius: 6, fontSize: 9, fontWeight: 700,
+              border: '1px solid var(--accent-purple)',
+              background: 'rgba(139,92,246,0.16)', color: 'var(--accent-purple)',
+              cursor: !refCategoryValid || capturingRef || !encoderLive ? 'not-allowed' : 'pointer',
+              opacity: !refCategoryValid || capturingRef || !encoderLive ? 0.5 : 1,
+            }}
+          >
+            {capturingRef ? <Loader2 size={11} className="animate-spin" /> : <Camera size={11} />}
+            {capturingRef ? 'CAPTURING…' : 'CAPTURE'}
+          </button>
+          <button
+            onClick={() => void activateReferenceCategory()}
+            disabled={!refCategoryValid || activatingRef}
+            title="Use this category for edge reference matching"
+            style={{
+              padding: '3px 8px', borderRadius: 6, fontSize: 9, fontWeight: 700,
+              border: '1px solid var(--stroke-strong)',
+              background: 'var(--bg-surface)', color: 'var(--text-secondary)',
+              cursor: !refCategoryValid || activatingRef ? 'not-allowed' : 'pointer',
+              opacity: !refCategoryValid || activatingRef ? 0.5 : 1,
+            }}
+          >
+            {activatingRef ? 'ACTIVATING…' : 'ACTIVATE'}
+          </button>
+        </div>
+        {refMessage && (
+          <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>{refMessage}</div>
+        )}
+        {!refCategoryValid && refCategory.trim() !== '' && (
+          <div style={{ fontSize: 8, color: accents.red }}>
+            Use 1–48 chars: a-z, 0-9, _, -
           </div>
         )}
       </div>
@@ -2551,22 +2782,17 @@ function StopTestBenchWidget() {
     })();
   };
 
-  const toggleCacheStop = () => {
-    if (stopTogglesDisabled) return;
-    applyCacheAware(!cacheOn);
-  };
-
   const stopModeStatusMessage = (() => {
     if (modeSwitching && cacheOn) {
       return 'Sending Cae_ON to the Raspberry Pi…';
     }
     if (effectiveStopMode === 'cache_aware_offloading') {
       return cacheScriptReady
-        ? 'Cache Aware Offloading + Edge Stop both armed — first detector wins; run records which stopped.'
+        ? 'Cache Aware — Pi stops on cache hits; on a cache miss the client matches the Pi embedding and stops. Activate a reference category.'
         : 'Waiting for Raspberry Pi to confirm cache-aware ready — Start is disabled.';
     }
     if (effectiveStopMode === 'edge_aware') {
-      return 'Edge Stop sends auto_off + stop on reference embedding match (≥ 75% similarity). Requires reference_embeddings.json, VIT, and video. Keep Cae_OFF on the Pi.';
+      return 'Edge Only — browser encodes WebRTC frames with MobileCLIP and stops on reference match (≥ 75% similarity). Needs an active reference category, video, and Cae_OFF on the Pi.';
     }
     return '';
   })();
@@ -2685,12 +2911,13 @@ function StopTestBenchWidget() {
         </div>
       </div>
 
-      {/* Stop mode toggles — edge VIT always armed; cache-aware offloading adds the Pi script */}
+      {/* Detection mode — mutually exclusive: Edge Only (client encodes video) or
+          Cache Aware Offloading (Pi cache-miss embeddings, client matches). */}
       <div className="flex-shrink-0 rounded-xl px-2.5 py-2"
         style={{ background: 'rgba(0,0,0,0.12)', border: '1px solid var(--stroke-subtle)' }}>
         <div className="flex items-center justify-between gap-2 mb-2">
           <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
-            Detectors
+            Detection Mode
           </span>
           <span className="pill truncate" style={{
             padding: '1px 6px', fontSize: 8, fontWeight: 700, maxWidth: '55%',
@@ -2704,39 +2931,48 @@ function StopTestBenchWidget() {
             {STOP_MODE_LABELS[effectiveStopMode ?? stopMode]}
           </span>
         </div>
-        <div className="grid grid-cols-1 gap-1.5">
+        <div className="grid grid-cols-2 gap-1.5">
           <button
             type="button"
-            onClick={toggleCacheStop}
+            onClick={() => { if (!stopTogglesDisabled && cacheOn) applyCacheAware(false); }}
             disabled={stopTogglesDisabled}
             className="rounded-xl transition-all"
             style={{
-              padding: '8px 10px',
-              fontWeight: 700,
-              fontSize: 10,
-              letterSpacing: '0.04em',
-              textAlign: 'left',
+              padding: '8px 10px', fontWeight: 700, fontSize: 10, letterSpacing: '0.04em', textAlign: 'left',
+              cursor: stopTogglesDisabled ? 'not-allowed' : 'pointer',
+              opacity: stopTogglesDisabled ? 0.55 : 1,
+              color: !cacheOn ? '#fff' : 'var(--text-secondary)',
+              background: !cacheOn ? 'linear-gradient(135deg, #0891b2, #0e3a4f)' : 'var(--secondary)',
+              border: !cacheOn ? '1px solid rgba(255,255,255,0.22)' : '1px solid var(--stroke-subtle)',
+              boxShadow: !cacheOn ? '0 8px 24px rgba(6,182,212,0.4), inset 0 1px 0 rgba(255,255,255,0.2)' : 'none',
+            }}
+            title="Edge Only — browser encodes WebRTC frames and matches your reference (publishes Cae_OFF)"
+          >
+            <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
+              Edge Only
+            </span>
+            {!cacheOn ? 'Active' : 'Select'}
+          </button>
+          <button
+            type="button"
+            onClick={() => { if (!stopTogglesDisabled && !cacheOn) applyCacheAware(true); }}
+            disabled={stopTogglesDisabled}
+            className="rounded-xl transition-all"
+            style={{
+              padding: '8px 10px', fontWeight: 700, fontSize: 10, letterSpacing: '0.04em', textAlign: 'left',
               cursor: stopTogglesDisabled ? 'not-allowed' : 'pointer',
               opacity: stopTogglesDisabled ? 0.55 : 1,
               color: cacheOn ? '#fff' : 'var(--text-secondary)',
-              background: cacheOn
-                ? 'linear-gradient(135deg, var(--state-success), #14532d)'
-                : 'var(--secondary)',
-              border: cacheOn
-                ? '1px solid rgba(255,255,255,0.22)'
-                : '1px solid var(--stroke-subtle)',
-              boxShadow: cacheOn
-                ? '0 8px 24px rgba(34,197,94,0.45), inset 0 1px 0 rgba(255,255,255,0.2)'
-                : 'none',
+              background: cacheOn ? 'linear-gradient(135deg, var(--state-success), #14532d)' : 'var(--secondary)',
+              border: cacheOn ? '1px solid rgba(255,255,255,0.22)' : '1px solid var(--stroke-subtle)',
+              boxShadow: cacheOn ? '0 8px 24px rgba(34,197,94,0.45), inset 0 1px 0 rgba(255,255,255,0.2)' : 'none',
             }}
-            title={cacheOn
-              ? 'Turn off Cache Aware Offloading (publishes Cae_OFF)'
-              : 'Turn on Cache Aware Offloading (publishes Cae_ON)'}
+            title="Cache Aware Offloading — Pi checks its cache; on a miss the client matches the Pi embedding (publishes Cae_ON)"
           >
             <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
-              Cache Aware Offloading
+              Cache Aware
             </span>
-            {cacheOn ? 'On' : 'Off'}
+            {cacheOn ? 'Active' : 'Select'}
           </button>
         </div>
         {stopModeStatusMessage && (
