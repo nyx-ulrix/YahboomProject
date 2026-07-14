@@ -115,7 +115,7 @@ sequenceDiagram
   VS->>VS: _record reference_match
   Cli->>API: poll every 500ms via hooks
   API-->>Cli: reference_match.hit similarity_percent
-  alt hit and similarity >= 75% and mission armed
+  alt hit and similarity >= 70% and mission armed
     Cli->>Robot: auto_off then stop
   end
 ```
@@ -126,7 +126,7 @@ sequenceDiagram
 2. **Dashboard backend** (`vit_service.py`) relays each embedding to `GET /api/vit/client/latest_embedding` (dedupe on `seq`).
 3. **Browser** (`useClientReferenceDetection`) polls ~180 ms, decodes the base64 float32 blob, and runs image-to-image match against `GET /api/vit/reference/active`.
 4. **Browser** POSTs the match to `/api/vit/client/match_result` so `/api/vit/status`, the widget, and CSV stay populated.
-5. **Browser** (`useEdgeAwareStopLabelEstop`) polls `/api/vit/status` every 500 ms. On a new decode after START with `hit` and similarity ≥ 75%, sends `auto_off` + `stop`.
+5. **Browser** (`useEdgeAwareStopLabelEstop`) polls `/api/vit/status` every 500 ms. On a new decode after START with `hit` and similarity ≥ 70%, sends `auto_off` + `stop`.
 
 ## 5. Matching math
 
@@ -145,11 +145,11 @@ hit = similarity >= effective_threshold
 ### Effective threshold
 
 ```javascript
-effective_threshold = max(sample_threshold, stop_threshold)  // stop_threshold default 0.75
+effective_threshold = max(sample_threshold, stop_threshold)  // stop_threshold default 0.70
 hit = similarity >= effective_threshold
 ```
 
-The client also requires `similarity_percent >= 75` in `src/lib/edgeAwareStopLabelEstop.ts`.
+The client also requires `similarity_percent >= 70` in `src/lib/edgeAwareStopLabelEstop.ts`.
 
 ## 6. Reference file format
 
@@ -159,11 +159,11 @@ Same schema as Pi `/home/pi/cache_embeddings.json` from `Yahboom Car/Used/captur
 
 | Field | Purpose |
 |-------|---------|
-| `label` | Must match `VIT_REFERENCE_LABEL` (default `bottle`) |
+| `label` | Must match `VIT_REFERENCE_LABEL` (default `target bottle`) |
 | `sample_id` | Angle/view index (1–6 from multi-angle capture) |
 | `data` | Base64 float32 embedding bytes |
 | `embedding_dim` | Must match live size (512 for default `embds3`) |
-| `threshold` | Per-sample minimum (client uses `max(threshold, 0.75)`) |
+| `threshold` | Per-sample minimum (client uses `max(threshold, 0.70)`) |
 
 ## 7. Creating the reference file
 
@@ -171,38 +171,35 @@ Same schema as Pi `/home/pi/cache_embeddings.json` from `Yahboom Car/Used/captur
 
 Use the **Reference Capture** panel in the VIT Scene Decoder widget:
 
-1. Start `VIT.py` + camera on the Pi.
-2. Ensure **`Cae_OFF`** (Edge Only) or **`Cae_ON`** (Cache Aware) as needed for your mode.
-3. Enter a **category** slug (e.g. `black_bottle`) — one folder per object or bottle type.
-4. Point the Pi camera at your bottle and click **Capture** — the dashboard SSHs to the Pi, runs `capture_reference_snapshot.py`, waits for one live embedding, appends it to the category folder on the Pi, then SFTP-syncs it to the dashboard.
-5. Move the bottle to a different angle and click **Capture** again (one click = one snapshot).
-6. Click **Activate** to copy that category into `reference_embeddings.json` and reload the browser reference store.
+1. Start `VIT.py` + camera on the Pi (`Cae_OFF` for Edge Only so every embedding is relayed).
+2. Enter a **category** slug (e.g. `target_bottle`).
+3. Point the Pi camera at your bottle and click **Capture** — the dashboard saves the **latest Pi MQTT embedding** relayed by the backend.
+4. Move the bottle to a different angle and click **Capture** again.
+5. Click **Activate** to copy that category into `reference_embeddings.json` and reload client matching.
 
 Folder layout:
 
 ```
-Pi:        /home/pi/reference_library/
-             black_bottle/cache_embeddings.json
-             red_bottle/cache_embeddings.json
-
 Dashboard: backend/app/services/vit/reference_library/
-             black_bottle/cache_embeddings.json   (SFTP mirror)
-             red_bottle/cache_embeddings.json
+             target_bottle/512/cache_embeddings.json
+             target_bottle/1024/cache_embeddings.json
+             target_bottle/2048/cache_embeddings.json
 
 Active:    backend/app/services/vit/reference_embeddings.json  (copy-on-activate)
 ```
+
+Each embedding size (512 / 1024 / 2048 bytes) is stored separately under the category. **Activate** or change the **Embedding Size** slider to switch which size is used for matching — no need to recapture if you already have references at that size.
 
 API endpoints:
 
 | Route | Purpose |
 |-------|---------|
-| `POST /api/vit/reference/capture` | SSH capture one snapshot + SFTP sync |
+| `POST /api/vit/reference/capture` | Save latest relayed Pi embedding |
 | `POST /api/vit/reference/activate` | Activate a category for client matching |
 | `GET /api/vit/reference/categories` | List categories and snapshot counts |
 | `GET /api/vit/reference/status` | Library status and last capture |
-| `GET /api/vit/reference/active` | Active reference vectors for browser i2i |
 
-Requires `PI_SSH_USER` / `PI_SSH_PASSWORD` (or `PI_SSH_KEY_PATH`) in `.env`.
+No SSH required for reference capture.
 
 ### Option B — Manual Pi capture
 
@@ -248,18 +245,17 @@ Environment variables in `backend/config.py`:
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `VIT_REFERENCE_EMBEDDINGS_FILE` | `vit/reference_embeddings.json` | Reference JSON path |
-| `VIT_REFERENCE_LABEL` | `bottle` | Label filter |
+| `VIT_REFERENCE_LABEL` | `target bottle` | Label filter |
 | `VIT_REFERENCE_MATCH_ENABLED` | `true` | Reference store enabled (status/activate) |
 | `VIT_REFERENCE_DEFAULT_THRESHOLD` | `0.70` | Default per-entry threshold |
-| `EDGE_AWARE_REFERENCE_THRESHOLD` | `0.75` | Floor for client `hit` |
-| `PI_REFERENCE_CAPTURE_SCRIPT_PATH` | `~/Yahboom Car/Used/capture_reference_snapshot.py` | Pi capture script |
-| `PI_REFERENCE_LIBRARY_DIR` | `~/reference_library` | Category folders on Pi |
-| `VIT_REFERENCE_LIBRARY_DIR` | `vit/reference_library/` | Mirrored folders on dashboard |
-| `PI_REFERENCE_CAPTURE_WAIT_SEC` | `10` | Seconds to wait for embedding on Pi |
+| `EDGE_AWARE_REFERENCE_THRESHOLD` | `0.70` | Floor for client `hit` |
+| `PI_REFERENCE_CAPTURE_SCRIPT_PATH` | _(removed)_ | Reference capture uses relayed MQTT embeddings — no SSH |
+| `PI_REFERENCE_LIBRARY_DIR` | _(removed)_ | Library lives on dashboard only |
+| `VIT_REFERENCE_LIBRARY_DIR` | `vit/reference_library/` | Category folders on dashboard |
 | `VIT_ENABLE_MODEL` | `false` | Optional backend text-label decode (off) |
 | `VIT_CLIENT_DETECTION_MODE` | `edge_aware` | Default mode mirrored to `vit_service` |
 
-Client: `EDGE_AWARE_MIN_CONFIDENCE = 75` in `edgeAwareStopLabelEstop.ts`.
+Client: `EDGE_AWARE_MIN_CONFIDENCE = 70` in `edgeAwareStopLabelEstop.ts`.
 
 ## 10. API
 
@@ -290,7 +286,7 @@ All must be true:
 3. Edge test-bench mode active
 4. New decode (timestamp not already handled)
 5. `reference_match.hit === true`
-6. `similarity_percent >= 75`
+6. `similarity_percent >= 70`
 7. Outside 5 s cooldown
 8. E-stop not latched
 
@@ -300,7 +296,7 @@ Pre-START detections are ignored.
 
 The **Stop Test Bench** widget has a mutually exclusive **Detection Mode** control: **Edge Only** (`Cae_OFF`) vs **Cache Aware Offloading** (`Cae_ON`).
 
-The **VIT Scene Decoder** widget (`Widgets.tsx`) shows the client image-to-image match: similarity %, sample id, reference count, and a mode pill (`EDGE — CLIENT MATCH` / `CACHE AWARE — CLIENT MATCH`). The **Reference Capture** panel SSH-captures snapshots into categorized folders and activates a category for matching.
+The **VIT Scene Decoder** widget (`Widgets.tsx`) shows the client image-to-image match: similarity %, sample id, reference count, and a mode pill (`EDGE — CLIENT MATCH` / `CACHE AWARE — CLIENT MATCH`). The **Reference Capture** panel saves the latest relayed Pi embedding into categorized folders on the dashboard host (embeddings only — no preview JPEGs).
 
 ## 13. Pi cache vs dashboard reference
 
@@ -320,7 +316,7 @@ The **VIT Scene Decoder** widget (`Widgets.tsx`) shows the client image-to-image
 | Low similarity | Wrong bottle, angles, or dim mismatch | Re-capture; use `embds3` (512 dims) |
 | No Pi embeddings in Edge Only | `Cae_ON` suppressing publish | `Cae_OFF` for Edge Only |
 | Cache Aware: Pi stops but dashboard idle | Cache hit — expected | Pi handled stop; no embedding forwarded |
-| Never stops | Not armed or pre-START decode | Press START; check `hit` and ≥ 75% |
+| Never stops | Not armed or pre-START decode | Press START; check `hit` and ≥ 70% |
 | False stops | Threshold too low | Raise thresholds in env or JSON |
 | Misses bottle | Threshold too high | More samples; lower threshold slightly |
 

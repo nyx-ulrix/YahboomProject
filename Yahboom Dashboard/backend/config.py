@@ -101,7 +101,9 @@ VIT_REFERENCE_EMBEDDINGS_FILE = os.getenv(
     "VIT_REFERENCE_EMBEDDINGS_FILE",
     str(_VIT_SERVICES_DIR / "reference_embeddings.json"),
 )
-VIT_REFERENCE_LABEL = os.getenv("VIT_REFERENCE_LABEL", "bottle")
+VIT_REFERENCE_LABEL = os.getenv("VIT_REFERENCE_LABEL", "target bottle")
+# Category slug that triggers edge stop (client scans the full library for display).
+VIT_STOP_REFERENCE_CATEGORY = os.getenv("VIT_STOP_REFERENCE_CATEGORY", "target_bottle")
 VIT_REFERENCE_MATCH_ENABLED = os.getenv(
     "VIT_REFERENCE_MATCH_ENABLED", "true"
 ).lower() in ("true", "1", "yes", "on")
@@ -112,21 +114,10 @@ EDGE_AWARE_REFERENCE_THRESHOLD = float(
     os.getenv("EDGE_AWARE_REFERENCE_THRESHOLD", "0.75")
 )
 
-# Pi reference snapshot capture (SSH from dashboard — see reference_capture_ssh.py)
-PI_REFERENCE_CAPTURE_SCRIPT_PATH = os.getenv(
-    "PI_REFERENCE_CAPTURE_SCRIPT_PATH",
-    "~/Yahboom Car/Used/capture_reference_snapshot.py",
-)
-PI_REFERENCE_LIBRARY_DIR = os.getenv(
-    "PI_REFERENCE_LIBRARY_DIR",
-    "~/reference_library",
-)
+# Reference library on the dashboard host (see reference_capture.py)
 VIT_REFERENCE_LIBRARY_DIR = os.getenv(
     "VIT_REFERENCE_LIBRARY_DIR",
     str(_VIT_SERVICES_DIR / "reference_library"),
-)
-PI_REFERENCE_CAPTURE_WAIT_SEC = float(
-    os.getenv("PI_REFERENCE_CAPTURE_WAIT_SEC", "10")
 )
 
 # MobileCLIP detection. Image-to-image matching now runs in the browser (the

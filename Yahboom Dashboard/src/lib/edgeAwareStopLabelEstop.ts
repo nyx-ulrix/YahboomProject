@@ -9,11 +9,13 @@ const EDGE_AWARE_COOLDOWN_MS = 5_000;
 
 export type VitReferenceMatch = {
   label: string;
+  category?: string;
   sample_id?: number | null;
   similarity: number;
   similarity_percent: number;
   threshold: number;
   hit: boolean;
+  stop_hit?: boolean;
 };
 
 export type VitStatusForStopLabel = {
@@ -75,10 +77,12 @@ export function bestReferenceMatchConfidence(vit: VitStatusForStopLabel): number
   return ref.similarity_percent;
 }
 
-/** True when the latest reference match is a qualifying hit. */
+/** True when the latest match qualifies for edge stop (stop category only). */
 export function hasQualifyingReferenceMatch(vit: VitStatusForStopLabel): boolean {
   const ref = vit.latest?.reference_match;
-  if (!ref?.hit) return false;
+  if (!ref) return false;
+  const stopHit = ref.stop_hit ?? (ref.category === 'target_bottle' && ref.hit);
+  if (!stopHit) return false;
   return ref.similarity_percent >= EDGE_AWARE_MIN_CONFIDENCE;
 }
 
@@ -94,7 +98,8 @@ export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): b
   if (!latest || !key || key === lastHandledKey) return false;
 
   const ref = latest.reference_match;
-  if (!ref?.hit || ref.similarity_percent < EDGE_AWARE_MIN_CONFIDENCE) return false;
+  const stopHit = ref?.stop_hit ?? (ref?.category === 'target_bottle' && ref?.hit);
+  if (!ref || !stopHit || ref.similarity_percent < EDGE_AWARE_MIN_CONFIDENCE) return false;
 
   return triggerStopLabelStop(key, ref.similarity_percent, ref.label);
 }

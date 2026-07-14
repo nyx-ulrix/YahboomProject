@@ -1,18 +1,15 @@
 // Client image-to-image detection loop.
 //
 // The browser is fed ONLY by image embeddings the Pi generates (relayed by the
-// backend). It never encodes images itself. Each new Pi embedding is matched
-// against the dashboard reference library in the browser (image-to-image), and
-// the result is posted back so /api/vit/status, the widget, and the CSV stay
-// populated. The stop itself is driven by the existing /api/vit/status poll in
-// useEdgeAwareStopLabelEstop (fed by the match recorded here).
-//
-// Both modes use this loop: Edge Only = Pi sends every embedding (Cae_OFF);
-// Cache Aware = Pi sends only cache-miss embeddings (Cae_ON).
+// backend). Each new Pi embedding is matched against the full dashboard
+// reference library in the browser (image-to-image), and the result is posted
+// back so /api/vit/status, the widget, and the CSV stay populated. Edge stop
+// fires only when stop_hit is true (default: best match is target_bottle).
 
 import { useEffect } from 'react';
 import {
   base64ToFloat32,
+  getLibraryEmbeddingSizeBytes,
   isReferenceLoaded,
   loadReferenceLibrary,
 } from './clientVit/referenceStore';
@@ -46,8 +43,18 @@ export function useClientReferenceDetection() {
         if (!data.data || seq === 0 || seq === lastSeq) return;
         lastSeq = seq;
 
-        if (!isReferenceLoaded()) {
-          const ok = await loadReferenceLibrary();
+        const embedSize = data.embedding_size ?? (
+          data.embedding_dim != null ? data.embedding_dim * 4 : null
+        );
+        const loadedSize = getLibraryEmbeddingSizeBytes();
+        if (
+          embedSize != null
+          && (!isReferenceLoaded() || loadedSize !== embedSize)
+        ) {
+          const ok = await loadReferenceLibrary(embedSize, true);
+          if (!ok || !alive) return;
+        } else if (!isReferenceLoaded()) {
+          const ok = await loadReferenceLibrary(embedSize ?? undefined, true);
           if (!ok || !alive) return;
         }
 
@@ -62,10 +69,12 @@ export function useClientReferenceDetection() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               label: match.label,
+              category: match.category,
               sample_id: match.sampleId,
               similarity: match.similarity,
               threshold: match.threshold,
               hit: match.hit,
+              stop_hit: match.stopHit,
               embedding_dim: match.embeddingDim,
               embedding_size: data.embedding_size ?? live.length * 4,
               image_file_size: data.image_file_size ?? null,

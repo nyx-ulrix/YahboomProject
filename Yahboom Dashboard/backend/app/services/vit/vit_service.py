@@ -37,7 +37,7 @@ try:
     )
 except Exception:  # pragma: no cover - standalone import fallback
     VIT_REFERENCE_EMBEDDINGS_FILE = str(_HERE / "reference_embeddings.json")
-    VIT_REFERENCE_LABEL = "bottle"
+    VIT_REFERENCE_LABEL = "target bottle"
     VIT_REFERENCE_MATCH_ENABLED = True
     VIT_REFERENCE_DEFAULT_THRESHOLD = 0.70
     EDGE_AWARE_REFERENCE_THRESHOLD = 0.75
@@ -219,20 +219,26 @@ class ReferenceMatch:
     similarity: float
     threshold: float
     hit: bool
+    category: str | None = None
+    stop_hit: bool = False
 
     @property
     def similarity_percent(self) -> float:
         return round(self.similarity * 100, 2)
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "label": self.label,
             "sample_id": self.sample_id,
             "similarity": round(self.similarity, 4),
             "similarity_percent": self.similarity_percent,
             "threshold": self.threshold,
             "hit": self.hit,
+            "stop_hit": self.stop_hit,
         }
+        if self.category is not None:
+            out["category"] = self.category
+        return out
 
 
 class ReferenceEmbeddingStore:
@@ -854,9 +860,12 @@ class VITService:
         """
         try:
             label = str(payload.get("label", VIT_REFERENCE_LABEL))
+            category = payload.get("category")
+            category = str(category) if category is not None else None
             similarity = float(payload.get("similarity", 0.0))
             threshold = float(payload.get("threshold", EDGE_AWARE_REFERENCE_THRESHOLD))
             hit = bool(payload.get("hit", False))
+            stop_hit = bool(payload.get("stop_hit", False))
             sample_id = payload.get("sample_id")
             sample_id = int(sample_id) if sample_id is not None else None
         except (TypeError, ValueError) as exc:
@@ -872,6 +881,8 @@ class VITService:
             similarity=similarity,
             threshold=threshold,
             hit=hit,
+            category=category,
+            stop_hit=stop_hit,
         )
         results = [(label, reference_match.similarity_percent)]
         with self._lock:
@@ -1137,13 +1148,32 @@ class VITService:
         server_on = stream_on or encoder_live
         ref_store = self._reference_store
         try:
-            from app.services.vit.reference_capture_ssh import get_reference_capture_status
+            from app.services.vit.reference_capture import (
+                get_library_client_status,
+                get_reference_capture_status,
+            )
             ref_capture = get_reference_capture_status()
             active_category = ref_capture.get("active_category")
+            active_embedding_size_bytes = ref_capture.get("active_embedding_size_bytes")
             snapshot_count = ref_capture.get("snapshot_count", ref_store.count)
+            embed_size = (
+                self._requested_embed_bytes
+                or active_embedding_size_bytes
+                or 2048
+            )
+            lib_status = get_library_client_status(embed_size)
         except Exception:
             active_category = None
+            active_embedding_size_bytes = None
             snapshot_count = ref_store.count if ref_store.ready else 0
+            lib_status = {
+                "library_count": ref_store.count if ref_store.ready else 0,
+                "stop_category_count": 0,
+                "stop_category": "target_bottle",
+                "embedding_size_bytes": self._requested_embed_bytes or 2048,
+                "categories": [],
+            }
+        library_count = lib_status.get("library_count", 0)
         return {
             "connected": self._broker_link_up(),
             "broker_ip": self._broker_ip,
@@ -1159,13 +1189,17 @@ class VITService:
             "session_count": session_count,
             "latest": latest,
             "activity": activity,
-            "reference_ready": ref_store.ready,
-            "reference_count": ref_store.count,
+            "reference_ready": library_count > 0,
+            "reference_count": library_count,
             "reference_file": str(ref_store.file_path),
-            "reference_error": ref_store.error,
+            "reference_error": ref_store.error if library_count == 0 else None,
             "reference_match_enabled": ref_store.enabled,
             "reference_stop_threshold": EDGE_AWARE_REFERENCE_THRESHOLD,
+            "reference_stop_category": lib_status.get("stop_category"),
+            "reference_stop_ready": lib_status.get("stop_category_count", 0) > 0,
+            "reference_library_categories": lib_status.get("categories", []),
             "reference_active_category": active_category,
+            "reference_active_embedding_size_bytes": active_embedding_size_bytes,
             "reference_snapshot_count": snapshot_count,
             "detection_mode": self._detection_mode,
         }

@@ -1,23 +1,25 @@
 // Client image-to-image matching (cosine similarity via dot product).
 //
-// Mirrors the backend ReferenceEmbeddingStore.match(): L2-normalize the live Pi
-// embedding, compare it (same dimension only) against every reference vector, and
-// report the best match. A "hit" requires the similarity to clear the effective
-// threshold = max(sample threshold, stop threshold).
+// Scans every reference vector in the library and reports the best match for
+// scene-decoder display. Edge stop uses stopHit, which is true only when the
+// best match belongs to the stop category (default target_bottle).
 
 import {
   getReferenceVectorsForDim,
+  getStopCategory,
   getStopThreshold,
   hasReferenceVectors,
 } from './referenceStore';
 
 export type ClientReferenceMatch = {
   label: string;
+  category: string;
   sampleId: number | null;
   similarity: number;
   similarityPercent: number;
   threshold: number; // effective threshold used for the hit test
-  hit: boolean;
+  hit: boolean; // display hit — any category above threshold
+  stopHit: boolean; // edge stop — stop category only
   embeddingDim: number;
 };
 
@@ -38,7 +40,7 @@ function dot(a: Float32Array, b: Float32Array): number {
   return sum;
 }
 
-/** Best image-to-image match for a live Pi embedding, or null when none apply. */
+/** Best library match for a live Pi embedding, or null when none apply. */
 export function matchEmbedding(live: Float32Array): ClientReferenceMatch | null {
   if (!hasReferenceVectors() || live.length === 0) return null;
 
@@ -47,6 +49,7 @@ export function matchEmbedding(live: Float32Array): ClientReferenceMatch | null 
 
   const normalized = l2normalize(live);
   const stopThreshold = getStopThreshold();
+  const stopCategory = getStopCategory();
 
   let best: { similarity: number; index: number } | null = null;
   for (let i = 0; i < references.length; i++) {
@@ -58,13 +61,17 @@ export function matchEmbedding(live: Float32Array): ClientReferenceMatch | null 
   const ref = references[best.index];
   const effectiveThreshold = Math.max(ref.threshold, stopThreshold);
   const similarity = best.similarity;
+  const hit = similarity >= effectiveThreshold;
+  const stopHit = hit && ref.category === stopCategory;
   return {
     label: ref.label,
+    category: ref.category,
     sampleId: ref.sampleId,
     similarity,
     similarityPercent: Math.round(similarity * 100 * 100) / 100,
     threshold: effectiveThreshold,
-    hit: similarity >= effectiveThreshold,
+    hit,
+    stopHit,
     embeddingDim: live.length,
   };
 }

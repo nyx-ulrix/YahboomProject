@@ -1,11 +1,15 @@
 // Client-side reference library for image-to-image matching.
 //
-// Loads the active reference embeddings from the backend (GET /api/vit/reference/active),
-// decodes the base64 float32 blobs into normalized Float32Array vectors, and groups
-// them by embedding dimension. The browser matches Pi embeddings against these
-// vectors (see referenceMatch.ts). The backend no longer runs the live match.
+// Loads every category from the dashboard reference library (GET
+// /api/vit/reference/library), decodes base64 float32 blobs into normalized
+// vectors, and groups them by embedding dimension. The browser matches Pi
+// embeddings against all vectors for scene-decoder display; only the stop
+// category (default target_bottle) can trigger edge stop.
+
+export const STOP_REFERENCE_CATEGORY = 'target_bottle';
 
 export type ReferenceVector = {
+  category: string;
   sampleId: number | null;
   label: string;
   dim: number;
@@ -13,14 +17,16 @@ export type ReferenceVector = {
   vec: Float32Array; // L2-normalized
 };
 
-type ReferenceActiveResponse = {
+type ReferenceLibraryResponse = {
   status?: string;
-  active_category?: string | null;
-  label?: string;
+  embedding_size_bytes?: number | null;
+  stop_category?: string;
   default_threshold?: number;
   stop_threshold?: number;
   count?: number;
+  categories?: Array<{ category: string; snapshot_count: number }>;
   objects?: Array<{
+    category?: string;
     sample_id?: number | null;
     label?: string;
     embedding_dim?: number | null;
@@ -31,7 +37,9 @@ type ReferenceActiveResponse = {
 };
 
 let vectorsByDim = new Map<number, ReferenceVector[]>();
-let activeCategory: string | null = null;
+let libraryEmbeddingSizeBytes: number | null = null;
+let stopCategory = STOP_REFERENCE_CATEGORY;
+let libraryCategories: Array<{ category: string; snapshot_count: number }> = [];
 let stopThreshold = 0.75;
 let defaultThreshold = 0.7;
 let loaded = false;
@@ -57,17 +65,23 @@ function l2normalize(v: Float32Array): Float32Array {
   return out;
 }
 
-/** Fetch + parse the active reference library. Returns true when vectors loaded. */
-export async function loadReferenceLibrary(force = false): Promise<boolean> {
+/** Fetch + parse the full reference library. Returns true when vectors loaded. */
+export async function loadReferenceLibrary(
+  embeddingSizeBytes?: number | null,
+  force = false,
+): Promise<boolean> {
   if (inFlight && !force) return inFlight;
   const run = (async () => {
     try {
-      const res = await fetch('/api/vit/reference/active', { cache: 'no-store' });
+      const query = embeddingSizeBytes != null
+        ? `?embedding_size_bytes=${embeddingSizeBytes}`
+        : '';
+      const res = await fetch(`/api/vit/reference/library${query}`, { cache: 'no-store' });
       if (!res.ok) {
-        loadError = `reference fetch failed (${res.status})`;
+        loadError = `reference library fetch failed (${res.status})`;
         return false;
       }
-      const data = (await res.json()) as ReferenceActiveResponse;
+      const data = (await res.json()) as ReferenceLibraryResponse;
       const next = new Map<number, ReferenceVector[]>();
       for (const obj of data.objects ?? []) {
         let raw: Float32Array | null = null;
@@ -77,8 +91,9 @@ export async function loadReferenceLibrary(force = false): Promise<boolean> {
         const dim = obj.embedding_dim ?? raw.length;
         const vec = l2normalize(raw);
         const entry: ReferenceVector = {
+          category: obj.category ?? 'unknown',
           sampleId: obj.sample_id ?? null,
-          label: obj.label ?? data.label ?? 'bottle',
+          label: obj.label ?? 'target bottle',
           dim,
           threshold: obj.threshold ?? data.default_threshold ?? 0.7,
           vec,
@@ -88,11 +103,13 @@ export async function loadReferenceLibrary(force = false): Promise<boolean> {
         else next.set(dim, [entry]);
       }
       vectorsByDim = next;
-      activeCategory = data.active_category ?? null;
+      libraryEmbeddingSizeBytes = data.embedding_size_bytes ?? embeddingSizeBytes ?? null;
+      stopCategory = data.stop_category ?? STOP_REFERENCE_CATEGORY;
+      libraryCategories = data.categories ?? [];
       stopThreshold = data.stop_threshold ?? stopThreshold;
       defaultThreshold = data.default_threshold ?? defaultThreshold;
       loaded = true;
-      loadError = next.size === 0 ? 'no reference vectors' : null;
+      loadError = next.size === 0 ? 'no reference vectors in library' : null;
       return next.size > 0;
     } catch (err) {
       loadError = err instanceof Error ? err.message : 'reference load error';
@@ -117,8 +134,16 @@ export function getStopThreshold(): number {
   return stopThreshold;
 }
 
-export function getActiveCategory(): string | null {
-  return activeCategory;
+export function getStopCategory(): string {
+  return stopCategory;
+}
+
+export function getLibraryEmbeddingSizeBytes(): number | null {
+  return libraryEmbeddingSizeBytes;
+}
+
+export function getLibraryCategories(): Array<{ category: string; snapshot_count: number }> {
+  return libraryCategories;
 }
 
 export function isReferenceLoaded(): boolean {

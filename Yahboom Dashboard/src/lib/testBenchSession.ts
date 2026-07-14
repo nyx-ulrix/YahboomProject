@@ -50,6 +50,14 @@ export function notifyTestBenchManualStop(reason?: string) {
   onManualStopDuringSession?.();
 }
 
+/** Explore disengaged via auto_off — wait for Pi drive-status auto_disabled to end the run. */
+export function notifyTestBenchAutoOffPending(reason?: string) {
+  if (!benchSessionActive || edgeAwareStopLabelActive) return;
+  pendingStopReason = reason ?? pendingStopReason ?? 'Mission test — explore disengaged';
+  pendingStopIsStopLabel = false;
+  onManualStopDuringSession?.();
+}
+
 /** Bottle / edge-aware stop-label — freezes the live timer immediately. */
 export function notifyTestBenchStopLabelStop(confidence?: number) {
   pendingStopReason = 'Mission test — bottle detected';

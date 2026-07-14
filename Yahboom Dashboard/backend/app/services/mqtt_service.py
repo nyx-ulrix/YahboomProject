@@ -480,6 +480,13 @@ class MQTTService:
             parsed = self._parse_detect_status(raw)
             if parsed:
                 self.latest_cache_detection = parsed
+                label = parsed.get("label") or "object"
+                pct = parsed.get("similarity_percent")
+                self.log_event(
+                    "info",
+                    f"Cache detect: {label} {pct}%",
+                    tag=DETECT_STATUS_TOPIC,
+                )
             return
 
         return

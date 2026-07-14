@@ -1,5 +1,10 @@
 import { useMetricsStore } from '../app/store';
-import { notifyTestBenchManualStop, benchModeHasDashboardBottleStop, skipAutoOffOnBenchStop } from './testBenchSession';
+import {
+  notifyTestBenchAutoOffPending,
+  notifyTestBenchManualStop,
+  benchModeHasDashboardBottleStop,
+  skipAutoOffOnBenchStop,
+} from './testBenchSession';
 /**
  * Engage or release the emergency stop on both the local store and the shared
  * backend, so every connected client reflects the change within ~3 seconds.
@@ -215,6 +220,10 @@ export function sendCommand(command: BotCommand, source?: CommandSource): void {
     && state.estopActive
   ) return;
 
+  if (command === 'auto_off') {
+    notifyTestBenchAutoOffPending();
+  }
+
   // Manual stop also turns off explore/auto on the Pi so the robot disengages.
   if (
     command === 'stop'
@@ -224,7 +233,7 @@ export function sendCommand(command: BotCommand, source?: CommandSource): void {
   ) {
     sendCommand('auto_off');
   }
-  if (command === 'stop' && source === 'manual') {
+  if (command === 'stop' && source === 'manual' && !state.autoRunning) {
     notifyTestBenchManualStop();
   }
 
@@ -340,8 +349,6 @@ export function toggleRosAuto(): void {
   const state = useMetricsStore.getState();
   if (state.autoRunning) {
     sendCommand('auto_off');
-    // Explicitly halt motion when exploration is turned off.
-    sendCommand('stop', 'manual');
     return;
   }
   if (state.estopActive) return;

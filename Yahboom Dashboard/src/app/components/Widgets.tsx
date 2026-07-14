@@ -12,6 +12,7 @@ import type { WidgetDefinition, MetricsState } from '../types';
 import { sendCommand, sendCameraCommand, setEstopState, toggleRosAuto, vecToCommand, vecToCameraCommand } from '../../lib/Controls';
 import { setEdgeAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/edgeAwareStopLabelEstop';
 import { loadReferenceLibrary } from '../../lib/clientVit/referenceStore';
+import { uploadEmbeddingsDef } from './UploadEmbeddingsWidget';
 import {
   benchNeedsPiScript,
   benchHasDashboardBottleStop,
@@ -1087,7 +1088,7 @@ type VitStatusResponse = {
   connected: boolean;
   broker_ip: string | null;
   vit_server_running: boolean;
-  /** SSH probe or recent MQTT embeddings — encoder pipeline is active. */
+  /** Recent MQTT embeddings — encoder pipeline is active. */
   encoder_live?: boolean;
   model_enabled: boolean;
   model_ready: boolean;
@@ -1104,7 +1105,11 @@ type VitStatusResponse = {
   reference_error?: string | null;
   reference_match_enabled?: boolean;
   reference_stop_threshold?: number;
+  reference_stop_category?: string;
+  reference_stop_ready?: boolean;
+  reference_library_categories?: Array<{ category: string; snapshot_count: number }>;
   reference_active_category?: string | null;
+  reference_active_embedding_size_bytes?: number | null;
   reference_snapshot_count?: number;
   detection_mode?: 'edge_aware' | 'cache_aware_offloading';
   latest: {
@@ -1114,11 +1119,13 @@ type VitStatusResponse = {
     match_mode?: string;
     reference_match?: {
       label: string;
+      category?: string;
       sample_id?: number | null;
       similarity: number;
       similarity_percent: number;
       threshold: number;
       hit: boolean;
+      stop_hit?: boolean;
     };
     text_results?: VitDetection[];
     results: VitDetection[];
@@ -1134,6 +1141,8 @@ type VitReferenceCategory = {
   category: string;
   snapshot_count: number;
   active?: boolean;
+  active_embedding_size_bytes?: number | null;
+  sizes?: Array<{ embedding_size_bytes: number; snapshot_count: number }>;
 };
 
 const REFERENCE_CATEGORY_RE = /^[a-z0-9_-]{1,48}$/;
@@ -1287,7 +1296,7 @@ function VitDecoderWidget() {
   const fileSizeInitRef = useRef(false);
   const lastEmbedCommitRef = useRef<number | null>(null);
   const [exporting, setExporting] = useState(false);
-  const [refCategory, setRefCategory] = useState('bottle');
+  const [refCategory, setRefCategory] = useState('target_bottle');
   const [refCategories, setRefCategories] = useState<VitReferenceCategory[]>([]);
   const [capturingRef, setCapturingRef] = useState(false);
   const [activatingRef, setActivatingRef] = useState(false);
@@ -1346,32 +1355,51 @@ function VitDecoderWidget() {
     setCapturingRef(true);
     setRefMessage(null);
     try {
-      const res = await fetch('/api/vit/reference/capture', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ category: normalizedRefCategory, label: 'bottle' }),
-      });
+      const embRes = await fetch('/api/vit/client/latest_embedding', { cache: 'no-store' });
+      if (!embRes.ok) {
+        setRefMessage('No Pi embedding available — start VIT.py on the Pi');
+        return;
+      }
+      const emb = await embRes.json() as { seq?: number; data?: string | null };
+      if (!emb.data || !emb.seq) {
+        setRefMessage('Waiting for Pi embedding — point the camera at your object');
+        return;
+      }
+
+      const form = new FormData();
+      form.append('category', normalizedRefCategory);
+      form.append('label', 'target bottle');
+      form.append('seq', String(emb.seq));
+
+      const res = await fetch('/api/vit/reference/capture', { method: 'POST', body: form });
       const data = await res.json() as {
         status?: string;
         message?: string;
         sample_id?: number;
         total?: number;
         category?: string;
+        embedding_size_bytes?: number;
       };
       if (!res.ok || data.status === 'error') {
         setRefMessage(data.message ?? 'Capture failed');
         return;
       }
+      const sizeNote = data.embedding_size_bytes ? ` @ ${data.embedding_size_bytes} B` : '';
       setRefMessage(
-        `Saved sample ${data.sample_id ?? '?'} (${data.total ?? '?'} in ${data.category ?? normalizedRefCategory})`,
+        `Saved sample ${data.sample_id ?? '?'} (${data.total ?? '?'} in ${data.category ?? normalizedRefCategory}${sizeNote})`,
       );
+      void loadReferenceLibrary(data.embedding_size_bytes ?? maxEmbedBytes, true);
+      const statusRes = await fetch('/api/vit/status', { cache: 'no-store' });
+      if (statusRes.ok) {
+        setStatus(await statusRes.json() as VitStatusResponse);
+      }
       const catRes = await fetch('/api/vit/reference/categories', { cache: 'no-store' });
       if (catRes.ok) {
         const catData = await catRes.json() as { categories?: VitReferenceCategory[] };
         setRefCategories(catData.categories ?? []);
       }
     } catch {
-      setRefMessage('Capture failed — SSH or Pi encoder unavailable');
+      setRefMessage('Capture failed — Pi encoder or video stream unavailable');
     } finally {
       setCapturingRef(false);
     }
@@ -1385,16 +1413,25 @@ function VitDecoderWidget() {
       const res = await fetch('/api/vit/reference/activate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ category: normalizedRefCategory }),
+        body: JSON.stringify({
+          category: normalizedRefCategory,
+          embedding_size_bytes: maxEmbedBytes,
+        }),
       });
-      const data = await res.json() as { status?: string; message?: string; category?: string };
+      const data = await res.json() as {
+        status?: string;
+        message?: string;
+        category?: string;
+        embedding_size_bytes?: number;
+      };
       if (!res.ok || data.status === 'error') {
-        setRefMessage(data.message ?? 'Activate failed — capture and sync first');
+        setRefMessage(data.message ?? 'Activate failed — capture at this embedding size first');
         return;
       }
-      setRefMessage(`Active: ${data.category ?? normalizedRefCategory}`);
+      const sizeLabel = data.embedding_size_bytes ? ` @ ${data.embedding_size_bytes} B` : '';
+      setRefMessage(`Active: ${data.category ?? normalizedRefCategory}${sizeLabel}`);
       // Refresh the browser i2i reference vectors for the newly activated category.
-      void loadReferenceLibrary(true);
+      void loadReferenceLibrary(maxEmbedBytes, true);
       const statusRes = await fetch('/api/vit/status', { cache: 'no-store' });
       if (statusRes.ok) {
         setStatus(await statusRes.json() as VitStatusResponse);
@@ -1436,11 +1473,37 @@ function VitDecoderWidget() {
     setMaxEmbedBytes(bytes);
   };
 
+  const tryActivateReferenceSize = async (bytes: number) => {
+    if (!refCategoryValid) return;
+    try {
+      const res = await fetch('/api/vit/reference/activate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          category: normalizedRefCategory,
+          embedding_size_bytes: bytes,
+        }),
+      });
+      if (!res.ok) return;
+      const data = await res.json() as { status?: string; embedding_size_bytes?: number };
+      if (data.status !== 'ok') return;
+      void loadReferenceLibrary(bytes, true);
+      const statusRes = await fetch('/api/vit/status', { cache: 'no-store' });
+      if (statusRes.ok) {
+        setStatus(await statusRes.json() as VitStatusResponse);
+      }
+    } catch {
+      /* no library at this size yet */
+    }
+  };
+
   const onEmbedSliderCommit = (sliderIndex: number) => {
     // Network side-effect only on commit (mouse up / touch end / click release).
     const bytes = vitEmbedSliderIndexToBytes(sliderIndex);
     setMaxEmbedBytes(bytes);
     void commitEmbedSize(bytes);
+    void loadReferenceLibrary(bytes, true);
+    void tryActivateReferenceSize(bytes);
   };
 
   const exportCsv = async () => {
@@ -1469,7 +1532,7 @@ function VitDecoderWidget() {
   };
 
   const latest = status?.latest ?? null;
-  // Show detections while SSH or MQTT confirms the encoder pipeline is active.
+  // Show detections while MQTT confirms the encoder pipeline is active.
   const displayLatest = encoderLive ? latest : null;
 
   // Detection is image-to-image and runs in the browser for both modes: the
@@ -1519,15 +1582,20 @@ function VitDecoderWidget() {
     activity: status?.activity,
   });
 
+  const referenceStopCategory = status?.reference_stop_category ?? 'target_bottle';
+  const referenceStopReady = status?.reference_stop_ready ?? false;
+  const libraryCategoryCount = status?.reference_library_categories?.length ?? 0;
+
   const detectionHint = (() => {
     if (!referenceReady) {
-      return 'Capture reference snapshots on the Pi, then activate a category';
+      return 'Capture reference snapshots into the library (any category)';
     }
     if (isReferenceMatch && referenceMatch) {
       const sample = referenceMatch.sample_id != null
-        ? ` (sample ${referenceMatch.sample_id})`
+        ? ` · sample ${referenceMatch.sample_id}`
         : '';
-      return `${referenceMatch.label} — reference match${sample}`;
+      const cat = referenceMatch.category ? ` · ${referenceMatch.category}` : '';
+      return `${referenceMatch.label}${cat}${sample}`;
     }
     if (detectionMode === 'edge_aware') {
       if (!encoderLive) return 'Waiting for Pi embeddings — start VIT.py on the Pi';
@@ -1588,7 +1656,15 @@ function VitDecoderWidget() {
               marginLeft: 'auto', padding: '1px 6px', fontSize: 8, fontWeight: 700,
               background: 'rgba(34,197,94,0.18)', color: accents.green,
             }}>
-              HIT
+              MATCH
+            </span>
+          )}
+          {isReferenceMatch && referenceMatch?.stop_hit && (
+            <span className="pill" style={{
+              marginLeft: 6, padding: '1px 6px', fontSize: 8, fontWeight: 700,
+              background: 'rgba(244,63,94,0.18)', color: accents.red,
+            }}>
+              STOP
             </span>
           )}
           {!isReferenceMatch && displayLatest?.alert && (
@@ -1613,7 +1689,7 @@ function VitDecoderWidget() {
           <div className="flex flex-col gap-0.5">
             <div className="flex items-center justify-between gap-2">
               <span className="truncate" style={{ fontSize: 11, color: confColor }}>
-                {`${referenceMatch.label}${referenceMatch.sample_id != null ? ` · sample ${referenceMatch.sample_id}` : ''}`}
+                {`${referenceMatch.label}${referenceMatch.category ? ` · ${referenceMatch.category}` : ''}${referenceMatch.sample_id != null ? ` · sample ${referenceMatch.sample_id}` : ''}`}
               </span>
               <span style={{ fontSize: 11, fontWeight: 700, color: confColor, fontFamily: 'monospace' }}>
                 {referenceMatch.similarity_percent.toFixed(1)}%
@@ -1632,22 +1708,22 @@ function VitDecoderWidget() {
         ) : (
           <div className="flex-1 flex items-center justify-center text-center px-2" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             {!referenceReady
-              ? 'Capture reference snapshots below, then activate a category'
+              ? 'Capture reference snapshots below — library scan runs automatically'
               : detectionMode === 'edge_aware'
                 ? (!encoderLive
                     ? 'Waiting for Pi embeddings — start VIT.py on the Pi'
-                    : 'Client matching Pi embeddings — similarity will appear here')
+                    : 'Scanning full reference library — similarity will appear here')
                 : 'Cache Aware — waiting for a Pi cache-miss embedding'}
           </div>
         )}
         <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
           {referenceReady
-            ? `${status?.reference_count ?? 0} reference sample${(status?.reference_count ?? 0) === 1 ? '' : 's'} · ${status?.reference_active_category ?? 'active'}`
-            : 'no reference loaded'}
+            ? `${status?.reference_count ?? 0} sample${(status?.reference_count ?? 0) === 1 ? '' : 's'} · ${libraryCategoryCount} categor${libraryCategoryCount === 1 ? 'y' : 'ies'} · stop: ${referenceStopCategory}${referenceStopReady ? '' : ' (no samples)'}`
+            : 'no reference library loaded'}
         </span>
       </div>
 
-      {/* Reference capture — SSH to Pi, SFTP sync to categorized folders */}
+      {/* Reference capture — latest Pi embedding only */}
       <div className="flex-shrink-0 rounded-xl px-3 py-2 flex flex-col gap-1.5"
         style={{ background: 'rgba(0,0,0,0.12)', border: '1px solid var(--stroke-subtle)' }}>
         <div className="flex items-center justify-between gap-2">
@@ -1659,7 +1735,7 @@ function VitDecoderWidget() {
               padding: '1px 6px', fontSize: 8, fontWeight: 700,
               background: 'rgba(34,197,94,0.14)', color: accents.green,
             }}>
-              {`${status.reference_active_category} · ${status.reference_snapshot_count ?? 0}`}
+              {`${status.reference_active_category}${status.reference_active_embedding_size_bytes ? ` · ${status.reference_active_embedding_size_bytes} B` : ''} · ${status.reference_snapshot_count ?? 0}`}
             </span>
           )}
         </div>
@@ -1667,7 +1743,7 @@ function VitDecoderWidget() {
           <input
             value={refCategory}
             onChange={(e) => setRefCategory(e.target.value)}
-            placeholder="category e.g. black_bottle"
+            placeholder="category e.g. target_bottle"
             className="flex-1 min-w-0 rounded-md px-2 py-1"
             style={{
               fontSize: 10,
@@ -1701,7 +1777,7 @@ function VitDecoderWidget() {
           <button
             onClick={() => void captureReferenceSnapshot()}
             disabled={!refCategoryValid || capturingRef || !encoderLive}
-            title={encoderLive ? 'SSH capture one embedding from Pi camera' : 'Start Pi encoder first'}
+            title={encoderLive ? 'Save latest Pi MQTT embedding' : 'Start VIT.py on the Pi first'}
             className="flex items-center gap-1"
             style={{
               padding: '3px 8px', borderRadius: 6, fontSize: 9, fontWeight: 700,
@@ -1717,7 +1793,7 @@ function VitDecoderWidget() {
           <button
             onClick={() => void activateReferenceCategory()}
             disabled={!refCategoryValid || activatingRef}
-            title="Use this category for edge reference matching"
+            title="Use this category at the current embedding size for matching"
             style={{
               padding: '3px 8px', borderRadius: 6, fontSize: 9, fontWeight: 700,
               border: '1px solid var(--stroke-strong)',
@@ -1919,12 +1995,23 @@ const DRIVE_PRE_MOVE_STATUSES = new Set([
 ]);
 const ROBOT_TIME_POLL_MS = 100;
 const MOVEMENT_WAIT_MS = 30000;
-/** After a manual stop is sent, wait for Pi drive-status `stopped` before recording time. */
-const STOP_COMMAND_WAIT_MS = 8000;
+/** After auto_off is sent, warn if Pi has not acked within this window (still keeps waiting). */
+const AUTO_OFF_WARN_MS = 8000;
 
-function isPiStopCommandStatus(status: string | undefined, acceptAutoDisabled = false): boolean {
-  if (status === 'stopped') return true;
-  if (acceptAutoDisabled && status === 'auto_disabled') return true;
+/** Pi acknowledged auto_off — the only drive-status that ends a bench run. */
+function isPiAutoOffStatus(status: string | undefined): boolean {
+  return status === 'auto_disabled';
+}
+
+/** True when the Pi has processed auto_off (primary: auto_disabled; fallback while waiting). */
+function isPiAutoOffAck(
+  drive: DriveStatusPayload | null | undefined,
+  awaitingAutoOff: boolean,
+): boolean {
+  if (!drive) return false;
+  if (isPiAutoOffStatus(drive.status)) return true;
+  // Brief auto_disabled can be missed between polls; auto_mode clears on auto_off.
+  if (awaitingAutoOff && drive.auto_mode === false) return true;
   return false;
 }
 
@@ -1943,16 +2030,6 @@ function isEstopDriveStatus(status: string | undefined): boolean {
   if (!status) return false;
   if (status === 'estop_active') return true;
   return status.startsWith('blocked_by_estop');
-}
-
-/** True when the Pi reports the robot is no longer driving (incl. unlisted halt strings). */
-function isStopDriveStatus(status: string | undefined): boolean {
-  if (!status || status === 'unknown') return false;
-  if (isEstopDriveStatus(status)) return false;
-  if (DRIVE_STOP_STATUSES.has(status)) return true;
-  // Any other non-movement status after we've seen motion (e.g. future Pi statuses).
-  if (!isMovementDriveStatus(status) && !DRIVE_PRE_MOVE_STATUSES.has(status)) return true;
-  return false;
 }
 
 /** Pi `time.time()` seconds (or ms) → epoch ms. */
@@ -2138,6 +2215,7 @@ function StopTestBenchWidget() {
   const firstStopTsRef = useRef<number | null>(null);
   const stopSourceRef = useRef<StopSource | null>(null);
   const stopConfidenceRef = useRef<number | null>(null);
+  const autoOffWarnedRef = useRef(false);
   const latestCacheDetectionRef = useRef<CacheDetectionApi['detection'] | null>(null);
   const cacheDetectPollCountRef = useRef(0);
   const networkTypeRef = useRef(networkType);
@@ -2175,16 +2253,17 @@ function StopTestBenchWidget() {
   useEffect(() => {
     setTestBenchManualStopHook(() => {
       if (!sessionActiveRef.current) return;
-      stopCommandPendingRef.current = true;
-      stopCommandPendingAtRef.current = Date.now();
-      firstStopTsRef.current = null;
-      preMoveStopReasonRef.current = takeTestBenchStopReason() ?? null;
       const isStopLabel = takeTestBenchStopIsStopLabel();
       const confidence = takeTestBenchStopConfidence();
+      if (!stopCommandPendingRef.current) {
+        stopCommandPendingRef.current = true;
+        stopCommandPendingAtRef.current = Date.now();
+        firstStopTsRef.current = null;
+      }
+      preMoveStopReasonRef.current = takeTestBenchStopReason() ?? null;
       if (isStopLabel) {
         latchStopSource('edge_dashboard');
         if (confidence != null) stopConfidenceRef.current = confidence;
-        // Edge bottle stop fires in any mode — disengage explore on the dashboard.
         if (useMetricsStore.getState().autoRunning) {
           sendCommand('auto_off');
         }
@@ -2266,12 +2345,14 @@ function StopTestBenchWidget() {
     clearEdgeAwareStopLabelBenchStop();
     stopSourceRef.current = null;
     stopConfidenceRef.current = null;
+    autoOffWarnedRef.current = false;
     latestCacheDetectionRef.current = null;
     cacheDetectPollCountRef.current = 0;
     setFrozenElapsedMs(null);
     setStopLabelEstopArmed(false);
     setCommandSentAt(null);
     setActiveStart(null);
+    setTestBenchSessionActive(false);
     // START always enables explore — release manual-drive lock when the session ends.
     if (hadSession && !skipAutoOffAfterBenchRun(recordedStopSource)) {
       const { autoRunning, autoMode } = useMetricsStore.getState();
@@ -2279,7 +2360,6 @@ function StopTestBenchWidget() {
         sendCommand('auto_off');
       }
     }
-    setTestBenchSessionActive(false);
   }, []);
 
   const captureStopMetrics = useCallback(async (source: StopSource) => {
@@ -2331,14 +2411,53 @@ function StopTestBenchWidget() {
     }
   }, []);
 
-  const tryEndRunOnPiStopCommand = useCallback(async (drive: DriveStatusPayload | null) => {
-    const startTs = activeStartRef.current;
-    if (startTs == null || !armedRef.current) return false;
-    const acceptAutoDisabled = stopCommandPendingRef.current;
-    if (!drive?.status || !isPiStopCommandStatus(drive.status, acceptAutoDisabled)) return false;
+  const isAwaitingAutoOff = useCallback(() => (
+    stopCommandPendingRef.current
+    || isEdgeAwareStopLabelBenchStop()
+    || stopSourceRef.current != null
+    || (sessionActiveRef.current && armedRef.current)
+  ), []);
 
-    const stopTs = robotMsFromPayload(drive as Record<string, unknown>);
-    if (stopTs == null) return false;
+  const warnAutoOffStillPending = useCallback(() => {
+    if (autoOffWarnedRef.current) return;
+    autoOffWarnedRef.current = true;
+    useMetricsStore.getState().pushEvent(
+      'warning',
+      'Mission test — robot stopped, waiting for Pi auto_off (drive-status auto_disabled)…',
+    );
+  }, []);
+
+  const armMissionTimerIfNeeded = useCallback((moveTs?: number | null) => {
+    if (activeStartRef.current != null) return;
+    const cmdAt = commandSentAtRef.current;
+    if (cmdAt == null) return;
+    const startTs = moveTs != null && moveTs > cmdAt ? moveTs : cmdAt;
+    activeStartRef.current = startTs;
+    armedRef.current = true;
+    setActiveStart(startTs);
+  }, []);
+
+  const tryEndRunOnPiAutoOff = useCallback(async (drive: DriveStatusPayload | null) => {
+    const startTs = activeStartRef.current ?? commandSentAtRef.current;
+    if (startTs == null) return false;
+
+    const cacheStop = stopSourceRef.current === 'cache_pi'
+      || latestCacheDetectionRef.current != null;
+    const missionArmed = armedRef.current
+      || stopCommandPendingRef.current
+      || cacheStop;
+    if (!missionArmed) return false;
+    if (!isPiAutoOffAck(drive, isAwaitingAutoOff())) return false;
+
+    if (activeStartRef.current == null && commandSentAtRef.current != null) {
+      armMissionTimerIfNeeded();
+    }
+
+    const runStartTs = activeStartRef.current ?? commandSentAtRef.current ?? startTs;
+
+    const stopTs = robotMsFromPayload(drive as Record<string, unknown>)
+      ?? lastPiMsRef.current
+      ?? Date.now();
 
     if (firstStopTsRef.current == null || stopTs < firstStopTsRef.current) {
       firstStopTsRef.current = stopTs;
@@ -2347,7 +2466,7 @@ function StopTestBenchWidget() {
     if (!stopSourceRef.current) {
       if (isEdgeAwareStopLabelBenchStop() || stopCommandPendingRef.current) {
         latchStopSource('edge_dashboard');
-      } else if (benchNeedsPiScript(stopModeRef.current)) {
+      } else if (benchNeedsPiScript(stopModeRef.current) || cacheStop) {
         latchStopSource('cache_pi');
       }
     }
@@ -2362,30 +2481,22 @@ function StopTestBenchWidget() {
     }
     stopCommandPendingRef.current = false;
     stopCommandPendingAtRef.current = null;
-    await endRun(resolveStopMs(startTs, firstStopTsRef.current));
+    await endRun(resolveStopMs(runStartTs, firstStopTsRef.current));
     return true;
-  }, [disableAutoRoam, endRun, freezeTimerAtNow, latchStopSource]);
+  }, [armMissionTimerIfNeeded, disableAutoRoam, endRun, freezeTimerAtNow, isAwaitingAutoOff, latchStopSource]);
 
-  const tryEndRunFromStopSignal = useCallback(async (drive: DriveStatusPayload | null) => {
-    const startTs = activeStartRef.current;
-    if (startTs == null || !armedRef.current) return;
-    if (!stopSourceRef.current) {
-      if (isEdgeAwareStopLabelBenchStop() || stopCommandPendingRef.current) {
-        latchStopSource('edge_dashboard');
-      } else if (benchNeedsPiScript(stopModeRef.current)) {
-        latchStopSource('cache_pi');
-      }
+  const latchCacheDetectionStop = useCallback((detection: CacheDetectionApi['detection']) => {
+    if (!detection || cacheDetectionSimilarityPercent(detection) == null) return;
+    latestCacheDetectionRef.current = detection;
+    latchStopSource('cache_pi');
+    armMissionTimerIfNeeded();
+    if (!stopCommandPendingRef.current) {
+      stopCommandPendingRef.current = true;
+      stopCommandPendingAtRef.current = Date.now();
+      firstStopTsRef.current = null;
     }
-    if (
-      stopModeRef.current === 'cache_aware_offloading'
-      || isEdgeAwareStopLabelBenchStop()
-    ) {
-      freezeTimerAtNow();
-    }
-    const fromDrive = drive ? robotMsFromPayload(drive as Record<string, unknown>) : null;
-    const stopTs = fromDrive ?? await fetchLatestRobotMs();
-    await endRun(resolveStopMs(startTs, stopTs));
-  }, [endRun, freezeTimerAtNow, latchStopSource]);
+    freezeTimerAtNow();
+  }, [armMissionTimerIfNeeded, freezeTimerAtNow, latchStopSource]);
 
   const cancelSession = useCallback((message: string) => {
     if (!sessionActiveRef.current) return;
@@ -2467,30 +2578,39 @@ function StopTestBenchWidget() {
       const drive = await fetchDriveStatus();
       if (!alive) return;
 
+      // Cache-aware Pi stop: poll yahboom/detect/status for the whole session.
+      if (sessionActiveRef.current && benchNeedsPiScript(stopModeRef.current)) {
+        cacheDetectPollCountRef.current += 1;
+        if (cacheDetectPollCountRef.current % 2 === 0) {
+          const detection = await fetchLatestCacheDetectionForStop(
+            latestCacheDetectionRef.current,
+          );
+          if (detection && alive) {
+            latchCacheDetectionStop(detection);
+          }
+        }
+      }
+
       if (activeStartRef.current == null) {
-        if (stopCommandPendingRef.current) {
-          if (drive?.status && isPiStopCommandStatus(drive.status, true)) {
-            if (!isEdgeAwareStopLabelBenchStop()) {
-              disableAutoRoam();
-            } else {
-              freezeTimerAtNow();
-            }
-            stopCommandPendingRef.current = false;
-            stopCommandPendingAtRef.current = null;
-            cancelPreMoveStop();
+        const awaitingAutoOff = isAwaitingAutoOff();
+        if (drive && isPiAutoOffAck(drive, awaitingAutoOff)) {
+          const cacheStop = stopSourceRef.current === 'cache_pi'
+            || latestCacheDetectionRef.current != null;
+          if (cacheStop) {
+            await tryEndRunOnPiAutoOff(drive);
             return;
           }
+          cancelPreMoveStop();
+          return;
+        }
+
+        if (stopCommandPendingRef.current) {
           const pendingAt = stopCommandPendingAtRef.current;
-          if (pendingAt != null && Date.now() - pendingAt > STOP_COMMAND_WAIT_MS) {
-            if (!isEdgeAwareStopLabelBenchStop()) {
-              disableAutoRoam();
-            } else {
-              freezeTimerAtNow();
-            }
-            stopCommandPendingRef.current = false;
-            stopCommandPendingAtRef.current = null;
-            cancelPreMoveStop('timeout');
-            return;
+          if (pendingAt != null && Date.now() - pendingAt > AUTO_OFF_WARN_MS) {
+            warnAutoOffStillPending();
+          }
+          if (drive && isPiAutoOffAck(drive, true)) {
+            await tryEndRunOnPiAutoOff(drive);
           }
           return;
         }
@@ -2518,51 +2638,43 @@ function StopTestBenchWidget() {
             && moveTs > cmdAt
             && isMovementDriveStatus(drive.status)
           ) {
-            activeStartRef.current = moveTs;
-            armedRef.current = true;
-            setActiveStart(moveTs);
+            armMissionTimerIfNeeded(moveTs);
+            syncPiSample(moveTs);
+          } else if (
+            benchNeedsPiScript(stopModeRef.current)
+            && drive.auto_mode === true
+            && moveTs != null
+            && cmdAt != null
+            && moveTs > cmdAt
+          ) {
+            // Auto explore engaged (e.g. blocked) — start mission clock for cache-aware runs.
+            armMissionTimerIfNeeded(moveTs);
             syncPiSample(moveTs);
           }
         }
         return;
       }
 
-      if (!armedRef.current) return;
+      if (!armedRef.current && stopSourceRef.current !== 'cache_pi') return;
 
-      if (benchNeedsPiScript(stopModeRef.current)) {
-        cacheDetectPollCountRef.current += 1;
-        if (cacheDetectPollCountRef.current % 5 === 0) {
-          const detection = await fetchLatestCacheDetection();
-          if (detection) latestCacheDetectionRef.current = detection;
-        }
-      }
-
-      if (
-        drive?.status
-        && isPiStopCommandStatus(drive.status, stopCommandPendingRef.current)
-      ) {
-        await tryEndRunOnPiStopCommand(drive);
+      if (isPiAutoOffAck(drive, isAwaitingAutoOff())) {
+        await tryEndRunOnPiAutoOff(drive);
         return;
       }
 
       if (stopCommandPendingRef.current) {
         const pendingAt = stopCommandPendingAtRef.current;
-        if (pendingAt != null && Date.now() - pendingAt > STOP_COMMAND_WAIT_MS) {
-          stopCommandPendingRef.current = false;
-          stopCommandPendingAtRef.current = null;
-          if (!isEdgeAwareStopLabelBenchStop()) {
-            disableAutoRoam();
-          } else {
-            freezeTimerAtNow();
-          }
-          await tryEndRunFromStopSignal(drive);
+        if (pendingAt != null && Date.now() - pendingAt > AUTO_OFF_WARN_MS) {
+          warnAutoOffStillPending();
+        }
+        if (drive && isPiAutoOffAck(drive, true)) {
+          await tryEndRunOnPiAutoOff(drive);
         }
         return;
       }
 
       const backendEstop = await fetchBackendEstopActive();
       const gridEstopNow = await fetchGridEstopActive();
-      const driveStop = drive?.status ? isStopDriveStatus(drive.status) : false;
 
       if (backendEstop || gridEstopNow || useMetricsStore.getState().estopActive) {
         if (backendEstop || gridEstopNow) mirrorBackendEstop();
@@ -2575,16 +2687,12 @@ function StopTestBenchWidget() {
         cancelSessionOnEstop();
         return;
       }
-
-      if (drive?.status && driveStop) {
-        await tryEndRunFromStopSignal(drive);
-      }
     };
 
     const id = setInterval(() => { void poll(); }, ROBOT_TIME_POLL_MS);
     void poll();
     return () => { alive = false; clearInterval(id); };
-  }, [cancelPreMoveStop, cancelSession, cancelSessionOnEstop, commandSentAt, disableAutoRoam, freezeTimerAtNow, latchStopSource, tryEndRunFromStopSignal, tryEndRunOnPiStopCommand]);
+  }, [armMissionTimerIfNeeded, cancelPreMoveStop, cancelSession, cancelSessionOnEstop, commandSentAt, disableAutoRoam, freezeTimerAtNow, isAwaitingAutoOff, latchCacheDetectionStop, latchStopSource, tryEndRunOnPiAutoOff, warnAutoOffStillPending]);
 
   // Re-render ~10×/s so the live Pi-clock extrapolation advances between MQTT samples.
   useEffect(() => {
@@ -2790,7 +2898,7 @@ function StopTestBenchWidget() {
         : 'Waiting for Raspberry Pi to confirm cache-aware ready — Start is disabled.';
     }
     if (effectiveStopMode === 'edge_aware') {
-      return 'Edge Only — Pi sends every embedding (Cae_OFF); the client matches each against your reference library and stops on a match (≥ 75% similarity). Needs an active reference category and VIT.py running on the Pi.';
+      return 'Edge Only — Pi sends every embedding (Cae_OFF); the client scans the full reference library and stops only on target_bottle (≥ 75% similarity). Needs VIT.py running on the Pi.';
     }
     return '';
   })();
@@ -3239,6 +3347,7 @@ export const WIDGET_REGISTRY: WidgetDefinition[] = [
   lidarScanDef,
   slamMapDef,
   vitDecoderDef,
+  uploadEmbeddingsDef,
   movementJoystickDef,
   cameraJoystickDef,
   stopButtonDef,

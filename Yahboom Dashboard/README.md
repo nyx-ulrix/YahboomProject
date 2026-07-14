@@ -74,7 +74,7 @@ Flow:
 - **Pi** encodes camera frames and publishes embeddings on MQTT (`yahboom/vit/embedding`).
 - **Backend** relays each embedding to `GET /api/vit/client/latest_embedding` (no live matching).
 - **Browser** (`useClientReferenceDetection`) polls embeddings, runs i2i match (`src/lib/clientVit/`), POSTs result to `/api/vit/client/match_result`.
-- **Stop:** `useEdgeAwareStopLabelEstop()` polls `/api/vit/status` and fires on `reference_match.hit` ≥ 75% (`src/lib/edgeAwareStopLabelEstop.ts`).
+- **Stop:** `useEdgeAwareStopLabelEstop()` polls `/api/vit/status` and fires on `reference_match.hit` ≥ 70% (`src/lib/edgeAwareStopLabelEstop.ts`).
 
 No MobileCLIP model runs on the dashboard host for detection. Full guide: [docs/EDGE_REFERENCE_MATCHING.md](docs/EDGE_REFERENCE_MATCHING.md).
 
@@ -89,16 +89,16 @@ A `.env` file in the project root configures both frontend and backend. Common v
 | `FLASK_PORT` | Flask listen port (default `3000`) |
 | `VIDEO_SERVER_PORT` | Pi WebRTC server port for HTTP health probe (default `8080`) |
 | `VIDEO_PROBE_INTERVAL_SEC` | How often the backend probes Pi video (default `12`) |
-| `PI_SSH_USER` / `PI_SSH_PASSWORD` / `PI_SSH_KEY_PATH` | SSH to Pi for **cache-aware test bench** only |
+| `PI_SSH_USER` / `PI_SSH_PASSWORD` / `PI_SSH_KEY_PATH` | _(legacy)_ unused by reference capture; optional for old cache-aware SSH helpers |
 | `PI_VIT_VENV` | Pi venv path for `cache_aware_offloading.py` (default `~/vit_env/bin/activate`) |
 | `PI_CACHE_AWARE_SCRIPT_PATH` | Path on Pi to `cache_aware_offloading.py` |
 | `PI_CACHE_AWARE_LOG` | Pi log file for cache-aware script (default `/tmp/yahboom_cache_aware.log`) |
 | `CACHE_SCRIPT_EMBEDDING_READY_SNIPPET` | Log substring that unlocks START in Cache Aware mode |
 | `MQTT_CACHE_AWARE_READY_TOPIC` | Retained MQTT topic for embedding-ready (default `yahboom/cache_aware/ready`) |
 | `VIT_REFERENCE_EMBEDDINGS_FILE` | Path to edge reference embeddings JSON (default `backend/app/services/vit/reference_embeddings.json`) |
-| `VIT_REFERENCE_LABEL` | Label filter inside the reference file (default `bottle`) |
+| `VIT_REFERENCE_LABEL` | Label filter inside the reference file (default `target bottle`) |
 | `VIT_REFERENCE_MATCH_ENABLED` | Enable image-to-image matching (default `true`) |
-| `EDGE_AWARE_REFERENCE_THRESHOLD` | Minimum cosine similarity for a reference hit (default `0.75`) |
+| `EDGE_AWARE_REFERENCE_THRESHOLD` | Minimum cosine similarity for a reference hit (default `0.70`) |
 | `VIT_ENABLE_MODEL` | Optional backend CLIP text-label decode — off; detection is client i2i (default `false`) |
 | `VIT_CLIENT_DETECTION_MODE` | Default mode mirrored to `vit_service` (`edge_aware` \| `cache_aware_offloading`) |
 
@@ -130,7 +130,7 @@ Default: **Edge Only**. Preference is saved in browser `localStorage` (`yahboom_
 
 | Mode | API value | Behaviour |
 |------|-----------|-----------|
-| **Edge Only** (default) | `edge_aware` | Pi sends every embedding (`Cae_OFF`); the **browser** matches each against the dashboard reference library (image-to-image). Sends `auto_off` + `stop` when similarity ≥ 75% after START. |
+| **Edge Only** (default) | `edge_aware` | Pi sends every embedding (`Cae_OFF`); the **browser** matches each against the dashboard reference library (image-to-image). Sends `auto_off` + `stop` when similarity ≥ 70% after START. |
 | **Cache Aware Offloading** | `cache_aware_offloading` | Pi checks its own cache and stops on a **hit**. On a **cache miss** the Pi publishes the embedding; the **browser** runs i2i match and the dashboard stops. Publishes `Cae_ON`; START waits for `Cae_Ready`. |
 
 Selecting a mode publishes the matching `Cae_ON` / `Cae_OFF` command and mirrors the mode into `vit_service` (`POST /api/test_bench/cache_aware`).
@@ -160,13 +160,13 @@ Detection uses **image-to-image** matching in the **browser**, not CLIP text lab
 
 **Full guide:** [docs/EDGE_REFERENCE_MATCHING.md](docs/EDGE_REFERENCE_MATCHING.md)
 
-**Setup:** Use the **Reference Capture** panel in the VIT Scene Decoder widget to SSH-capture snapshots into categorized folders, sync them to the dashboard, and **Activate** a category. Keep **`Cae_OFF`** for Edge Only so the Pi publishes every embedding; Cache Aware uses `Cae_ON` and only forwards cache misses.
+**Setup:** Use the **Reference Capture** panel to save relayed Pi embeddings into categorized folders on the dashboard, then **Activate** a category. Keep **`Cae_OFF`** for Edge Only so every embedding is relayed.
 
 **Stop rule:**
 
 - **Edge Only:** Pi sends every embedding; browser matches vs the active reference library (`useClientReferenceDetection`).
 - **Cache Aware:** Pi stops on cache hit locally; on cache miss the browser matches the forwarded embedding.
-- Both POST match results to `/api/vit/client/match_result`; `/api/vit/status` is polled and, on `hit === true` and `similarity_percent` ≥ 75% after START, sends `auto_off` + `stop`.
+- Both POST match results to `/api/vit/client/match_result`; `/api/vit/status` is polled and, on `hit === true` and `similarity_percent` ≥ 70% after START, sends `auto_off` + `stop`.
 - Armed only after START (pre-START detections are ignored).
 - Implemented in `useClientReferenceDetection.ts` + `edgeAwareStopLabelEstop.ts` (`processVitStatusForStopLabelEstop`).
 

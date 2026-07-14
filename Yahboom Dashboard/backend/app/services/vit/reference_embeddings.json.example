@@ -1,7 +1,7 @@
 {
   "objects": [
     {
-      "label": "bottle",
+      "label": "target bottle",
       "sample_id": 1,
       "model": "MobileCLIP-S1",
       "pretrained": "datacompdr",
