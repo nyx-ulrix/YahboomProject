@@ -17,6 +17,12 @@ type LibraryCategory = {
   snapshot_count: number;
 };
 
+type ReferenceOption = {
+  display: string;
+  name: string;
+  category: string;
+};
+
 const EMBED_SIZE_OPTIONS = [512, 1024, 2048] as const;
 const CATEGORY_RE = /^[a-z0-9_-]{1,48}$/;
 
@@ -50,6 +56,50 @@ export function UploadEmbeddingsWidget() {
   }, [categoryOverride, name]);
 
   const categoryValid = derivedCategory.length > 0 && CATEGORY_RE.test(derivedCategory);
+
+  const referenceOptions = useMemo(() => {
+    const seenDisplay = new Set<string>();
+    const options: ReferenceOption[] = [];
+
+    const addOption = (display: string, name: string, category: string) => {
+      const key = display.toLowerCase();
+      if (seenDisplay.has(key)) return;
+      seenDisplay.add(key);
+      options.push({ display, name, category });
+    };
+
+    for (const cat of categories) {
+      const displayName = cat.category.replace(/_/g, ' ');
+      addOption(displayName, displayName, cat.category);
+    }
+
+    for (const sample of samples) {
+      const label = sample.label.trim();
+      if (!label) continue;
+      const matchingCategories = new Set(
+        samples
+          .filter((s) => s.label.trim().toLowerCase() === label.toLowerCase())
+          .map((s) => s.category),
+      );
+      const display = matchingCategories.size > 1
+        ? `${label} (${sample.category})`
+        : label;
+      addOption(display, label, sample.category);
+    }
+
+    return options.sort((a, b) => a.display.localeCompare(b.display));
+  }, [samples, categories]);
+
+  const onNameChange = (value: string) => {
+    setName(value);
+    const trimmed = value.trim();
+    const match = referenceOptions.find(
+      (opt) => opt.display === trimmed || opt.name.toLowerCase() === trimmed.toLowerCase(),
+    );
+    if (match) {
+      setCategoryOverride(match.category);
+    }
+  };
 
   const refreshSamples = useCallback(async () => {
     try {
@@ -213,8 +263,9 @@ export function UploadEmbeddingsWidget() {
       <label className="flex flex-col gap-1">
         <span style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 600 }}>Name</span>
         <input
+          list="upload-embed-reference-names"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => onNameChange(e.target.value)}
           placeholder="e.g. tea canister"
           className="rounded-xl px-3 py-2 outline-none"
           style={{
@@ -224,6 +275,14 @@ export function UploadEmbeddingsWidget() {
             fontSize: 13,
           }}
         />
+        <datalist id="upload-embed-reference-names">
+          {referenceOptions.map((opt) => (
+            <option key={`${opt.category}:${opt.display}`} value={opt.display} />
+          ))}
+        </datalist>
+        <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+          Pick an existing reference or type a new name
+        </span>
       </label>
 
       <label className="flex flex-col gap-1">
