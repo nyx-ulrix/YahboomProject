@@ -4,7 +4,8 @@ python-dotenv==1.0.0
 paramiko
 numpy
 scipy
-# VIT scene decoder + Edge Only backend encoder (MobileCLIP-S1) — vit_service.py
+# Optional: MobileCLIP-S1 backend text-label decode only (VIT_ENABLE_MODEL=true).
+# Image-to-image matching runs in the browser, so these are NOT needed for the
+# default image-to-image flow.
 torch
 open_clip_torch
-Pillow

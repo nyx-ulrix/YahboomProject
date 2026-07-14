@@ -9,9 +9,13 @@ GET  /api/vit/reference/categories – list reference categories
 POST /api/vit/reference/capture    – SSH capture one snapshot on Pi + SFTP sync
 POST /api/vit/reference/activate   – activate a category for edge matching
 GET  /api/vit/reference/status     – reference library status
-POST /api/vit/edge/encode          – encode a WebRTC frame on the backend (Edge Only)
+GET  /api/vit/reference/active     – active reference embeddings (for browser i2i)
+GET  /api/vit/client/latest_embedding – latest Pi embedding relayed to the browser
+POST /api/vit/client/match_result  – record a match the browser computed
 """
 
+import json
+from pathlib import Path
 from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request, Response
 from app.services.vit.vit_service import vit_service
@@ -19,11 +23,17 @@ from app.services.vit.reference_capture_ssh import (
     ReferenceCaptureError,
     activate_category,
     capture_snapshot,
+    get_active_category,
     get_reference_capture_status,
     list_categories,
     sync_category,
 )
-from config import VIT_REFERENCE_LABEL
+from config import (
+    EDGE_AWARE_REFERENCE_THRESHOLD,
+    VIT_REFERENCE_DEFAULT_THRESHOLD,
+    VIT_REFERENCE_EMBEDDINGS_FILE,
+    VIT_REFERENCE_LABEL,
+)
 
 vit_bp = Blueprint("vit", __name__, url_prefix="/api/vit")
 
@@ -157,26 +167,74 @@ def reference_sync():
         return jsonify(payload), 503
 
 
-@vit_bp.route("/edge/encode", methods=["POST"])
-def edge_encode():
+@vit_bp.route("/reference/active", methods=["GET"])
+def reference_active():
     """
-    Edge Only: the browser forwards a WebRTC video frame (JPEG) here. The backend
-    encodes it with MobileCLIP and image-to-image matches it against the active
-    reference library, updating /api/vit/status (which the stop poller reads).
+    Active reference embeddings for the browser image-to-image loop.
 
-    Accepts multipart form field 'frame' or a raw image/* request body.
+    Returns the objects from the activated reference_embeddings.json (each with a
+    base64 float32 ``data`` blob, ``embedding_dim``, and ``threshold``) plus the
+    active category and the stop threshold. The browser matches Pi embeddings
+    against these vectors — the backend no longer runs the live match.
     """
-    if vit_service.get_detection_mode() != "edge_aware":
-        return jsonify({"status": "ignored", "reason": "not in edge_aware mode"}), 200
+    path = Path(VIT_REFERENCE_EMBEDDINGS_FILE)
+    payload = {
+        "status": "ok",
+        "active_category": get_active_category(),
+        "label": VIT_REFERENCE_LABEL,
+        "default_threshold": VIT_REFERENCE_DEFAULT_THRESHOLD,
+        "stop_threshold": EDGE_AWARE_REFERENCE_THRESHOLD,
+        "objects": [],
+    }
+    if not path.exists():
+        payload["error"] = f"reference file not found: {path}"
+        return jsonify(payload)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # pragma: no cover - defensive
+        payload["status"] = "error"
+        payload["error"] = f"failed to read reference file: {exc}"
+        return jsonify(payload), 500
 
-    image_bytes: bytes | None = None
-    if "frame" in request.files:
-        image_bytes = request.files["frame"].read()
-    elif request.data:
-        image_bytes = request.data
-    if not image_bytes:
-        return jsonify({"status": "error", "message": "no frame provided"}), 400
+    objects = data.get("objects", []) if isinstance(data, dict) else []
+    cleaned = []
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        entry = {
+            "sample_id": obj.get("sample_id"),
+            "label": obj.get("label", VIT_REFERENCE_LABEL),
+            "embedding_dim": obj.get("embedding_dim"),
+            "threshold": obj.get("threshold", VIT_REFERENCE_DEFAULT_THRESHOLD),
+        }
+        if "data" in obj:
+            entry["data"] = obj["data"]
+        elif "embedding" in obj:
+            entry["embedding"] = obj["embedding"]
+        else:
+            continue
+        cleaned.append(entry)
+    payload["objects"] = cleaned
+    payload["count"] = len(cleaned)
+    return jsonify(payload)
 
-    result = vit_service.encode_frame_and_match(image_bytes)
-    code = 200 if result.get("status") in ("ok", "ignored") else 503
+
+@vit_bp.route("/client/latest_embedding", methods=["GET"])
+def client_latest_embedding():
+    """Latest Pi embedding relayed to the browser (base64). Dedupe on ``seq``."""
+    return jsonify(vit_service.get_latest_client_embedding())
+
+
+@vit_bp.route("/client/match_result", methods=["POST"])
+def client_match_result():
+    """
+    Record an image-to-image match the browser computed. Telemetry only — the
+    client triggers the stop itself.
+
+    Expected JSON: { label, sample_id, similarity, threshold, hit,
+                     embedding_dim, embedding_size, image_file_size }
+    """
+    data = request.get_json(silent=True) or {}
+    result = vit_service.record_client_match(data)
+    code = 200 if result.get("status") == "ok" else 400
     return jsonify(result), code

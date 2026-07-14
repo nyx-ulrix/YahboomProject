@@ -14,8 +14,6 @@ import { useSettingsStore } from '../app/store';
 
 import type { SettingsStore } from '../app/store';
 
-import { registerVideoElement, unregisterVideoElement } from './clientVit/videoFrameRegistry';
-
 
 
 interface VideoFeedCoreProps {
@@ -183,20 +181,6 @@ export function VideoFeedCore({ compact = false, children, className = '', style
     };
 
   }, [isWebRtc, streamUrl]);
-
-
-
-  // Expose the live WebRTC <video> to the client edge-inference loop.
-
-  useEffect(() => {
-
-    const el = isWebRtc ? videoRef.current : null;
-
-    registerVideoElement(el);
-
-    return () => unregisterVideoElement(el);
-
-  }, [isWebRtc, streamUrl, videoError]);
 
 
 

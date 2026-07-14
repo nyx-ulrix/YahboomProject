@@ -11,6 +11,7 @@ import { useMetricsStore, useSettingsStore } from '../store';
 import type { WidgetDefinition, MetricsState } from '../types';
 import { sendCommand, sendCameraCommand, setEstopState, toggleRosAuto, vecToCommand, vecToCameraCommand } from '../../lib/Controls';
 import { setEdgeAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/edgeAwareStopLabelEstop';
+import { loadReferenceLibrary } from '../../lib/clientVit/referenceStore';
 import {
   benchNeedsPiScript,
   benchHasDashboardBottleStop,
@@ -1106,8 +1107,6 @@ type VitStatusResponse = {
   reference_active_category?: string | null;
   reference_snapshot_count?: number;
   detection_mode?: 'edge_aware' | 'cache_aware_offloading';
-  edge_encoder_ready?: boolean;
-  edge_encodes?: number;
   latest: {
     top_label: string;
     top_confidence: number;
@@ -1394,6 +1393,8 @@ function VitDecoderWidget() {
         return;
       }
       setRefMessage(`Active: ${data.category ?? normalizedRefCategory}`);
+      // Refresh the browser i2i reference vectors for the newly activated category.
+      void loadReferenceLibrary(true);
       const statusRes = await fetch('/api/vit/status', { cache: 'no-store' });
       if (statusRes.ok) {
         setStatus(await statusRes.json() as VitStatusResponse);
@@ -1471,12 +1472,12 @@ function VitDecoderWidget() {
   // Show detections while SSH or MQTT confirms the encoder pipeline is active.
   const displayLatest = encoderLive ? latest : null;
 
-  // Detection is image-to-image and runs on the backend for both modes:
-  // Edge Only encodes browser-forwarded WebRTC frames; Cache Aware matches Pi
-  // cache-miss MQTT embeddings. The widget shows the backend reference match.
+  // Detection is image-to-image and runs in the browser for both modes: the
+  // client matches Pi embeddings (Edge Only = every embedding; Cache Aware =
+  // cache-miss embeddings) against the dashboard reference library and posts the
+  // result back. The widget shows that recorded reference match.
   const detectionMode = status?.detection_mode ?? 'edge_aware';
   const referenceReady = status?.reference_ready ?? false;
-  const edgeEncoderReady = status?.edge_encoder_ready ?? false;
 
   const isReferenceMatch = displayLatest?.match_mode === 'reference_embedding';
   const referenceMatch = isReferenceMatch ? displayLatest?.reference_match ?? null : null;
@@ -1492,15 +1493,15 @@ function VitDecoderWidget() {
     : topConf >= threshold * 0.6 ? accents.yellow
     : accents.red;
 
-  const matchSource = displayLatest?.source === 'edge_frame'
-    ? 'backend-encoded frame'
-    : 'Pi cache-miss embedding';
+  const matchSource = detectionMode === 'cache_aware_offloading'
+    ? 'Pi cache-miss embedding'
+    : 'Pi embedding';
 
   const modeStatusLabel = (() => {
-    if (detectionMode === 'cache_aware_offloading') return 'CACHE AWARE — PI EMBEDDINGS';
-    if (!edgeEncoderReady) return 'EDGE — BACKEND ENCODER OFF';
-    if (!encoderLive) return 'EDGE — WAITING VIDEO';
-    return 'EDGE — BACKEND ENCODING';
+    if (detectionMode === 'cache_aware_offloading') {
+      return encoderLive ? 'CACHE AWARE — CLIENT MATCH' : 'CACHE AWARE — WAITING PI';
+    }
+    return encoderLive ? 'EDGE — CLIENT MATCH' : 'EDGE — WAITING PI';
   })();
 
   // Decoder activity pill — "MODEL READY" only while actively decoding; otherwise
@@ -1529,9 +1530,8 @@ function VitDecoderWidget() {
       return `${referenceMatch.label} — reference match${sample}`;
     }
     if (detectionMode === 'edge_aware') {
-      if (!edgeEncoderReady) return 'Backend encoder unavailable — install torch + open_clip';
-      if (!encoderLive) return 'Start webrtc_server.py on the Pi for video';
-      return 'Backend encoding WebRTC frames — no match yet';
+      if (!encoderLive) return 'Waiting for Pi embeddings — start VIT.py on the Pi';
+      return 'Client matching Pi embeddings — no match yet';
     }
     return 'Cache Aware — waiting for a Pi cache-miss embedding';
   })();
@@ -1634,11 +1634,9 @@ function VitDecoderWidget() {
             {!referenceReady
               ? 'Capture reference snapshots below, then activate a category'
               : detectionMode === 'edge_aware'
-                ? (!edgeEncoderReady
-                    ? 'Backend encoder unavailable — install torch + open_clip'
-                    : !encoderLive
-                      ? 'Start webrtc_server.py on the Pi for video'
-                      : 'Backend encoding WebRTC frames — similarity will appear here')
+                ? (!encoderLive
+                    ? 'Waiting for Pi embeddings — start VIT.py on the Pi'
+                    : 'Client matching Pi embeddings — similarity will appear here')
                 : 'Cache Aware — waiting for a Pi cache-miss embedding'}
           </div>
         )}
@@ -2792,7 +2790,7 @@ function StopTestBenchWidget() {
         : 'Waiting for Raspberry Pi to confirm cache-aware ready — Start is disabled.';
     }
     if (effectiveStopMode === 'edge_aware') {
-      return 'Edge Only — browser encodes WebRTC frames with MobileCLIP and stops on reference match (≥ 75% similarity). Needs an active reference category, video, and Cae_OFF on the Pi.';
+      return 'Edge Only — Pi sends every embedding (Cae_OFF); the client matches each against your reference library and stops on a match (≥ 75% similarity). Needs an active reference category and VIT.py running on the Pi.';
     }
     return '';
   })();
@@ -2911,8 +2909,9 @@ function StopTestBenchWidget() {
         </div>
       </div>
 
-      {/* Detection mode — mutually exclusive: Edge Only (client encodes video) or
-          Cache Aware Offloading (Pi cache-miss embeddings, client matches). */}
+      {/* Detection mode — mutually exclusive: Edge Only (Pi sends every embedding,
+          Cae_OFF) or Cache Aware Offloading (Pi sends cache-miss embeddings,
+          Cae_ON). The client matches Pi embeddings in both. */}
       <div className="flex-shrink-0 rounded-xl px-2.5 py-2"
         style={{ background: 'rgba(0,0,0,0.12)', border: '1px solid var(--stroke-subtle)' }}>
         <div className="flex items-center justify-between gap-2 mb-2">
@@ -2946,7 +2945,7 @@ function StopTestBenchWidget() {
               border: !cacheOn ? '1px solid rgba(255,255,255,0.22)' : '1px solid var(--stroke-subtle)',
               boxShadow: !cacheOn ? '0 8px 24px rgba(6,182,212,0.4), inset 0 1px 0 rgba(255,255,255,0.2)' : 'none',
             }}
-            title="Edge Only — browser encodes WebRTC frames and matches your reference (publishes Cae_OFF)"
+            title="Edge Only — Pi sends every embedding (Cae_OFF); the client matches each against your reference library"
           >
             <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
               Edge Only

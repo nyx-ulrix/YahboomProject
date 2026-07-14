@@ -8,7 +8,7 @@ import {
   processVitStatusForStopLabelEstop,
   setEdgeAwareStopEnabled,
 } from '../lib/edgeAwareStopLabelEstop';
-import { useEdgeFrameEncoder } from '../lib/useEdgeFrameEncoder';
+import { useClientReferenceDetection } from '../lib/useClientReferenceDetection';
 import type { LiveGridData, MetricsState } from './types';
 
 // Polls /api/status every 3 s and writes the backend's
@@ -477,13 +477,14 @@ export function useKeyboardCamera(onChange?: (v: { pan: number; tilt: number }) 
 }
 
 /**
- * Image-to-image bottle stop. Matching runs on the backend for both modes:
- * Edge Only encodes browser-forwarded WebRTC frames (useEdgeFrameEncoder);
- * Cache Aware matches Pi cache-miss MQTT embeddings. Both surface the result on
- * /api/vit/status, which this hook polls. Stop only fires while armed.
+ * Image-to-image bottle stop. Matching runs in the browser for both modes:
+ * useClientReferenceDetection matches Pi embeddings (Edge Only = every embedding;
+ * Cache Aware = cache-miss embeddings) against the dashboard reference library and
+ * posts the result back. The recorded match surfaces on /api/vit/status, which
+ * this hook polls to fire the stop while armed.
  */
 export function useEdgeAwareStopLabelEstop() {
-  useEdgeFrameEncoder();
+  useClientReferenceDetection();
 
   useEffect(() => {
     setEdgeAwareStopEnabled(true);

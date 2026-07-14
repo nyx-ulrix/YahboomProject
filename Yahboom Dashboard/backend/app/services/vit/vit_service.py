@@ -97,11 +97,11 @@ _ALLOWED_DIMS = frozenset(_EMBEDDING_BYTES_TO_DIMS.values())
 _ALLOWED_EMBED_BYTES = frozenset(_EMBEDDING_BYTES_TO_DIMS.keys())
 _CONFIDENCE_THRESHOLD = float(os.getenv("VIT_CONFIDENCE_THRESHOLD", "60.0"))
 _TOP_K            = int(os.getenv("VIT_TOP_K", "3"))
-# Backend text-label decode is OFF by default — detection is image-to-image only.
+# Optional backend text-label decode is OFF by default. Detection is image-to-image
+# and now runs in the browser (the client matches Pi embeddings against the
+# dashboard reference library); the backend only relays embeddings and records the
+# match the client reports back.
 _ENABLE_MODEL     = os.getenv("VIT_ENABLE_MODEL", "false").lower() in ("true", "1", "yes", "on")
-# Backend image encoder for Edge Only mode: encodes WebRTC frames forwarded by the
-# browser (open_clip on the dashboard host). Needs torch + open_clip installed.
-_ENABLE_EDGE_ENCODER = os.getenv("VIT_ENABLE_EDGE_ENCODER", "true").lower() in ("true", "1", "yes", "on")
 _LABELS_FILE      = Path(os.getenv("VIT_LABELS_FILE", str(_HERE / "labels.json")))
 # Detection mode mirrored from the test-bench toggle (edge_aware | cache_aware_offloading).
 _DEFAULT_DETECTION_MODE = os.getenv("VIT_CLIENT_DETECTION_MODE", "edge_aware")
@@ -489,37 +489,6 @@ class MobileClipDecoder:
             if self.ready:
                 self._build_text_embeddings()
 
-    def encode_image(self, image_bytes: bytes, target_dims: int = 512) -> tuple[bytes, int]:
-        """
-        Encode a JPEG/PNG frame into MobileCLIP image-embedding bytes, mirroring
-        the Pi's VIT.py get_embedding(): RGB -> preprocess -> encode_image ->
-        L2-normalize -> truncate to target_dims -> re-normalize.
-
-        Returns (float32 little-endian bytes, embedding_dim).
-        """
-        if not self.ready or self._model is None or self._preprocess is None:
-            raise RuntimeError("encoder not ready")
-
-        import io
-        import numpy as np
-        from PIL import Image  # type: ignore
-
-        torch = self._torch
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        with self._lock:
-            tensor = self._preprocess(image).unsqueeze(0).to(self._device)
-            with torch.no_grad():
-                embedding = self._model.encode_image(tensor)
-                embedding = embedding / embedding.norm(dim=-1, keepdim=True)
-        vec = embedding.squeeze(0).cpu().numpy().astype(np.float32)
-
-        dims = min(int(target_dims), vec.shape[0])
-        vec = vec[:dims]
-        norm = float(np.linalg.norm(vec))
-        if norm > 1e-12:
-            vec = vec / norm
-        vec = vec.astype(np.float32)
-        return vec.tobytes(), int(vec.shape[0])
 # ═════════════════════════════════════════════════════════════════════════════
 # #DECODING section 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -610,21 +579,23 @@ class VITService:
         self._last_status_at: str | None = None
         self._last_decode_error: str | None = None
 
-        # Detection mode mirrored from the test-bench toggle. Edge Only encodes
-        # browser-forwarded WebRTC frames on the backend; Cache Aware matches Pi
-        # cache-miss embeddings from MQTT. Both matched by ReferenceEmbeddingStore.
+        # Detection mode mirrored from the test-bench toggle. Both modes now feed
+        # the browser: Edge Only = Pi sends every embedding (Cae_OFF); Cache Aware =
+        # Pi sends only cache-miss embeddings (Cae_ON). The browser does the
+        # image-to-image match against the dashboard reference library.
         self._detection_mode: str = _DEFAULT_DETECTION_MODE
-        self._edge_encodes = 0
-        self._last_edge_encode_at: str | None = None
+
+        # Latest Pi embedding relayed to the browser (base64) + a monotonic seq the
+        # client dedupes on. The client polls GET /api/vit/client/latest_embedding.
+        self._latest_client_embedding: dict | None = None
+        self._client_embedding_seq = 0
 
         # webrtc_server.py on the Pi is started manually; stream_running comes from HTTP probe.
 
         labels = _load_labels()
-        # The decoder loads MobileCLIP once and serves both text decode (optional)
-        # and the Edge Only image encoder.
-        self._decoder = (
-            MobileClipDecoder(labels) if (_ENABLE_MODEL or _ENABLE_EDGE_ENCODER) else None
-        )
+        # Optional MobileCLIP text-label decode (off by default). Image-to-image
+        # matching runs in the browser, so no image encoder is loaded here.
+        self._decoder = MobileClipDecoder(labels) if _ENABLE_MODEL else None
         self._reference_store = ReferenceEmbeddingStore(VIT_REFERENCE_EMBEDDINGS_FILE)
 
         self._monitor_thread: threading.Thread | None = None
@@ -795,51 +766,36 @@ class VITService:
                 sorted(envelope_meta.keys()) if envelope_meta else [],
             )
 
-        # Edge Only ignores Pi MQTT embeddings entirely — detection comes from
-        # backend-encoded WebRTC frames (see encode_frame_and_match). Cache Aware
-        # matches the Pi cache-miss embeddings that arrive here.
-        if detection_mode == "edge_aware":
-            return
-
-        reference_match: ReferenceMatch | None = None
+        # Infer the embedding width so the client knows how to interpret the bytes.
         try:
-            reference_match = self._reference_store.match(
+            embedding_dim = _infer_target_dims(raw_bytes, envelope_meta)
+        except ValueError as exc:
+            log.debug("Embedding dim inference failed: %s", exc)
+            embedding_dim = None
+
+        # Relay the Pi embedding to the browser for image-to-image matching. This
+        # happens in BOTH modes: Edge Only forwards every embedding; Cache Aware
+        # forwards only the cache-miss embeddings the Pi chose to publish. The
+        # backend does NOT match here — the client decodes and reports back.
+        self._store_client_embedding(raw_bytes, embedding_dim, envelope_meta, detection_mode)
+
+        # Optional backend text-label decode (off by default via VIT_ENABLE_MODEL).
+        decoder = self._decoder
+        if not (_ENABLE_MODEL and decoder is not None and decoder.ready):
+            return
+        try:
+            text_results, embedding_dim = decoder.decode(
                 raw_bytes, envelope_meta=envelope_meta,
             )
         except Exception as exc:
-            log.debug("Reference match failed: %s", exc)
-
-        text_results: list[tuple[str, float]] = []
-        embedding_dim: int | None = None
-        decoder = self._decoder
-        if _ENABLE_MODEL and decoder is not None and decoder.ready:
-            try:
-                text_results, embedding_dim = decoder.decode(
-                    raw_bytes, envelope_meta=envelope_meta,
-                )
-            except Exception as exc:
-                with self._lock:
-                    self._decode_failures += 1
-                    err = self._sanitize_decode_error(str(exc)[:120])
-                    if err:
-                        self._last_decode_error = err
-                log.debug("Text embedding decode failed: %s", exc)
-
-        if embedding_dim is None:
-            try:
-                embedding_dim = _infer_target_dims(raw_bytes, envelope_meta)
-            except ValueError as exc:
-                log.debug("Embedding dim inference failed: %s", exc)
-                if reference_match is None:
-                    return
-
-        if reference_match is not None:
-            results = [(reference_match.label, reference_match.similarity_percent)]
-            match_mode = "reference_embedding"
-        elif text_results:
-            results = text_results
-            match_mode = "text_label"
-        else:
+            with self._lock:
+                self._decode_failures += 1
+                err = self._sanitize_decode_error(str(exc)[:120])
+                if err:
+                    self._last_decode_error = err
+            log.debug("Text embedding decode failed: %s", exc)
+            return
+        if not text_results:
             return
 
         emb_size = envelope_meta.get("embedding_size") or len(raw_bytes)
@@ -847,93 +803,91 @@ class VITService:
         with self._lock:
             self._decodes_succeeded += 1
             self._last_decode_at = _now_iso()
-            if reference_match is not None or text_results:
-                self._last_decode_error = None
+            self._last_decode_error = None
         self._record(
-            results,
+            results=text_results,
             embedding_size=emb_size,
             embedding_dim=embedding_dim,
             image_file_size=img_size,
             source="embedding",
-            reference_match=reference_match,
-            match_mode=match_mode,
+            match_mode="text_label",
             text_results=text_results,
         )
-        self._publish_result(
-            results,
-            embedding_size=emb_size,
-            embedding_dim=embedding_dim,
-            image_file_size=img_size,
-            reference_match=reference_match,
-            match_mode=match_mode,
-        )
 
-    def encoder_ready(self) -> bool:
-        return bool(_ENABLE_EDGE_ENCODER and self._decoder is not None and self._decoder.ready)
-
-    def encode_frame_and_match(self, image_bytes: bytes) -> dict:
-        """
-        Edge Only: encode a browser-forwarded WebRTC frame on the backend and
-        image-to-image match it against the active reference library. Records the
-        result into /api/vit/status (so the stop poller + widget see it).
-        """
-        if self._detection_mode != "edge_aware":
-            return {"status": "ignored", "reason": "not in edge_aware mode"}
-        decoder = self._decoder
-        if not _ENABLE_EDGE_ENCODER or decoder is None or not decoder.ready:
-            reason = "edge encoder disabled" if not _ENABLE_EDGE_ENCODER else "encoder loading"
-            return {"status": "error", "message": reason}
-
-        try:
-            emb_bytes, dim = decoder.encode_image(image_bytes)
-        except Exception as exc:
-            with self._lock:
-                self._decode_failures += 1
-                self._last_decode_error = self._sanitize_decode_error(str(exc)[:120])
-            return {"status": "error", "message": f"encode failed: {exc}"}
-
-        meta = {
-            "embedding_dim": dim,
-            "embedding_size": len(emb_bytes),
-            "image_file_size": len(image_bytes),
-        }
-        reference_match: ReferenceMatch | None = None
-        try:
-            reference_match = self._reference_store.match(emb_bytes, envelope_meta=meta)
-        except Exception as exc:
-            log.debug("Edge reference match failed: %s", exc)
-
+    def _store_client_embedding(
+        self,
+        raw_bytes: bytes,
+        embedding_dim: int | None,
+        meta: dict,
+        mode: str,
+    ) -> None:
+        """Stash the latest Pi embedding (base64) for the browser to fetch + match."""
+        data_b64 = base64.b64encode(raw_bytes).decode("ascii")
         with self._lock:
-            self._edge_encodes += 1
-            self._last_edge_encode_at = _now_iso()
-            self._last_embedding_at = self._last_edge_encode_at
+            self._client_embedding_seq += 1
+            self._latest_client_embedding = {
+                "seq": self._client_embedding_seq,
+                "data": data_b64,
+                "embedding_dim": embedding_dim,
+                "embedding_size": meta.get("embedding_size", len(raw_bytes)),
+                "image_file_size": meta.get("image_file_size"),
+                "frame_id": meta.get("frame_id"),
+                "cache_hit": meta.get("cache_hit"),
+                "cache_active": meta.get("cache_active"),
+                "mode": mode,
+                "timestamp": _now_iso(),
+            }
 
-        if reference_match is None:
-            return {"status": "ok", "reference_match": None, "embedding_dim": dim}
+    def get_latest_client_embedding(self) -> dict:
+        """Latest Pi embedding for the browser i2i loop (dedupe on ``seq``)."""
+        with self._lock:
+            if self._latest_client_embedding is None:
+                return {"seq": 0, "data": None}
+            return dict(self._latest_client_embedding)
 
-        results = [(reference_match.label, reference_match.similarity_percent)]
+    def record_client_match(self, payload: dict) -> dict:
+        """
+        Record an image-to-image match the browser computed (Pi embedding vs the
+        dashboard reference library), so /api/vit/status, the widget, the session
+        history/CSV, and the edge-aware estop hook stay populated. The stop itself
+        is triggered client-side; this is telemetry only.
+        """
+        try:
+            label = str(payload.get("label", VIT_REFERENCE_LABEL))
+            similarity = float(payload.get("similarity", 0.0))
+            threshold = float(payload.get("threshold", EDGE_AWARE_REFERENCE_THRESHOLD))
+            hit = bool(payload.get("hit", False))
+            sample_id = payload.get("sample_id")
+            sample_id = int(sample_id) if sample_id is not None else None
+        except (TypeError, ValueError) as exc:
+            return {"status": "error", "message": f"bad payload: {exc}"}
+
+        embedding_dim = _as_opt_int(payload.get("embedding_dim"))
+        embedding_size = _as_opt_int(payload.get("embedding_size"))
+        image_file_size = _as_opt_int(payload.get("image_file_size"))
+
+        reference_match = ReferenceMatch(
+            label=label,
+            sample_id=sample_id,
+            similarity=similarity,
+            threshold=threshold,
+            hit=hit,
+        )
+        results = [(label, reference_match.similarity_percent)]
         with self._lock:
             self._decodes_succeeded += 1
             self._last_decode_at = _now_iso()
             self._last_decode_error = None
         self._record(
             results,
-            embedding_size=len(emb_bytes),
-            embedding_dim=dim,
-            image_file_size=len(image_bytes),
-            source="edge_frame",
+            embedding_size=embedding_size,
+            embedding_dim=embedding_dim,
+            image_file_size=image_file_size,
+            source="client_match",
             reference_match=reference_match,
             match_mode="reference_embedding",
         )
-        self._publish_result(
-            results,
-            embedding_size=len(emb_bytes),
-            embedding_dim=dim,
-            image_file_size=len(image_bytes),
-            reference_match=reference_match,
-            match_mode="reference_embedding",
-        )
-        return {"status": "ok", "reference_match": reference_match.to_dict(), "embedding_dim": dim}
+        return {"status": "ok", "reference_match": reference_match.to_dict()}
 
     def set_detection_mode(self, mode: str) -> str:
         """Mirror the test-bench detection mode (edge_aware | cache_aware_offloading)."""
@@ -1214,8 +1168,6 @@ class VITService:
             "reference_active_category": active_category,
             "reference_snapshot_count": snapshot_count,
             "detection_mode": self._detection_mode,
-            "edge_encoder_ready": self.encoder_ready(),
-            "edge_encodes": self._edge_encodes,
         }
 
     def reload_reference(self) -> bool:

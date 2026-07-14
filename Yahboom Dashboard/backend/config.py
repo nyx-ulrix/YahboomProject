@@ -129,16 +129,15 @@ PI_REFERENCE_CAPTURE_WAIT_SEC = float(
     os.getenv("PI_REFERENCE_CAPTURE_WAIT_SEC", "10")
 )
 
-# MobileCLIP detection. Text-label decode is OFF by default; detection is
-# image-to-image only. Edge Only encodes browser-forwarded WebRTC frames on the
-# backend (needs torch + open_clip on the dashboard host); Cache Aware matches
-# the Pi's cache-miss MQTT embeddings.
+# MobileCLIP detection. Image-to-image matching now runs in the browser (the
+# client matches Pi embeddings against the dashboard reference library); the
+# backend only relays embeddings and records the reported match. Optional
+# text-label decode is OFF by default (needs torch + open_clip on the host).
 VIT_ENABLE_MODEL = os.getenv("VIT_ENABLE_MODEL", "false").lower() in ("true", "1", "yes", "on")
-VIT_ENABLE_EDGE_ENCODER = os.getenv("VIT_ENABLE_EDGE_ENCODER", "true").lower() in ("true", "1", "yes", "on")
 # Default detection mode mirrored to vit_service (edge_aware | cache_aware_offloading).
+# Edge Only = Pi sends every embedding (Cae_OFF); Cache Aware = Pi sends only
+# cache-miss embeddings (Cae_ON). The browser matches in both.
 VIT_CLIENT_DETECTION_MODE = os.getenv("VIT_CLIENT_DETECTION_MODE", "edge_aware")
-# Max edge encode rate — browser samples frames at this FPS (via VITE_CLIENT_EDGE_FPS).
-VIT_CLIENT_EDGE_FPS = float(os.getenv("VIT_CLIENT_EDGE_FPS", "5"))
 
 # SLAM settings
 # yahboom/scan  – raw LaserScan JSON (angle_min, angle_increment, ranges[])
