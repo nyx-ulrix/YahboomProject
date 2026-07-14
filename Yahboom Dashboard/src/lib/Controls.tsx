@@ -164,7 +164,7 @@ async function postBotCommand(command: BotCommand): Promise<void> {
 }
 
 /**
- * Edge-aware bottle stop — send auto_off first so explore disengages, then stop.
+ * Cloud-aware bottle stop — send auto_off first so explore disengages, then stop.
  * Used by dashboard VIT detection (not Pi cache script).
  */
 export function sendDashboardBottleStop(): void {
@@ -192,7 +192,7 @@ export function sendDashboardBottleStop(): void {
 export function sendCommand(command: BotCommand, source?: CommandSource): void {
   const state = useMetricsStore.getState();
 
-  // Edge-aware bottle stop — auto_off then stop; freeze test-bench timer via notify hook.
+  // Cloud-aware bottle stop — auto_off then stop; freeze test-bench timer via notify hook.
   if (command === 'stop' && source === 'stop_label') {
     sendDashboardBottleStop();
     return;

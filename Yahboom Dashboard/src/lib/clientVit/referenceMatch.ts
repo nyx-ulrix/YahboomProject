@@ -1,7 +1,7 @@
 // Client image-to-image matching (cosine similarity via dot product).
 //
 // Scans every reference vector in the library and reports the best match for
-// scene-decoder display. Edge stop uses stopHit, which is true only when the
+// scene-decoder display. Cloud stop uses stopHit, which is true only when the
 // best match belongs to the stop category (default target_bottle).
 
 import {
@@ -19,7 +19,7 @@ export type ClientReferenceMatch = {
   similarityPercent: number;
   threshold: number; // effective threshold used for the hit test
   hit: boolean; // display hit — any category above threshold
-  stopHit: boolean; // edge stop — stop category only
+  stopHit: boolean; // cloud stop — stop category only
   embeddingDim: number;
 };
 
@@ -40,27 +40,15 @@ function dot(a: Float32Array, b: Float32Array): number {
   return sum;
 }
 
-/** Best library match for a live Pi embedding, or null when none apply. */
-export function matchEmbedding(live: Float32Array): ClientReferenceMatch | null {
-  if (!hasReferenceVectors() || live.length === 0) return null;
-
-  const references = getReferenceVectorsForDim(live.length);
-  if (references.length === 0) return null;
-
-  const normalized = l2normalize(live);
-  const stopThreshold = getStopThreshold();
-  const stopCategory = getStopCategory();
-
-  let best: { similarity: number; index: number } | null = null;
-  for (let i = 0; i < references.length; i++) {
-    const similarity = dot(normalized, references[i].vec);
-    if (!best || similarity > best.similarity) best = { similarity, index: i };
-  }
-  if (!best) return null;
-
-  const ref = references[best.index];
+function scoreReference(
+  normalized: Float32Array,
+  ref: ReturnType<typeof getReferenceVectorsForDim>[number],
+  liveDim: number,
+  stopThreshold: number,
+  stopCategory: string,
+): ClientReferenceMatch {
+  const similarity = dot(normalized, ref.vec);
   const effectiveThreshold = Math.max(ref.threshold, stopThreshold);
-  const similarity = best.similarity;
   const hit = similarity >= effectiveThreshold;
   const stopHit = hit && ref.category === stopCategory;
   return {
@@ -72,6 +60,28 @@ export function matchEmbedding(live: Float32Array): ClientReferenceMatch | null 
     threshold: effectiveThreshold,
     hit,
     stopHit,
-    embeddingDim: live.length,
+    embeddingDim: liveDim,
   };
+}
+
+/** Every library match for a live Pi embedding, highest similarity first. */
+export function matchAllEmbeddings(live: Float32Array): ClientReferenceMatch[] {
+  if (!hasReferenceVectors() || live.length === 0) return [];
+
+  const references = getReferenceVectorsForDim(live.length);
+  if (references.length === 0) return [];
+
+  const normalized = l2normalize(live);
+  const stopThreshold = getStopThreshold();
+  const stopCategory = getStopCategory();
+
+  return references
+    .map((ref) => scoreReference(normalized, ref, live.length, stopThreshold, stopCategory))
+    .sort((a, b) => b.similarity - a.similarity);
+}
+
+/** Best library match for a live Pi embedding, or null when none apply. */
+export function matchEmbedding(live: Float32Array): ClientReferenceMatch | null {
+  const all = matchAllEmbeddings(live);
+  return all[0] ?? null;
 }

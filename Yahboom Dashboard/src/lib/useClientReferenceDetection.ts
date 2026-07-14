@@ -3,17 +3,19 @@
 // The browser is fed ONLY by image embeddings the Pi generates (relayed by the
 // backend). Each new Pi embedding is matched against the full dashboard
 // reference library in the browser (image-to-image), and the result is posted
-// back so /api/vit/status, the widget, and the CSV stay populated. Edge stop
+// back so /api/vit/status, the widget, and the CSV stay populated. Cloud stop
 // fires only when stop_hit is true (default: best match is target_bottle).
 
 import { useEffect } from 'react';
+import { loadStopTargetCategory } from './testBenchStorage';
 import {
+  applyStopCategory,
   base64ToFloat32,
   getLibraryEmbeddingSizeBytes,
   isReferenceLoaded,
   loadReferenceLibrary,
 } from './clientVit/referenceStore';
-import { matchEmbedding } from './clientVit/referenceMatch';
+import { matchAllEmbeddings } from './clientVit/referenceMatch';
 
 const EMBEDDING_POLL_MS = 180;
 
@@ -26,6 +28,10 @@ type LatestEmbedding = {
 };
 
 export function useClientReferenceDetection() {
+  useEffect(() => {
+    void applyStopCategory(loadStopTargetCategory());
+  }, []);
+
   useEffect(() => {
     let alive = true;
     let lastSeq = 0;
@@ -59,7 +65,8 @@ export function useClientReferenceDetection() {
         }
 
         const live = base64ToFloat32(data.data);
-        const match = matchEmbedding(live);
+        const matches = matchAllEmbeddings(live).slice(0, 3);
+        const match = matches[0];
         if (!match || !alive) return;
 
         posting = true;
@@ -78,6 +85,15 @@ export function useClientReferenceDetection() {
               embedding_dim: match.embeddingDim,
               embedding_size: data.embedding_size ?? live.length * 4,
               image_file_size: data.image_file_size ?? null,
+              top_matches: matches.map((m) => ({
+                label: m.label,
+                category: m.category,
+                sample_id: m.sampleId,
+                similarity: m.similarity,
+                threshold: m.threshold,
+                hit: m.hit,
+                stop_hit: m.stopHit,
+              })),
             }),
           });
         } finally {

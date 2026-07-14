@@ -12,7 +12,7 @@ from pathlib import Path
 from app.services.vit.image_encoder import ImageEncoderError, image_encoder
 
 from config import (
-    EDGE_AWARE_REFERENCE_THRESHOLD,
+    CLOUD_AWARE_REFERENCE_THRESHOLD,
     VIT_REFERENCE_DEFAULT_THRESHOLD,
     VIT_REFERENCE_EMBEDDINGS_FILE,
     VIT_REFERENCE_LABEL,
@@ -32,6 +32,7 @@ MAX_EMBEDDING_AGE_SEC = 12.0
 _last_capture: dict | None = None
 _active_category: str | None = None
 _active_embedding_size_bytes: int | None = None
+_stop_category: str = VIT_STOP_REFERENCE_CATEGORY
 
 
 class ReferenceCaptureError(Exception):
@@ -146,7 +147,7 @@ def _list_sizes_for_category(category: str) -> list[int]:
 
 
 def _load_active_state() -> None:
-    global _active_category, _active_embedding_size_bytes
+    global _active_category, _active_embedding_size_bytes, _stop_category
     path = _active_state_path()
     if not path.exists():
         return
@@ -154,26 +155,47 @@ def _load_active_state() -> None:
         data = json.loads(path.read_text(encoding="utf-8"))
         cat = data.get("category")
         size = data.get("embedding_size_bytes")
+        stop = data.get("stop_category")
         if isinstance(cat, str) and CATEGORY_RE.match(cat):
             _active_category = cat
         if isinstance(size, int):
             _active_embedding_size_bytes = snap_embed_bytes(size)
+        if isinstance(stop, str) and CATEGORY_RE.match(stop):
+            _stop_category = stop
     except Exception:
         pass
 
 
-def _save_active_state() -> None:
-    if _active_category is None or _active_embedding_size_bytes is None:
-        return
+def _save_library_state() -> None:
     root = _local_library_dir()
     root.mkdir(parents=True, exist_ok=True)
+    payload: dict = {"stop_category": _stop_category}
+    if _active_category is not None and _active_embedding_size_bytes is not None:
+        payload["category"] = _active_category
+        payload["embedding_size_bytes"] = _active_embedding_size_bytes
     _active_state_path().write_text(
-        json.dumps({
-            "category": _active_category,
-            "embedding_size_bytes": _active_embedding_size_bytes,
-        }, indent=2),
+        json.dumps(payload, indent=2),
         encoding="utf-8",
     )
+
+
+def _save_active_state() -> None:
+    _save_library_state()
+
+
+def get_stop_category() -> str:
+    return _stop_category
+
+
+def set_stop_category(category: str) -> dict:
+    global _stop_category
+    slug = sanitize_category(category)
+    _stop_category = slug
+    _save_library_state()
+    return {
+        "status": "ok",
+        "stop_category": slug,
+    }
 
 
 _load_active_state()
@@ -690,7 +712,7 @@ def load_library_for_client(embedding_size_bytes: int | None = None) -> dict:
                 continue
             cleaned.append(entry)
             cat_count += 1
-            if name == VIT_STOP_REFERENCE_CATEGORY:
+            if name == _stop_category:
                 stop_count += 1
         if cat_count > 0:
             categories.append({
@@ -702,9 +724,9 @@ def load_library_for_client(embedding_size_bytes: int | None = None) -> dict:
     return {
         "status": "ok",
         "embedding_size_bytes": size,
-        "stop_category": VIT_STOP_REFERENCE_CATEGORY,
+        "stop_category": _stop_category,
         "default_threshold": VIT_REFERENCE_DEFAULT_THRESHOLD,
-        "stop_threshold": EDGE_AWARE_REFERENCE_THRESHOLD,
+        "stop_threshold": CLOUD_AWARE_REFERENCE_THRESHOLD,
         "objects": cleaned,
         "count": len(cleaned),
         "categories": categories,

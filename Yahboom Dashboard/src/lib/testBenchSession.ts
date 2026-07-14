@@ -7,9 +7,9 @@ let onManualStopDuringSession: (() => void) | null = null;
 let pendingStopReason: string | undefined;
 let pendingStopIsStopLabel = false;
 let pendingStopConfidence: number | null = null;
-let edgeAwareStopLabelActive = false;
+let cloudAwareStopLabelActive = false;
 let benchSessionActive = false;
-let benchStopMode: StopBenchMode = 'edge_aware';
+let benchStopMode: StopBenchMode = 'cloud_aware';
 
 export function setTestBenchSessionActive(active: boolean) {
   benchSessionActive = active;
@@ -20,7 +20,7 @@ export function setTestBenchStopMode(mode: StopBenchMode) {
 }
 
 /**
- * Edge-aware bottle stop is always armed, so a manual stop always sends auto_off
+ * Cloud-aware bottle stop is always armed, so a manual stop always sends auto_off
  * from the dashboard to disengage explore (the Pi handles its own cache-aware stop).
  */
 export function skipAutoOffOnBenchStop(): boolean {
@@ -52,28 +52,28 @@ export function notifyTestBenchManualStop(reason?: string) {
 
 /** Explore disengaged via auto_off — wait for Pi drive-status auto_disabled to end the run. */
 export function notifyTestBenchAutoOffPending(reason?: string) {
-  if (!benchSessionActive || edgeAwareStopLabelActive) return;
+  if (!benchSessionActive || cloudAwareStopLabelActive) return;
   pendingStopReason = reason ?? pendingStopReason ?? 'Mission test — explore disengaged';
   pendingStopIsStopLabel = false;
   onManualStopDuringSession?.();
 }
 
-/** Bottle / edge-aware stop-label — freezes the live timer immediately. */
+/** Bottle / cloud-aware stop-label — freezes the live timer immediately. */
 export function notifyTestBenchStopLabelStop(confidence?: number) {
   pendingStopReason = 'Mission test — bottle detected';
   pendingStopIsStopLabel = true;
   pendingStopConfidence = confidence ?? null;
-  edgeAwareStopLabelActive = true;
+  cloudAwareStopLabelActive = true;
   onManualStopDuringSession?.();
 }
 
-/** True after edge-aware bottle stop until the test-bench session resets. */
-export function isEdgeAwareStopLabelBenchStop(): boolean {
-  return edgeAwareStopLabelActive;
+/** True after cloud-aware bottle stop until the test-bench session resets. */
+export function isCloudAwareStopLabelBenchStop(): boolean {
+  return cloudAwareStopLabelActive;
 }
 
-export function clearEdgeAwareStopLabelBenchStop() {
-  edgeAwareStopLabelActive = false;
+export function clearCloudAwareStopLabelBenchStop() {
+  cloudAwareStopLabelActive = false;
 }
 
 /** Reason passed to the most recent notify (consumed by the hook). */

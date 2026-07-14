@@ -1,4 +1,4 @@
-# Edge Image-to-Image Reference Matching
+# Cloud Image-to-Image Reference Matching
 
 This document explains how the dashboard stops on **your specific water bottle** using image-to-image embedding similarity (not CLIP text labels).
 
@@ -14,7 +14,7 @@ There are three recognition approaches in this project:
 | **Pi cache** (`cache_embeddings.json` on Pi) | "Does this vector match my stored bottle vectors?" | High — your exact bottle |
 | **Dashboard reference** (`reference_embeddings.json`) | Same math as Pi cache, but matching runs in the **browser** | High — your exact bottle |
 
-Edge reference matching lets the test bench stop on your exact bottle using Pi-generated embeddings matched client-side against the dashboard reference library.
+Cloud reference matching lets the test bench stop on your exact bottle using Pi-generated embeddings matched client-side against the dashboard reference library.
 
 ## 1a. Two detection modes (current architecture — client i2i)
 
@@ -22,7 +22,7 @@ Detection is **image-to-image only**. The **client never encodes images** — it
 
 | Mode | What the Pi sends | Pi cache (`/home/pi/cache_embeddings.json`) | Client i2i match | Pi `Cae_*` | Who stops |
 |------|-------------------|-----------------------------------------------|------------------|-----------|-----------|
-| **Edge Only** | **Every** embedding | Not consulted (`Cae_OFF`) | Browser vs dashboard reference | `Cae_OFF` | Dashboard on i2i hit |
+| **Cloud Only** | **Every** embedding | Not consulted (`Cae_OFF`) | Browser vs dashboard reference | `Cae_OFF` | Dashboard on i2i hit |
 | **Cache Aware Offloading** | **Cache-miss** embeddings only | Consulted first; hits stop on Pi | Browser vs dashboard reference on miss | `Cae_ON` | Pi on cache **hit**; dashboard on cache **miss** + i2i hit |
 
 Neither mode uses CLIP text-label softmax for stop. Display and stop are **image-to-image reference similarity only**.
@@ -41,7 +41,7 @@ flowchart TB
     Enc --> Gate{mode}
     PiCache[Pi cache library big] --> Gate
   end
-  Gate -->|"Edge Only Cae_OFF"| SendAll[Publish every embedding]
+  Gate -->|"Cloud Only Cae_OFF"| SendAll[Publish every embedding]
   Gate -->|"Cache Aware Cae_ON"| Check{compare vs Pi cache}
   Check -->|hit 3 frames| PiStop[Pi stop auto_off]
   Check -->|miss| SendMiss[Publish cache-miss embedding]
@@ -57,7 +57,7 @@ Code:
 
 - **Pi embedding relay:** `VITService._store_client_embedding()` in [`vit_service.py`](../backend/app/services/vit/vit_service.py) — backend relays MQTT embeddings to `GET /api/vit/client/latest_embedding`.
 - **Client i2i:** [`src/lib/clientVit/referenceStore.ts`](../src/lib/clientVit/referenceStore.ts), [`referenceMatch.ts`](../src/lib/clientVit/referenceMatch.ts), [`useClientReferenceDetection.ts`](../src/lib/useClientReferenceDetection.ts).
-- **Stop:** [`edgeAwareStopLabelEstop.ts`](../src/lib/edgeAwareStopLabelEstop.ts) (`processVitStatusForStopLabelEstop`) polling `/api/vit/status` (populated by `POST /api/vit/client/match_result`).
+- **Stop:** [`cloudAwareStopLabelEstop.ts`](../src/lib/cloudAwareStopLabelEstop.ts) (`processVitStatusForStopLabelEstop`) polling `/api/vit/status` (populated by `POST /api/vit/client/match_result`).
 
 No MobileCLIP model runs on the dashboard host for detection. Optional backend text-label decode (`VIT_ENABLE_MODEL`, off by default) is display-only and unrelated to stop.
 
@@ -83,9 +83,9 @@ The dashboard never converts images to embeddings. It receives only the vector o
 Live embedding  →  compare to text prompts ("bottle", "cup", …)  →  softmax confidence %
 ```
 
-Implemented in `MobileClipDecoder` in `vit_service.py` when `VIT_ENABLE_MODEL=true`. **Edge stop does not use this path.**
+Implemented in `MobileClipDecoder` in `vit_service.py` when `VIT_ENABLE_MODEL=true`. **Cloud stop does not use this path.**
 
-### Reference matching (Edge stop)
+### Reference matching (Cloud stop)
 
 ```
 Pi embedding  →  compare to dashboard reference vectors (in browser)  →  cosine similarity
@@ -122,11 +122,11 @@ sequenceDiagram
 
 ### Steps
 
-1. **Pi** runs `VIT.py` + camera. Every N frames, MobileCLIP publishes an embedding on `yahboom/vit/embedding` (every frame in Edge Only; cache-miss only in Cache Aware).
+1. **Pi** runs `VIT.py` + camera. Every N frames, MobileCLIP publishes an embedding on `yahboom/vit/embedding` (every frame in Cloud Only; cache-miss only in Cache Aware).
 2. **Dashboard backend** (`vit_service.py`) relays each embedding to `GET /api/vit/client/latest_embedding` (dedupe on `seq`).
 3. **Browser** (`useClientReferenceDetection`) polls ~180 ms, decodes the base64 float32 blob, and runs image-to-image match against `GET /api/vit/reference/active`.
 4. **Browser** POSTs the match to `/api/vit/client/match_result` so `/api/vit/status`, the widget, and CSV stay populated.
-5. **Browser** (`useEdgeAwareStopLabelEstop`) polls `/api/vit/status` every 500 ms. On a new decode after START with `hit` and similarity ≥ 70%, sends `auto_off` + `stop`.
+5. **Browser** (`useCloudAwareStopLabelEstop`) polls `/api/vit/status` every 500 ms. On a new decode after START with `hit` and similarity ≥ 70%, sends `auto_off` + `stop`.
 
 ## 5. Matching math
 
@@ -149,7 +149,7 @@ effective_threshold = max(sample_threshold, stop_threshold)  // stop_threshold d
 hit = similarity >= effective_threshold
 ```
 
-The client also requires `similarity_percent >= 70` in `src/lib/edgeAwareStopLabelEstop.ts`.
+The client also requires `similarity_percent >= 70` in `src/lib/cloudAwareStopLabelEstop.ts`.
 
 ## 6. Reference file format
 
@@ -171,7 +171,7 @@ Same schema as Pi `/home/pi/cache_embeddings.json` from `Yahboom Car/Used/captur
 
 Use the **Reference Capture** panel in the VIT Scene Decoder widget:
 
-1. Start `VIT.py` + camera on the Pi (`Cae_OFF` for Edge Only so every embedding is relayed).
+1. Start `VIT.py` + camera on the Pi (`Cae_OFF` for Cloud Only so every embedding is relayed).
 2. Enter a **category** slug (e.g. `target_bottle`).
 3. Point the Pi camera at your bottle and click **Capture** — the dashboard saves the **latest Pi MQTT embedding** relayed by the backend.
 4. Move the bottle to a different angle and click **Capture** again.
@@ -223,9 +223,9 @@ Multi-angle capture improves recognition when the bottle appears at different po
 | `MobileClipDecoder` | `vit_service.py` | Optional text labels (`VIT_ENABLE_MODEL`, off) |
 | Stop command | Browser | `auto_off` + `stop` on `yahboom/cmd` |
 
-### Edge Only: use `Cae_OFF`
+### Cloud Only: use `Cae_OFF`
 
-In Edge Only mode the Pi must publish **every** embedding. With `Cae_ON`, cache hits suppress MQTT publish — use **`Cae_OFF`** for Edge Only.
+In Cloud Only mode the Pi must publish **every** embedding. With `Cae_ON`, cache hits suppress MQTT publish — use **`Cae_OFF`** for Cloud Only.
 
 ### Cache Aware: what a cache hit looks like
 
@@ -248,14 +248,14 @@ Environment variables in `backend/config.py`:
 | `VIT_REFERENCE_LABEL` | `target bottle` | Label filter |
 | `VIT_REFERENCE_MATCH_ENABLED` | `true` | Reference store enabled (status/activate) |
 | `VIT_REFERENCE_DEFAULT_THRESHOLD` | `0.70` | Default per-entry threshold |
-| `EDGE_AWARE_REFERENCE_THRESHOLD` | `0.70` | Floor for client `hit` |
+| `CLOUD_AWARE_REFERENCE_THRESHOLD` | `0.70` | Floor for client `hit` |
 | `PI_REFERENCE_CAPTURE_SCRIPT_PATH` | _(removed)_ | Reference capture uses relayed MQTT embeddings — no SSH |
 | `PI_REFERENCE_LIBRARY_DIR` | _(removed)_ | Library lives on dashboard only |
 | `VIT_REFERENCE_LIBRARY_DIR` | `vit/reference_library/` | Category folders on dashboard |
 | `VIT_ENABLE_MODEL` | `false` | Optional backend text-label decode (off) |
-| `VIT_CLIENT_DETECTION_MODE` | `edge_aware` | Default mode mirrored to `vit_service` |
+| `VIT_CLIENT_DETECTION_MODE` | `cloud_aware` | Default mode mirrored to `vit_service` |
 
-Client: `EDGE_AWARE_MIN_CONFIDENCE = 70` in `edgeAwareStopLabelEstop.ts`.
+Client: `CLOUD_AWARE_MIN_CONFIDENCE = 70` in `cloudAwareStopLabelEstop.ts`.
 
 ## 10. API
 
@@ -263,7 +263,7 @@ Client: `EDGE_AWARE_MIN_CONFIDENCE = 70` in `edgeAwareStopLabelEstop.ts`.
 
 - `reference_ready`, `reference_count`, `reference_file`, `reference_error`
 - `reference_active_category`, `reference_snapshot_count`
-- `detection_mode`: `"edge_aware"` or `"cache_aware_offloading"`
+- `detection_mode`: `"cloud_aware"` or `"cache_aware_offloading"`
 - `reference_stop_threshold`: floor similarity (0-1) for a stop
 - `latest.match_mode`: `"reference_embedding"`; `latest.reference_match`: `{ label, sample_id, similarity, similarity_percent, threshold, hit }`; `latest.source`: `"client_match"`
 
@@ -281,9 +281,9 @@ If no reference category is active, the widget shows a hint and stop will not fi
 
 All must be true:
 
-1. Edge-aware stop enabled
+1. Cloud-aware stop enabled
 2. Test-bench session armed (after START)
-3. Edge test-bench mode active
+3. Cloud test-bench mode active
 4. New decode (timestamp not already handled)
 5. `reference_match.hit === true`
 6. `similarity_percent >= 70`
@@ -294,9 +294,9 @@ Pre-START detections are ignored.
 
 ## 12. UI
 
-The **Stop Test Bench** widget has a mutually exclusive **Detection Mode** control: **Edge Only** (`Cae_OFF`) vs **Cache Aware Offloading** (`Cae_ON`).
+The **Stop Test Bench** widget has a mutually exclusive **Detection Mode** control: **Cloud Only** (`Cae_OFF`) vs **Cache Aware Offloading** (`Cae_ON`).
 
-The **VIT Scene Decoder** widget (`Widgets.tsx`) shows the client image-to-image match: similarity %, sample id, reference count, and a mode pill (`EDGE — CLIENT MATCH` / `CACHE AWARE — CLIENT MATCH`). The **Reference Capture** panel saves the latest relayed Pi embedding into categorized folders on the dashboard host (embeddings only — no preview JPEGs).
+The **VIT Scene Decoder** widget (`Widgets.tsx`) shows the client image-to-image match: similarity %, sample id, reference count, and a mode pill (`CLOUD — CLIENT MATCH` / `CACHE AWARE — CLIENT MATCH`). The **Reference Capture** panel saves the latest relayed Pi embedding into categorized folders on the dashboard host (embeddings only — no preview JPEGs).
 
 ## 13. Pi cache vs dashboard reference
 
@@ -314,7 +314,7 @@ The **VIT Scene Decoder** widget (`Widgets.tsx`) shows the client image-to-image
 |---------|--------------|-----|
 | `reference_ready: false` | Missing file or category not activated | Capture snapshots and click Activate |
 | Low similarity | Wrong bottle, angles, or dim mismatch | Re-capture; use `embds3` (512 dims) |
-| No Pi embeddings in Edge Only | `Cae_ON` suppressing publish | `Cae_OFF` for Edge Only |
+| No Pi embeddings in Cloud Only | `Cae_ON` suppressing publish | `Cae_OFF` for Cloud Only |
 | Cache Aware: Pi stops but dashboard idle | Cache hit — expected | Pi handled stop; no embedding forwarded |
 | Never stops | Not armed or pre-START decode | Press START; check `hit` and ≥ 70% |
 | False stops | Threshold too low | Raise thresholds in env or JSON |
@@ -327,7 +327,7 @@ Because both the Pi encoder and the dashboard reference capture use the same `Mo
 To validate:
 
 1. Capture a static scene on the Pi and **Activate** the category.
-2. Point the camera at the same scene in Edge Only mode (`Cae_OFF`).
+2. Point the camera at the same scene in Cloud Only mode (`Cae_OFF`).
 3. Read `latest.reference_match.similarity_percent` from `/api/vit/status`.
 4. Expect **cosine similarity ≈ 0.95+** for the same frame. Large gaps usually mean different angles, lighting, or embedding dimension mismatch.
 

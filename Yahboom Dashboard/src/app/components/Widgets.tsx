@@ -10,14 +10,18 @@ import {
 import { useMetricsStore, useSettingsStore } from '../store';
 import type { WidgetDefinition, MetricsState } from '../types';
 import { sendCommand, sendCameraCommand, setEstopState, toggleRosAuto, vecToCommand, vecToCameraCommand } from '../../lib/Controls';
-import { setEdgeAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/edgeAwareStopLabelEstop';
-import { loadReferenceLibrary } from '../../lib/clientVit/referenceStore';
+import { setCloudAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/cloudAwareStopLabelEstop';
+import { loadReferenceLibrary, applyStopCategory } from '../../lib/clientVit/referenceStore';
 import { uploadEmbeddingsDef } from './UploadEmbeddingsWidget';
+import { liveReferenceCaptureDef } from './LiveReferenceCaptureWidget';
 import {
   benchNeedsPiScript,
   benchHasDashboardBottleStop,
   clearTestBenchCache,
   loadStopToggles,
+  loadStopTargetCategory,
+  saveStopTargetCategory,
+  DEFAULT_STOP_TARGET_CATEGORY,
   loadTestBenchCache,
   saveStopToggles,
   saveTestBenchCache,
@@ -29,8 +33,8 @@ import {
   type StopSource,
 } from '../../lib/testBenchStorage';
 import {
-  clearEdgeAwareStopLabelBenchStop,
-  isEdgeAwareStopLabelBenchStop,
+  clearCloudAwareStopLabelBenchStop,
+  isCloudAwareStopLabelBenchStop,
   setTestBenchManualStopHook,
   setTestBenchSessionActive,
   setTestBenchStopMode,
@@ -1111,7 +1115,7 @@ type VitStatusResponse = {
   reference_active_category?: string | null;
   reference_active_embedding_size_bytes?: number | null;
   reference_snapshot_count?: number;
-  detection_mode?: 'edge_aware' | 'cache_aware_offloading';
+  detection_mode?: 'cloud_aware' | 'cache_aware_offloading';
   latest: {
     top_label: string;
     top_confidence: number;
@@ -1127,6 +1131,16 @@ type VitStatusResponse = {
       hit: boolean;
       stop_hit?: boolean;
     };
+    reference_top_matches?: Array<{
+      label: string;
+      category?: string;
+      sample_id?: number | null;
+      similarity: number;
+      similarity_percent: number;
+      threshold: number;
+      hit: boolean;
+      stop_hit?: boolean;
+    }>;
     text_results?: VitDetection[];
     results: VitDetection[];
     embedding_size: number | null;
@@ -1137,19 +1151,7 @@ type VitStatusResponse = {
   } | null;
 };
 
-type VitReferenceCategory = {
-  category: string;
-  snapshot_count: number;
-  active?: boolean;
-  active_embedding_size_bytes?: number | null;
-  sizes?: Array<{ embedding_size_bytes: number; snapshot_count: number }>;
-};
-
 const REFERENCE_CATEGORY_RE = /^[a-z0-9_-]{1,48}$/;
-
-function normalizeReferenceCategory(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, '_');
-}
 
 const VIT_EMBED_SIZE_OPTIONS = [512, 1024, 2048] as const;
 /** Slider uses equal-spaced indices 0|1|2 so 1024 B is always at 50% (not linear 512–2048). */
@@ -1286,6 +1288,12 @@ function vitDetectionHint(input: {
   return 'Start webrtc_server.py from the top bar to begin detection';
 }
 
+function vitMatchConfidenceColor(pct: number, threshold: number): string {
+  if (pct >= threshold) return accents.green;
+  if (pct >= threshold * 0.6) return accents.yellow;
+  return accents.red;
+}
+
 function VitDecoderWidget() {
   const [status, setStatus] = useState<VitStatusResponse | null>(null);
   const streamRunning = useMetricsStore((s: MetricsState) => s.streamRunning);
@@ -1296,11 +1304,6 @@ function VitDecoderWidget() {
   const fileSizeInitRef = useRef(false);
   const lastEmbedCommitRef = useRef<number | null>(null);
   const [exporting, setExporting] = useState(false);
-  const [refCategory, setRefCategory] = useState('target_bottle');
-  const [refCategories, setRefCategories] = useState<VitReferenceCategory[]>([]);
-  const [capturingRef, setCapturingRef] = useState(false);
-  const [activatingRef, setActivatingRef] = useState(false);
-  const [refMessage, setRefMessage] = useState<string | null>(null);
 
   const serverActive = streamRunning || (status?.vit_server_running ?? false);
   const encoderLive = status?.encoder_live ?? serverActive;
@@ -1324,129 +1327,6 @@ function VitDecoderWidget() {
     const id = setInterval(poll, 500);
     return () => { alive = false; clearInterval(id); };
   }, []);
-
-  useEffect(() => {
-    let alive = true;
-    const loadCategories = async () => {
-      try {
-        const res = await fetch('/api/vit/reference/categories', { cache: 'no-store' });
-        if (!res.ok) return;
-        const data = await res.json() as { categories?: VitReferenceCategory[] };
-        if (!alive) return;
-        setRefCategories(data.categories ?? []);
-      } catch { /* ignore */ }
-    };
-    loadCategories();
-    const id = setInterval(loadCategories, 3000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
-
-  useEffect(() => {
-    if (status?.reference_active_category) {
-      setRefCategory(status.reference_active_category);
-    }
-  }, [status?.reference_active_category]);
-
-  const normalizedRefCategory = normalizeReferenceCategory(refCategory);
-  const refCategoryValid = REFERENCE_CATEGORY_RE.test(normalizedRefCategory);
-
-  const captureReferenceSnapshot = async () => {
-    if (!refCategoryValid || capturingRef) return;
-    setCapturingRef(true);
-    setRefMessage(null);
-    try {
-      const embRes = await fetch('/api/vit/client/latest_embedding', { cache: 'no-store' });
-      if (!embRes.ok) {
-        setRefMessage('No Pi embedding available — start VIT.py on the Pi');
-        return;
-      }
-      const emb = await embRes.json() as { seq?: number; data?: string | null };
-      if (!emb.data || !emb.seq) {
-        setRefMessage('Waiting for Pi embedding — point the camera at your object');
-        return;
-      }
-
-      const form = new FormData();
-      form.append('category', normalizedRefCategory);
-      form.append('label', 'target bottle');
-      form.append('seq', String(emb.seq));
-
-      const res = await fetch('/api/vit/reference/capture', { method: 'POST', body: form });
-      const data = await res.json() as {
-        status?: string;
-        message?: string;
-        sample_id?: number;
-        total?: number;
-        category?: string;
-        embedding_size_bytes?: number;
-      };
-      if (!res.ok || data.status === 'error') {
-        setRefMessage(data.message ?? 'Capture failed');
-        return;
-      }
-      const sizeNote = data.embedding_size_bytes ? ` @ ${data.embedding_size_bytes} B` : '';
-      setRefMessage(
-        `Saved sample ${data.sample_id ?? '?'} (${data.total ?? '?'} in ${data.category ?? normalizedRefCategory}${sizeNote})`,
-      );
-      void loadReferenceLibrary(data.embedding_size_bytes ?? maxEmbedBytes, true);
-      const statusRes = await fetch('/api/vit/status', { cache: 'no-store' });
-      if (statusRes.ok) {
-        setStatus(await statusRes.json() as VitStatusResponse);
-      }
-      const catRes = await fetch('/api/vit/reference/categories', { cache: 'no-store' });
-      if (catRes.ok) {
-        const catData = await catRes.json() as { categories?: VitReferenceCategory[] };
-        setRefCategories(catData.categories ?? []);
-      }
-    } catch {
-      setRefMessage('Capture failed — Pi encoder or video stream unavailable');
-    } finally {
-      setCapturingRef(false);
-    }
-  };
-
-  const activateReferenceCategory = async () => {
-    if (!refCategoryValid || activatingRef) return;
-    setActivatingRef(true);
-    setRefMessage(null);
-    try {
-      const res = await fetch('/api/vit/reference/activate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          category: normalizedRefCategory,
-          embedding_size_bytes: maxEmbedBytes,
-        }),
-      });
-      const data = await res.json() as {
-        status?: string;
-        message?: string;
-        category?: string;
-        embedding_size_bytes?: number;
-      };
-      if (!res.ok || data.status === 'error') {
-        setRefMessage(data.message ?? 'Activate failed — capture at this embedding size first');
-        return;
-      }
-      const sizeLabel = data.embedding_size_bytes ? ` @ ${data.embedding_size_bytes} B` : '';
-      setRefMessage(`Active: ${data.category ?? normalizedRefCategory}${sizeLabel}`);
-      // Refresh the browser i2i reference vectors for the newly activated category.
-      void loadReferenceLibrary(maxEmbedBytes, true);
-      const statusRes = await fetch('/api/vit/status', { cache: 'no-store' });
-      if (statusRes.ok) {
-        setStatus(await statusRes.json() as VitStatusResponse);
-      }
-      const catRes = await fetch('/api/vit/reference/categories', { cache: 'no-store' });
-      if (catRes.ok) {
-        const catData = await catRes.json() as { categories?: VitReferenceCategory[] };
-        setRefCategories(catData.categories ?? []);
-      }
-    } catch {
-      setRefMessage('Activate failed');
-    } finally {
-      setActivatingRef(false);
-    }
-  };
 
   useEffect(() => {
     if (!status?.embedding_command_active) {
@@ -1474,13 +1354,14 @@ function VitDecoderWidget() {
   };
 
   const tryActivateReferenceSize = async (bytes: number) => {
-    if (!refCategoryValid) return;
+    const category = status?.reference_active_category;
+    if (!category || !REFERENCE_CATEGORY_RE.test(category)) return;
     try {
       const res = await fetch('/api/vit/reference/activate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          category: normalizedRefCategory,
+          category,
           embedding_size_bytes: bytes,
         }),
       });
@@ -1536,10 +1417,10 @@ function VitDecoderWidget() {
   const displayLatest = encoderLive ? latest : null;
 
   // Detection is image-to-image and runs in the browser for both modes: the
-  // client matches Pi embeddings (Edge Only = every embedding; Cache Aware =
+  // client matches Pi embeddings (Cloud Only = every embedding; Cache Aware =
   // cache-miss embeddings) against the dashboard reference library and posts the
   // result back. The widget shows that recorded reference match.
-  const detectionMode = status?.detection_mode ?? 'edge_aware';
+  const detectionMode = status?.detection_mode ?? 'cloud_aware';
   const referenceReady = status?.reference_ready ?? false;
 
   const isReferenceMatch = displayLatest?.match_mode === 'reference_embedding';
@@ -1564,7 +1445,7 @@ function VitDecoderWidget() {
     if (detectionMode === 'cache_aware_offloading') {
       return encoderLive ? 'CACHE AWARE — CLIENT MATCH' : 'CACHE AWARE — WAITING PI';
     }
-    return encoderLive ? 'EDGE — CLIENT MATCH' : 'EDGE — WAITING PI';
+    return encoderLive ? 'CLOUD — CLIENT MATCH' : 'CLOUD — WAITING PI';
   })();
 
   // Decoder activity pill — "MODEL READY" only while actively decoding; otherwise
@@ -1588,7 +1469,7 @@ function VitDecoderWidget() {
 
   const detectionHint = (() => {
     if (!referenceReady) {
-      return 'Capture reference snapshots into the library (any category)';
+      return 'Capture reference snapshots in Live Reference Capture (any category)';
     }
     if (isReferenceMatch && referenceMatch) {
       const sample = referenceMatch.sample_id != null
@@ -1597,7 +1478,7 @@ function VitDecoderWidget() {
       const cat = referenceMatch.category ? ` · ${referenceMatch.category}` : '';
       return `${referenceMatch.label}${cat}${sample}`;
     }
-    if (detectionMode === 'edge_aware') {
+    if (detectionMode === 'cloud_aware') {
       if (!encoderLive) return 'Waiting for Pi embeddings — start VIT.py on the Pi';
       return 'Client matching Pi embeddings — no match yet';
     }
@@ -1611,6 +1492,13 @@ function VitDecoderWidget() {
       ? vitEmbedBytesToSliderIndex(latestEmbedBytes)
       : undefined;
 
+  const topMatches = (() => {
+    const fromStatus = displayLatest?.reference_top_matches;
+    if (fromStatus && fromStatus.length > 0) return fromStatus.slice(0, 3);
+    if (referenceMatch) return [referenceMatch];
+    return [];
+  })();
+
   return (
     <div className="h-full flex flex-col gap-1.5 min-h-0">
       {/* Header */}
@@ -1623,8 +1511,8 @@ function VitDecoderWidget() {
         <div className="flex items-center gap-1.5 flex-shrink-0">
           <span className="pill" style={{
             padding: '1px 6px', fontSize: 8, fontWeight: 700,
-            background: detectionMode === 'edge_aware' ? 'rgba(6,182,212,0.18)' : 'rgba(139,92,246,0.18)',
-            color: detectionMode === 'edge_aware' ? accents.cyan : accents.purple,
+            background: detectionMode === 'cloud_aware' ? 'rgba(6,182,212,0.18)' : 'rgba(139,92,246,0.18)',
+            color: detectionMode === 'cloud_aware' ? accents.cyan : accents.purple,
           }}>
             {modeStatusLabel}
           </span>
@@ -1683,136 +1571,76 @@ function VitDecoderWidget() {
         </div>
       </div>
 
-      {/* Image-to-image similarity (backend match) */}
+      {/* Top reference matches — up to 3 labels + confidence */}
       <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1.5">
-        {referenceMatch ? (
-          <div className="flex flex-col gap-0.5">
-            <div className="flex items-center justify-between gap-2">
-              <span className="truncate" style={{ fontSize: 11, color: confColor }}>
-                {`${referenceMatch.label}${referenceMatch.category ? ` · ${referenceMatch.category}` : ''}${referenceMatch.sample_id != null ? ` · sample ${referenceMatch.sample_id}` : ''}`}
-              </span>
-              <span style={{ fontSize: 11, fontWeight: 700, color: confColor, fontFamily: 'monospace' }}>
-                {referenceMatch.similarity_percent.toFixed(1)}%
-              </span>
-            </div>
-            <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--secondary)' }}>
-              <div style={{
-                width: `${Math.max(0, Math.min(100, referenceMatch.similarity_percent))}%`,
-                height: '100%', background: confColor, transition: 'width 0.2s',
-              }} />
-            </div>
-            <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
-              {`threshold ${referenceStopThresholdPct.toFixed(0)}% · ${matchSource}`}
-            </span>
-          </div>
+        <div className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+          Scene Matches
+        </div>
+        {topMatches.length > 0 ? (
+          topMatches.map((match, index) => {
+            const pct = match.similarity_percent;
+            const rowThreshold = match.threshold * 100;
+            const rowColor = vitMatchConfidenceColor(pct, rowThreshold);
+            const sample = match.sample_id != null ? ` · sample ${match.sample_id}` : '';
+            const cat = match.category ? ` · ${match.category}` : '';
+            return (
+              <div key={`${match.label}-${match.sample_id ?? index}`} className="flex flex-col gap-0.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate" style={{ fontSize: 11, color: rowColor }}>
+                    {`${index + 1}. ${match.label}${cat}${sample}`}
+                  </span>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {match.stop_hit && (
+                      <span className="pill" style={{
+                        padding: '0 4px', fontSize: 7, fontWeight: 700,
+                        background: 'rgba(244,63,94,0.18)', color: accents.red,
+                      }}>
+                        STOP
+                      </span>
+                    )}
+                    {match.hit && !match.stop_hit && (
+                      <span className="pill" style={{
+                        padding: '0 4px', fontSize: 7, fontWeight: 700,
+                        background: 'rgba(34,197,94,0.18)', color: accents.green,
+                      }}>
+                        MATCH
+                      </span>
+                    )}
+                    <span style={{ fontSize: 11, fontWeight: 700, color: rowColor, fontFamily: 'monospace' }}>
+                      {pct.toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+                <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--secondary)' }}>
+                  <div style={{
+                    width: `${Math.max(0, Math.min(100, pct))}%`,
+                    height: '100%', background: rowColor, transition: 'width 0.2s',
+                  }} />
+                </div>
+              </div>
+            );
+          })
         ) : (
           <div className="flex-1 flex items-center justify-center text-center px-2" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             {!referenceReady
-              ? 'Capture reference snapshots below — library scan runs automatically'
-              : detectionMode === 'edge_aware'
+              ? 'Capture reference snapshots in Live Reference Capture — library scan runs automatically'
+              : detectionMode === 'cloud_aware'
                 ? (!encoderLive
                     ? 'Waiting for Pi embeddings — start VIT.py on the Pi'
                     : 'Scanning full reference library — similarity will appear here')
                 : 'Cache Aware — waiting for a Pi cache-miss embedding'}
           </div>
         )}
+        {topMatches.length > 0 && (
+          <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+            {`threshold ${referenceStopThresholdPct.toFixed(0)}% · ${matchSource} · top ${topMatches.length}`}
+          </span>
+        )}
         <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
           {referenceReady
             ? `${status?.reference_count ?? 0} sample${(status?.reference_count ?? 0) === 1 ? '' : 's'} · ${libraryCategoryCount} categor${libraryCategoryCount === 1 ? 'y' : 'ies'} · stop: ${referenceStopCategory}${referenceStopReady ? '' : ' (no samples)'}`
             : 'no reference library loaded'}
         </span>
-      </div>
-
-      {/* Reference capture — latest Pi embedding only */}
-      <div className="flex-shrink-0 rounded-xl px-3 py-2 flex flex-col gap-1.5"
-        style={{ background: 'rgba(0,0,0,0.12)', border: '1px solid var(--stroke-subtle)' }}>
-        <div className="flex items-center justify-between gap-2">
-          <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
-            Reference Capture
-          </span>
-          {status?.reference_active_category && (
-            <span className="pill" style={{
-              padding: '1px 6px', fontSize: 8, fontWeight: 700,
-              background: 'rgba(34,197,94,0.14)', color: accents.green,
-            }}>
-              {`${status.reference_active_category}${status.reference_active_embedding_size_bytes ? ` · ${status.reference_active_embedding_size_bytes} B` : ''} · ${status.reference_snapshot_count ?? 0}`}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5">
-          <input
-            value={refCategory}
-            onChange={(e) => setRefCategory(e.target.value)}
-            placeholder="category e.g. target_bottle"
-            className="flex-1 min-w-0 rounded-md px-2 py-1"
-            style={{
-              fontSize: 10,
-              background: 'var(--bg-surface)',
-              border: `1px solid ${refCategoryValid ? 'var(--stroke-subtle)' : accents.red}`,
-              color: 'var(--text-primary)',
-            }}
-          />
-          {refCategories.length > 0 && (
-            <select
-              value={normalizedRefCategory}
-              onChange={(e) => setRefCategory(e.target.value)}
-              className="rounded-md px-1 py-1"
-              style={{
-                fontSize: 9,
-                maxWidth: 96,
-                background: 'var(--bg-surface)',
-                border: '1px solid var(--stroke-subtle)',
-                color: 'var(--text-secondary)',
-              }}
-            >
-              {refCategories.map((c) => (
-                <option key={c.category} value={c.category}>
-                  {`${c.category} (${c.snapshot_count})`}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => void captureReferenceSnapshot()}
-            disabled={!refCategoryValid || capturingRef || !encoderLive}
-            title={encoderLive ? 'Save latest Pi MQTT embedding' : 'Start VIT.py on the Pi first'}
-            className="flex items-center gap-1"
-            style={{
-              padding: '3px 8px', borderRadius: 6, fontSize: 9, fontWeight: 700,
-              border: '1px solid var(--accent-purple)',
-              background: 'rgba(139,92,246,0.16)', color: 'var(--accent-purple)',
-              cursor: !refCategoryValid || capturingRef || !encoderLive ? 'not-allowed' : 'pointer',
-              opacity: !refCategoryValid || capturingRef || !encoderLive ? 0.5 : 1,
-            }}
-          >
-            {capturingRef ? <Loader2 size={11} className="animate-spin" /> : <Camera size={11} />}
-            {capturingRef ? 'CAPTURING…' : 'CAPTURE'}
-          </button>
-          <button
-            onClick={() => void activateReferenceCategory()}
-            disabled={!refCategoryValid || activatingRef}
-            title="Use this category at the current embedding size for matching"
-            style={{
-              padding: '3px 8px', borderRadius: 6, fontSize: 9, fontWeight: 700,
-              border: '1px solid var(--stroke-strong)',
-              background: 'var(--bg-surface)', color: 'var(--text-secondary)',
-              cursor: !refCategoryValid || activatingRef ? 'not-allowed' : 'pointer',
-              opacity: !refCategoryValid || activatingRef ? 0.5 : 1,
-            }}
-          >
-            {activatingRef ? 'ACTIVATING…' : 'ACTIVATE'}
-          </button>
-        </div>
-        {refMessage && (
-          <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>{refMessage}</div>
-        )}
-        {!refCategoryValid && refCategory.trim() !== '' && (
-          <div style={{ fontSize: 8, color: accents.red }}>
-            Use 1–48 chars: a-z, 0-9, _, -
-          </div>
-        )}
       </div>
 
       {/* Embedding size — 1024 B is the physical centre of 512–2048 */}
@@ -1926,14 +1754,14 @@ type StopModeApiResponse = {
   cache_aware_mqtt_ready?: boolean;
   cache_script_launch_mode?: 'terminal';
   cache_script_log?: string;
-  edge_aware_enabled?: boolean;
+  cloud_aware_enabled?: boolean;
   status?: string;
   message?: string;
 };
 
 function cacheBenchStartReady(data: StopModeApiResponse): boolean {
-  if (data.mode === 'edge_aware') return true;
-  if (!benchNeedsPiScript(data.mode ?? 'edge_aware')) return true;
+  if (data.mode === 'cloud_aware') return true;
+  if (!benchNeedsPiScript(data.mode ?? 'cloud_aware')) return true;
   return data.cache_script_running === true && data.cache_script_detection_ready === true;
 }
 
@@ -2012,6 +1840,22 @@ function isPiAutoOffAck(
   if (isPiAutoOffStatus(drive.status)) return true;
   // Brief auto_disabled can be missed between polls; auto_mode clears on auto_off.
   if (awaitingAutoOff && drive.auto_mode === false) return true;
+  return false;
+}
+
+/**
+ * Cache-aware Pi hit ack — VIT sends stop before auto_off, so drive status is
+ * often "stopped" before auto_disabled. Restores pre-d39446f0 test-bench behavior.
+ */
+function isPiCacheStopAck(
+  drive: DriveStatusPayload | null | undefined,
+  awaitingAutoOff: boolean,
+  cacheAwareMode: boolean,
+): boolean {
+  if (!drive) return false;
+  if (isEstopDriveStatus(drive.status)) return false;
+  if (isPiAutoOffAck(drive, awaitingAutoOff)) return true;
+  if (cacheAwareMode && drive.status === 'stopped') return true;
   return false;
 }
 
@@ -2190,12 +2034,18 @@ function StopTestBenchWidget() {
   );
   const [stopMode, setStopMode] = useState<StopBenchMode>(() => {
     const t = loadStopToggles();
-    return togglesToStopMode(t.cacheOn, t.edgeOn);
+    return togglesToStopMode(t.cacheOn, t.cloudOn);
   });
   const [stopToggles, setStopToggles] = useState<StopModeToggles>(() => loadStopToggles());
+  const [stopTargetCategory, setStopTargetCategory] = useState(
+    () => loadStopTargetCategory(),
+  );
+  const [stopTargetOptions, setStopTargetOptions] = useState<Array<{ category: string; snapshot_count: number }>>(
+    () => [{ category: DEFAULT_STOP_TARGET_CATEGORY, snapshot_count: 0 }],
+  );
   const [cacheScriptReady, setCacheScriptReady] = useState(() => {
     const t = loadStopToggles();
-    return !benchNeedsPiScript(togglesToStopMode(t.cacheOn, t.edgeOn));
+    return !benchNeedsPiScript(togglesToStopMode(t.cacheOn, t.cloudOn));
   });
   const [cacheScriptRunning, setCacheScriptRunning] = useState(false);
   const [modeSwitching, setModeSwitching] = useState(false);
@@ -2231,7 +2081,47 @@ function StopTestBenchWidget() {
   useEffect(() => { stopModeRef.current = stopMode; }, [stopMode]);
   useEffect(() => { stopTogglesRef.current = stopToggles; }, [stopToggles]);
   useEffect(() => {
-    const mode = togglesToStopMode(stopToggles.cacheOn, stopToggles.edgeOn);
+    void applyStopCategory(loadStopTargetCategory());
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    const loadCategories = async () => {
+      try {
+        const res = await fetch('/api/vit/reference/categories', { cache: 'no-store' });
+        if (!res.ok || !alive) return;
+        const data = await res.json() as {
+          categories?: Array<{ category: string; snapshot_count: number }>;
+        };
+        if (!alive) return;
+        const categories = data.categories ?? [];
+        const merged = new Map<string, { category: string; snapshot_count: number }>();
+        merged.set(DEFAULT_STOP_TARGET_CATEGORY, {
+          category: DEFAULT_STOP_TARGET_CATEGORY,
+          snapshot_count: categories.find((c) => c.category === DEFAULT_STOP_TARGET_CATEGORY)?.snapshot_count ?? 0,
+        });
+        for (const cat of categories) {
+          merged.set(cat.category, cat);
+        }
+        if (!merged.has(stopTargetCategory)) {
+          merged.set(stopTargetCategory, { category: stopTargetCategory, snapshot_count: 0 });
+        }
+        setStopTargetOptions(Array.from(merged.values()).sort((a, b) => a.category.localeCompare(b.category)));
+      } catch { /* backend may be starting */ }
+    };
+    void loadCategories();
+    const id = setInterval(() => { void loadCategories(); }, 4000);
+    return () => { alive = false; clearInterval(id); };
+  }, [stopTargetCategory]);
+
+  const onStopTargetChange = (category: string) => {
+    setStopTargetCategory(category);
+    saveStopTargetCategory(category);
+    void applyStopCategory(category);
+  };
+
+  useEffect(() => {
+    const mode = togglesToStopMode(stopToggles.cacheOn, stopToggles.cloudOn);
     if (mode) setTestBenchStopMode(mode);
   }, [stopToggles]);
 
@@ -2262,7 +2152,7 @@ function StopTestBenchWidget() {
       }
       preMoveStopReasonRef.current = takeTestBenchStopReason() ?? null;
       if (isStopLabel) {
-        latchStopSource('edge_dashboard');
+        latchStopSource('cloud_dashboard');
         if (confidence != null) stopConfidenceRef.current = confidence;
         if (useMetricsStore.getState().autoRunning) {
           sendCommand('auto_off');
@@ -2279,8 +2169,8 @@ function StopTestBenchWidget() {
     // Mode follows the local toggle (off on startup), not any stale backend mode.
     const cacheOn = stopTogglesRef.current.cacheOn;
     setStopMode(togglesToStopMode(cacheOn, true));
-    // Edge-aware bottle stop has no toggle — always on.
-    setEdgeAwareStopEnabled(true);
+    // Cloud-aware bottle stop has no toggle — always on.
+    setCloudAwareStopEnabled(true);
     const mqttReady = data.cache_aware_mqtt_ready === true || data.cache_script_running === true;
     // Cache-aware readiness comes solely from the car's Cae_Ready over MQTT.
     setCacheScriptRunning(cacheOn && mqttReady);
@@ -2342,7 +2232,7 @@ function StopTestBenchWidget() {
     stopCommandPendingAtRef.current = null;
     firstStopTsRef.current = null;
     preMoveStopReasonRef.current = null;
-    clearEdgeAwareStopLabelBenchStop();
+    clearCloudAwareStopLabelBenchStop();
     stopSourceRef.current = null;
     stopConfidenceRef.current = null;
     autoOffWarnedRef.current = false;
@@ -2366,7 +2256,7 @@ function StopTestBenchWidget() {
     if (source === 'manual') {
       return { stopConfidencePercent: null };
     }
-    if (source === 'edge_dashboard') {
+    if (source === 'cloud_dashboard') {
       return { stopConfidencePercent: stopConfidenceRef.current };
     }
     const detection = await fetchLatestCacheDetectionForStop(latestCacheDetectionRef.current);
@@ -2404,7 +2294,7 @@ function StopTestBenchWidget() {
 
   const disableAutoRoam = useCallback(() => {
     // Pi owns disengage when its cache-aware script stopped the run; otherwise
-    // (edge bottle stop) the dashboard sends auto_off.
+    // (cloud bottle stop) the dashboard sends auto_off.
     if (stopModeRef.current === 'cache_aware_offloading' && stopSourceRef.current === 'cache_pi') return;
     if (useMetricsStore.getState().autoRunning) {
       sendCommand('auto_off');
@@ -2413,7 +2303,7 @@ function StopTestBenchWidget() {
 
   const isAwaitingAutoOff = useCallback(() => (
     stopCommandPendingRef.current
-    || isEdgeAwareStopLabelBenchStop()
+    || isCloudAwareStopLabelBenchStop()
     || stopSourceRef.current != null
     || (sessionActiveRef.current && armedRef.current)
   ), []);
@@ -2447,7 +2337,9 @@ function StopTestBenchWidget() {
       || stopCommandPendingRef.current
       || cacheStop;
     if (!missionArmed) return false;
-    if (!isPiAutoOffAck(drive, isAwaitingAutoOff())) return false;
+    if (!isPiCacheStopAck(drive, isAwaitingAutoOff(), benchNeedsPiScript(stopModeRef.current))) {
+      return false;
+    }
 
     if (activeStartRef.current == null && commandSentAtRef.current != null) {
       armMissionTimerIfNeeded();
@@ -2464,8 +2356,8 @@ function StopTestBenchWidget() {
     }
 
     if (!stopSourceRef.current) {
-      if (isEdgeAwareStopLabelBenchStop() || stopCommandPendingRef.current) {
-        latchStopSource('edge_dashboard');
+      if (isCloudAwareStopLabelBenchStop() || stopCommandPendingRef.current) {
+        latchStopSource('cloud_dashboard');
       } else if (benchNeedsPiScript(stopModeRef.current) || cacheStop) {
         latchStopSource('cache_pi');
       }
@@ -2473,7 +2365,7 @@ function StopTestBenchWidget() {
 
     if (
       stopModeRef.current === 'cache_aware_offloading'
-      || isEdgeAwareStopLabelBenchStop()
+      || isCloudAwareStopLabelBenchStop()
     ) {
       freezeTimerAtNow();
     } else {
@@ -2487,6 +2379,7 @@ function StopTestBenchWidget() {
 
   const latchCacheDetectionStop = useCallback((detection: CacheDetectionApi['detection']) => {
     if (!detection || cacheDetectionSimilarityPercent(detection) == null) return;
+    const firstLatch = stopSourceRef.current !== 'cache_pi';
     latestCacheDetectionRef.current = detection;
     latchStopSource('cache_pi');
     armMissionTimerIfNeeded();
@@ -2496,6 +2389,37 @@ function StopTestBenchWidget() {
       firstStopTsRef.current = null;
     }
     freezeTimerAtNow();
+    if (firstLatch) {
+      const pct = cacheDetectionSimilarityPercent(detection);
+      useMetricsStore.getState().pushEvent(
+        'warning',
+        pct != null
+          ? `Cache stop — Pi bottle detected (${pct.toFixed(1)}% similarity), mission ended`
+          : 'Cache stop — Pi bottle detected, mission ended',
+        'yahboom/detect/status',
+      );
+    }
+  }, [armMissionTimerIfNeeded, freezeTimerAtNow, latchStopSource]);
+
+  /** Fallback when yahboom/detect/status MQTT is missed but drive status shows Pi stopped. */
+  const latchCacheStopFromDriveStatus = useCallback((drive: DriveStatusPayload | null) => {
+    if (!drive?.status || !isPiCacheStopAck(drive, true, benchNeedsPiScript(stopModeRef.current))) {
+      return;
+    }
+    if (stopSourceRef.current === 'cache_pi') return;
+    latchStopSource('cache_pi');
+    armMissionTimerIfNeeded();
+    if (!stopCommandPendingRef.current) {
+      stopCommandPendingRef.current = true;
+      stopCommandPendingAtRef.current = Date.now();
+      firstStopTsRef.current = null;
+    }
+    freezeTimerAtNow();
+    useMetricsStore.getState().pushEvent(
+      'warning',
+      `Cache stop — Pi drive status ${drive.status}, mission ended`,
+      'yahboom/drive/status',
+    );
   }, [armMissionTimerIfNeeded, freezeTimerAtNow, latchStopSource]);
 
   const cancelSession = useCallback((message: string) => {
@@ -2516,7 +2440,7 @@ function StopTestBenchWidget() {
 
   const startTest = async () => {
     if (sessionActiveRef.current) return;
-    const benchMode = togglesToStopMode(stopTogglesRef.current.cacheOn, stopTogglesRef.current.edgeOn);
+    const benchMode = togglesToStopMode(stopTogglesRef.current.cacheOn, stopTogglesRef.current.cloudOn);
     if (useMetricsStore.getState().estopActive) {
       useMetricsStore.getState().pushEvent('warning', 'Mission test blocked — clear emergency stop first');
       return;
@@ -2578,22 +2502,33 @@ function StopTestBenchWidget() {
       const drive = await fetchDriveStatus();
       if (!alive) return;
 
+      const cacheAwareSession = sessionActiveRef.current
+        && benchNeedsPiScript(stopModeRef.current);
+
       // Cache-aware Pi stop: poll yahboom/detect/status for the whole session.
-      if (sessionActiveRef.current && benchNeedsPiScript(stopModeRef.current)) {
+      if (cacheAwareSession) {
         cacheDetectPollCountRef.current += 1;
-        if (cacheDetectPollCountRef.current % 2 === 0) {
-          const detection = await fetchLatestCacheDetectionForStop(
-            latestCacheDetectionRef.current,
-          );
-          if (detection && alive) {
-            latchCacheDetectionStop(detection);
-          }
+        const detection = await fetchLatestCacheDetectionForStop(
+          latestCacheDetectionRef.current,
+        );
+        if (detection && alive) {
+          latchCacheDetectionStop(detection);
         }
+      }
+
+      // Drive-status fallback when detect MQTT is missed (VIT still sends stop on yahboom/cmd).
+      if (cacheAwareSession && drive) {
+        latchCacheStopFromDriveStatus(drive);
       }
 
       if (activeStartRef.current == null) {
         const awaitingAutoOff = isAwaitingAutoOff();
-        if (drive && isPiAutoOffAck(drive, awaitingAutoOff)) {
+        const cacheAware = benchNeedsPiScript(stopModeRef.current);
+        if (drive && isPiCacheStopAck(drive, awaitingAutoOff, cacheAware)) {
+          if (cacheAware && sessionActiveRef.current) {
+            await tryEndRunOnPiAutoOff(drive);
+            return;
+          }
           const cacheStop = stopSourceRef.current === 'cache_pi'
             || latestCacheDetectionRef.current != null;
           if (cacheStop) {
@@ -2609,7 +2544,7 @@ function StopTestBenchWidget() {
           if (pendingAt != null && Date.now() - pendingAt > AUTO_OFF_WARN_MS) {
             warnAutoOffStillPending();
           }
-          if (drive && isPiAutoOffAck(drive, true)) {
+          if (drive && isPiCacheStopAck(drive, true, benchNeedsPiScript(stopModeRef.current))) {
             await tryEndRunOnPiAutoOff(drive);
           }
           return;
@@ -2657,7 +2592,8 @@ function StopTestBenchWidget() {
 
       if (!armedRef.current && stopSourceRef.current !== 'cache_pi') return;
 
-      if (isPiAutoOffAck(drive, isAwaitingAutoOff())) {
+      const cacheAware = benchNeedsPiScript(stopModeRef.current);
+      if (isPiCacheStopAck(drive, isAwaitingAutoOff(), cacheAware)) {
         await tryEndRunOnPiAutoOff(drive);
         return;
       }
@@ -2667,7 +2603,7 @@ function StopTestBenchWidget() {
         if (pendingAt != null && Date.now() - pendingAt > AUTO_OFF_WARN_MS) {
           warnAutoOffStillPending();
         }
-        if (drive && isPiAutoOffAck(drive, true)) {
+        if (drive && isPiCacheStopAck(drive, true, cacheAware)) {
           await tryEndRunOnPiAutoOff(drive);
         }
         return;
@@ -2692,7 +2628,7 @@ function StopTestBenchWidget() {
     const id = setInterval(() => { void poll(); }, ROBOT_TIME_POLL_MS);
     void poll();
     return () => { alive = false; clearInterval(id); };
-  }, [armMissionTimerIfNeeded, cancelPreMoveStop, cancelSession, cancelSessionOnEstop, commandSentAt, disableAutoRoam, freezeTimerAtNow, isAwaitingAutoOff, latchCacheDetectionStop, latchStopSource, tryEndRunOnPiAutoOff, warnAutoOffStillPending]);
+  }, [armMissionTimerIfNeeded, cancelPreMoveStop, cancelSession, cancelSessionOnEstop, commandSentAt, disableAutoRoam, freezeTimerAtNow, isAwaitingAutoOff, latchCacheDetectionStop, latchCacheStopFromDriveStatus, latchStopSource, tryEndRunOnPiAutoOff, warnAutoOffStillPending]);
 
   // Re-render ~10×/s so the live Pi-clock extrapolation advances between MQTT samples.
   useEffect(() => {
@@ -2781,10 +2717,10 @@ function StopTestBenchWidget() {
       ? Math.max(0, displayPiNow - elapsedAnchor)
       : 0;
   const cacheOn = stopToggles.cacheOn;
-  const edgeOn = stopToggles.edgeOn;
-  // Edge-aware bottle stop is always on, so a mission always has a dashboard stop.
+  const cloudOn = stopToggles.cloudOn;
+  // Cloud-aware bottle stop is always on, so a mission always has a dashboard stop.
   const bothStopsOff = false;
-  const effectiveStopMode = togglesToStopMode(cacheOn, edgeOn);
+  const effectiveStopMode = togglesToStopMode(cacheOn, cloudOn);
   const benchModeForGating = effectiveStopMode ?? stopMode;
   const cacheStartBlocked = benchNeedsPiScript(benchModeForGating) && !cacheScriptReady;
   const cacheWaitingEmbedding = benchNeedsPiScript(benchModeForGating) && cacheScriptRunning && !cacheScriptReady;
@@ -2843,15 +2779,15 @@ function StopTestBenchWidget() {
     saveStopToggles(next);
   };
 
-  // Cache-Aware Offloading toggle: publish Cae_ON / Cae_OFF over MQTT. Edge-aware
+  // Cache-Aware Offloading toggle: publish Cae_ON / Cae_OFF over MQTT. Cloud-aware
   // bottle stop stays armed regardless. Start stays gated on the Pi's ready reply.
   const applyCacheAware = (nextCache: boolean) => {
-    persistStopToggles({ cacheOn: nextCache, edgeOn: true });
+    persistStopToggles({ cacheOn: nextCache, cloudOn: true });
     const mode = togglesToStopMode(nextCache, true);
     setStopMode(mode);
     setTestBenchStopMode(mode);
-    setEdgeAwareStopEnabled(true);
-    // Cache needs Pi confirmation; edge-only is always ready.
+    setCloudAwareStopEnabled(true);
+    // Cache needs Pi confirmation; cloud-only is always ready.
     setCacheScriptReady(!nextCache);
     setCacheScriptRunning(false);
     setModeSwitching(true);
@@ -2894,11 +2830,11 @@ function StopTestBenchWidget() {
     }
     if (effectiveStopMode === 'cache_aware_offloading') {
       return cacheScriptReady
-        ? 'Cache Aware — Pi stops on cache hits; on a cache miss the client matches the Pi embedding and stops. Activate a reference category.'
+        ? 'Cache Aware — Pi stops on cache hits; on a cache miss the client matches the Pi embedding and stops.'
         : 'Waiting for Raspberry Pi to confirm cache-aware ready — Start is disabled.';
     }
-    if (effectiveStopMode === 'edge_aware') {
-      return 'Edge Only — Pi sends every embedding (Cae_OFF); the client scans the full reference library and stops only on target_bottle (≥ 75% similarity). Needs VIT.py running on the Pi.';
+    if (effectiveStopMode === 'cloud_aware') {
+      return 'Cloud Only — Pi sends every embedding (Cae_OFF); the client scans the full reference library and stops only on the selected stop target (≥ 75% similarity). Needs VIT.py running on the Pi.';
     }
     return '';
   })();
@@ -3017,7 +2953,24 @@ function StopTestBenchWidget() {
         </div>
       </div>
 
-      {/* Detection mode — mutually exclusive: Edge Only (Pi sends every embedding,
+      <label className="flex-shrink-0 flex flex-col gap-0.5">
+        <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+          Stop Target
+        </span>
+        <select
+          value={stopTargetCategory}
+          onChange={(e) => onStopTargetChange(e.target.value)}
+          style={inputStyle}
+        >
+          {stopTargetOptions.map((cat) => (
+            <option key={cat.category} value={cat.category}>
+              {cat.category}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {/* Detection mode — mutually exclusive: Cloud Only (Pi sends every embedding,
           Cae_OFF) or Cache Aware Offloading (Pi sends cache-miss embeddings,
           Cae_ON). The client matches Pi embeddings in both. */}
       <div className="flex-shrink-0 rounded-xl px-2.5 py-2"
@@ -3028,10 +2981,10 @@ function StopTestBenchWidget() {
           </span>
           <span className="pill truncate" style={{
             padding: '1px 6px', fontSize: 8, fontWeight: 700, maxWidth: '55%',
-            background: effectiveStopMode === 'edge_aware'
+            background: effectiveStopMode === 'cloud_aware'
               ? 'rgba(6,182,212,0.18)'
               : 'rgba(139,92,246,0.18)',
-            color: effectiveStopMode === 'edge_aware'
+            color: effectiveStopMode === 'cloud_aware'
               ? accents.cyan
               : accents.purple,
           }}>
@@ -3053,10 +3006,10 @@ function StopTestBenchWidget() {
               border: !cacheOn ? '1px solid rgba(255,255,255,0.22)' : '1px solid var(--stroke-subtle)',
               boxShadow: !cacheOn ? '0 8px 24px rgba(6,182,212,0.4), inset 0 1px 0 rgba(255,255,255,0.2)' : 'none',
             }}
-            title="Edge Only — Pi sends every embedding (Cae_OFF); the client matches each against your reference library"
+            title="Cloud Only — Pi sends every embedding (Cae_OFF); the client matches each against your reference library"
           >
             <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
-              Edge Only
+              Cloud Only
             </span>
             {!cacheOn ? 'Active' : 'Select'}
           </button>
@@ -3201,11 +3154,11 @@ function StopTestBenchWidget() {
                   padding: '1px 4px',
                   textAlign: 'center',
                   background:
-                    r.stopMode === 'edge_aware'
+                    r.stopMode === 'cloud_aware'
                       ? 'rgba(6,182,212,0.18)'
                       : 'rgba(139,92,246,0.18)',
                   color:
-                    r.stopMode === 'edge_aware'
+                    r.stopMode === 'cloud_aware'
                       ? accents.cyan
                       : accents.purple,
                 }}
@@ -3219,7 +3172,7 @@ function StopTestBenchWidget() {
                   fontSize: 8,
                   fontWeight: 600,
                   color:
-                    r.stopSource === 'edge_dashboard'
+                    r.stopSource === 'cloud_dashboard'
                       ? accents.cyan
                       : r.stopSource === 'cache_pi'
                         ? accents.purple
@@ -3348,6 +3301,7 @@ export const WIDGET_REGISTRY: WidgetDefinition[] = [
   slamMapDef,
   vitDecoderDef,
   uploadEmbeddingsDef,
+  liveReferenceCaptureDef,
   movementJoystickDef,
   cameraJoystickDef,
   stopButtonDef,

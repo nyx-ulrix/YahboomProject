@@ -4,7 +4,7 @@
 // /api/vit/reference/library), decodes base64 float32 blobs into normalized
 // vectors, and groups them by embedding dimension. The browser matches Pi
 // embeddings against all vectors for scene-decoder display; only the stop
-// category (default target_bottle) can trigger edge stop.
+// category (default target_bottle) can trigger cloud stop.
 
 export const STOP_REFERENCE_CATEGORY = 'target_bottle';
 
@@ -136,6 +136,30 @@ export function getStopThreshold(): number {
 
 export function getStopCategory(): string {
   return stopCategory;
+}
+
+export function setStopCategory(category: string): void {
+  stopCategory = category;
+}
+
+/** Persist stop target on the backend and refresh the client library. */
+export async function applyStopCategory(
+  category: string,
+  embeddingSizeBytes?: number | null,
+): Promise<boolean> {
+  try {
+    const res = await fetch('/api/vit/reference/stop_category', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category }),
+    });
+    if (!res.ok) return false;
+    const data = (await res.json()) as { stop_category?: string };
+    stopCategory = data.stop_category ?? category;
+    return loadReferenceLibrary(embeddingSizeBytes, true);
+  } catch {
+    return false;
+  }
 }
 
 export function getLibraryEmbeddingSizeBytes(): number | null {

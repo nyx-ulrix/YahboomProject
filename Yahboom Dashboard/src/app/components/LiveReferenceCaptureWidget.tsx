@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ImagePlus, Upload } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Camera, Loader2 } from 'lucide-react';
+import { useMetricsStore } from '../store';
+import type { MetricsState } from '../types';
+import { DEFAULT_STOP_TARGET_CATEGORY } from '../../lib/testBenchStorage';
 import { loadReferenceLibrary } from '../../lib/clientVit/referenceStore';
 
 type LibrarySample = {
@@ -20,6 +23,11 @@ type ReferenceOption = {
   category: string;
 };
 
+type VitStatusSummary = {
+  encoder_live?: boolean;
+  vit_server_running?: boolean;
+};
+
 const EMBED_SIZE_OPTIONS = [512, 1024, 2048] as const;
 const CATEGORY_RE = /^[a-z0-9_-]{1,48}$/;
 
@@ -27,17 +35,17 @@ function normalizeCategory(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
 }
 
-export function UploadEmbeddingsWidget() {
-  const [name, setName] = useState('');
-  const [categoryOverride, setCategoryOverride] = useState('');
+export function LiveReferenceCaptureWidget() {
+  const [name, setName] = useState('target bottle');
+  const [categoryOverride, setCategoryOverride] = useState(DEFAULT_STOP_TARGET_CATEGORY);
   const [embedBytes, setEmbedBytes] = useState<(typeof EMBED_SIZE_OPTIONS)[number]>(2048);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
   const [samples, setSamples] = useState<LibrarySample[]>([]);
   const [categories, setCategories] = useState<LibraryCategory[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [vitStatus, setVitStatus] = useState<VitStatusSummary | null>(null);
+  const [capturingRef, setCapturingRef] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const streamRunning = useMetricsStore((s: MetricsState) => s.streamRunning);
+  const encoderLive = vitStatus?.encoder_live ?? streamRunning;
 
   const derivedCategory = useMemo(() => {
     const raw = categoryOverride.trim() || name.trim();
@@ -57,6 +65,8 @@ export function UploadEmbeddingsWidget() {
       seenDisplay.add(key);
       options.push({ display, name: optionName, category });
     };
+
+    addOption('target bottle', 'target bottle', DEFAULT_STOP_TARGET_CATEGORY);
 
     for (const cat of categories) {
       const displayName = cat.category.replace(/_/g, ' ');
@@ -91,7 +101,7 @@ export function UploadEmbeddingsWidget() {
     }
   };
 
-  const refreshReferenceNames = useCallback(async () => {
+  const refreshLibrary = useCallback(async () => {
     try {
       const res = await fetch(`/api/vit/reference/samples?embedding_size_bytes=${embedBytes}`, { cache: 'no-store' });
       if (!res.ok) return;
@@ -107,111 +117,97 @@ export function UploadEmbeddingsWidget() {
   }, [embedBytes]);
 
   useEffect(() => {
-    void refreshReferenceNames();
-    const id = setInterval(() => { void refreshReferenceNames(); }, 4000);
+    void refreshLibrary();
+    const id = setInterval(() => { void refreshLibrary(); }, 4000);
     return () => clearInterval(id);
-  }, [refreshReferenceNames]);
+  }, [refreshLibrary]);
 
-  useEffect(() => () => {
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-  }, [previewUrl]);
-
-  const onFileSelected = (file: File | null) => {
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    setSelectedFile(file);
-    setPreviewUrl(file ? URL.createObjectURL(file) : null);
-    setMessage(null);
-  };
-
-  const uploadEmbedding = async () => {
-    if (!selectedFile || !name.trim() || !categoryValid || uploading) return;
-    setUploading(true);
-    setMessage(null);
-    try {
-      const form = new FormData();
-      form.append('image', selectedFile);
-      form.append('name', name.trim());
-      if (categoryOverride.trim()) {
-        form.append('category', categoryOverride.trim());
+  useEffect(() => {
+    let alive = true;
+    const pollStatus = async () => {
+      try {
+        const res = await fetch('/api/vit/status', { cache: 'no-store' });
+        if (!res.ok || !alive) return;
+        const data = await res.json() as VitStatusSummary;
+        if (!alive) return;
+        setVitStatus(data);
+      } catch {
+        /* backend may be starting */
       }
-      form.append('embedding_size_bytes', String(embedBytes));
+    };
+    void pollStatus();
+    const id = setInterval(() => { void pollStatus(); }, 2000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
 
-      const res = await fetch('/api/vit/reference/upload', { method: 'POST', body: form });
+  const captureReferenceSnapshot = async () => {
+    if (!categoryValid || capturingRef) return;
+    setCapturingRef(true);
+    setMessage(null);
+    const captureLabel = name.trim() || derivedCategory.replace(/_/g, ' ');
+    try {
+      const embRes = await fetch('/api/vit/client/latest_embedding', { cache: 'no-store' });
+      if (!embRes.ok) {
+        setMessage('No Pi embedding available — start VIT.py on the Pi');
+        return;
+      }
+      const emb = await embRes.json() as { seq?: number; data?: string | null };
+      if (!emb.data || !emb.seq) {
+        setMessage('Waiting for Pi embedding — point the camera at your object');
+        return;
+      }
+
+      const form = new FormData();
+      form.append('category', derivedCategory);
+      form.append('label', captureLabel);
+      form.append('seq', String(emb.seq));
+
+      const res = await fetch('/api/vit/reference/capture', { method: 'POST', body: form });
       const data = await res.json() as {
         status?: string;
         message?: string;
         sample_id?: number;
         total?: number;
         category?: string;
-        label?: string;
+        embedding_size_bytes?: number;
       };
       if (!res.ok || data.status === 'error') {
-        setMessage(data.message ?? 'Upload failed');
+        setMessage(data.message ?? 'Capture failed');
         return;
       }
+      const sizeNote = data.embedding_size_bytes ? ` @ ${data.embedding_size_bytes} B` : '';
       setMessage(
-        `Saved "${data.label ?? name.trim()}" as sample ${data.sample_id ?? '?'} in ${data.category ?? derivedCategory} (${data.total ?? '?'} total)`,
+        `Saved sample ${data.sample_id ?? '?'} (${data.total ?? '?'} in ${data.category ?? derivedCategory}${sizeNote})`,
       );
-      void loadReferenceLibrary(embedBytes, true);
-      void refreshReferenceNames();
-      onFileSelected(null);
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      void loadReferenceLibrary(data.embedding_size_bytes ?? embedBytes, true);
+      void refreshLibrary();
     } catch {
-      setMessage('Could not reach backend');
+      setMessage('Capture failed — Pi encoder or video stream unavailable');
     } finally {
-      setUploading(false);
+      setCapturingRef(false);
     }
   };
 
   return (
     <div className="flex flex-col gap-3 h-full min-h-0">
-      <div className="flex items-center gap-2">
-        <ImagePlus size={16} style={{ color: 'var(--accent-purple)' }} />
+      <div className="flex items-center gap-2 min-w-0">
+        <Camera size={16} style={{ color: 'var(--accent-purple)', flexShrink: 0 }} />
         <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
-          Upload Embeddings
+          Live Reference Capture
         </span>
       </div>
 
       <p style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.45, margin: 0 }}>
-        Upload a product photo, name it, and save a MobileCLIP embedding to the reference library.
+        Save the latest Pi camera embedding into the reference library. Defaults to target bottle — pick another reference or type a new name.
       </p>
-
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => fileInputRef.current?.click()}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click(); }}
-        className="rounded-2xl flex items-center justify-center cursor-pointer overflow-hidden"
-        style={{
-          minHeight: 120,
-          border: '1px dashed var(--stroke-strong)',
-          background: 'var(--bg-surface)',
-        }}
-      >
-        {previewUrl ? (
-          <img src={previewUrl} alt="Preview" style={{ maxHeight: 140, maxWidth: '100%', objectFit: 'contain' }} />
-        ) : (
-          <div className="flex flex-col items-center gap-1 py-6" style={{ color: 'var(--text-muted)' }}>
-            <Upload size={22} />
-            <span style={{ fontSize: 11 }}>Click to choose an image</span>
-          </div>
-        )}
-      </div>
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(e) => onFileSelected(e.target.files?.[0] ?? null)}
-      />
 
       <label className="flex flex-col gap-1">
         <span style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 600 }}>Name</span>
         <input
-          list="upload-embed-reference-names"
+          list="live-ref-capture-names"
           value={name}
           onChange={(e) => onNameChange(e.target.value)}
-          placeholder="e.g. tea canister"
+          placeholder="e.g. target bottle"
           className="rounded-xl px-3 py-2 outline-none"
           style={{
             background: 'var(--bg-surface)',
@@ -220,14 +216,11 @@ export function UploadEmbeddingsWidget() {
             fontSize: 13,
           }}
         />
-        <datalist id="upload-embed-reference-names">
+        <datalist id="live-ref-capture-names">
           {referenceOptions.map((opt) => (
             <option key={`${opt.category}:${opt.display}`} value={opt.display} />
           ))}
         </datalist>
-        <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-          Pick an existing reference or type a new name
-        </span>
       </label>
 
       <label className="flex flex-col gap-1">
@@ -275,35 +268,43 @@ export function UploadEmbeddingsWidget() {
 
       <button
         type="button"
-        onClick={() => { void uploadEmbedding(); }}
-        disabled={!selectedFile || !name.trim() || !categoryValid || uploading}
-        className="rounded-xl py-2.5 font-semibold"
+        onClick={() => { void captureReferenceSnapshot(); }}
+        disabled={!categoryValid || capturingRef || !encoderLive}
+        title={encoderLive ? 'Save latest Pi MQTT embedding' : 'Start VIT.py on the Pi first'}
+        className="flex items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 font-semibold"
         style={{
+          fontSize: 13,
+          border: '1px solid var(--accent-purple)',
           background: 'linear-gradient(135deg, var(--accent-purple), #4c1d95)',
           color: '#fff',
-          opacity: (!selectedFile || !name.trim() || !categoryValid || uploading) ? 0.5 : 1,
-          border: '1px solid rgba(255,255,255,0.15)',
-          fontSize: 13,
-          cursor: uploading ? 'wait' : 'pointer',
+          cursor: !categoryValid || capturingRef || !encoderLive ? 'not-allowed' : 'pointer',
+          opacity: !categoryValid || capturingRef || !encoderLive ? 0.5 : 1,
         }}
       >
-        {uploading ? 'Encoding…' : 'Save embedding'}
+        {capturingRef ? <Loader2 size={14} className="animate-spin" /> : <Camera size={14} />}
+        {capturingRef ? 'Capturing…' : 'Capture from Pi'}
       </button>
 
       {message && (
         <p style={{ fontSize: 11, color: 'var(--text-secondary)', margin: 0 }}>{message}</p>
       )}
+
+      {!encoderLive && (
+        <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: 0 }}>
+          Pi encoder offline — start VIT.py on the Pi to capture live embeddings.
+        </p>
+      )}
     </div>
   );
 }
 
-export const uploadEmbeddingsDef = {
-  id: 'upload_embeddings_widget',
-  name: 'Upload Embeddings',
+export const liveReferenceCaptureDef = {
+  id: 'live_reference_capture_widget',
+  name: 'Live Reference Capture',
   group: 'health' as const,
   sizeClass: 'M' as const,
   defaultSize: { w: 2, h: 4, minW: 2, minH: 3 },
-  icon: 'ImagePlus',
+  icon: 'Camera',
   pinned: false,
-  component: UploadEmbeddingsWidget,
+  component: LiveReferenceCaptureWidget,
 };

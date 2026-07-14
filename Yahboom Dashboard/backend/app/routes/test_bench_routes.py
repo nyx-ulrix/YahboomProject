@@ -9,11 +9,11 @@ the Pi's retained {"ready": ...} status on yahboom/cache_aware/ready.
 from flask import Blueprint, jsonify, request
 
 from app.services.mqtt_service import mqtt_service
-from app.services.vit.edge_aware_estop import (
+from app.services.vit.cloud_aware_estop import (
     STOP_MODE_CACHE,
-    STOP_MODE_EDGE,
+    STOP_MODE_CLOUD,
     STOP_MODES,
-    edge_aware_estop,
+    cloud_aware_estop,
 )
 from app.services.vit.vit_service import vit_service
 
@@ -31,7 +31,7 @@ def _cache_script_fields() -> dict:
 
 
 def _stop_mode_payload() -> dict:
-    payload = edge_aware_estop.get_status()
+    payload = cloud_aware_estop.get_status()
     payload.update(_cache_script_fields())
     return payload
 
@@ -60,8 +60,8 @@ def set_cache_aware():
     on = bool(data.get("on"))
 
     success, message = mqtt_service.publish_cache_aware_command(on)
-    mode = STOP_MODE_CACHE if on else STOP_MODE_EDGE
-    edge_aware_estop.set_mode(mode)
+    mode = STOP_MODE_CACHE if on else STOP_MODE_CLOUD
+    cloud_aware_estop.set_mode(mode)
     vit_service.set_detection_mode(mode)
 
     payload = {
@@ -83,7 +83,7 @@ def set_stop_mode():
             "message": f"Field 'mode' must be one of: {allowed}.",
         }), 400
 
-    applied = edge_aware_estop.set_mode(mode)
+    applied = cloud_aware_estop.set_mode(mode)
     vit_service.set_detection_mode(applied)
     return jsonify({
         "status": "ok",

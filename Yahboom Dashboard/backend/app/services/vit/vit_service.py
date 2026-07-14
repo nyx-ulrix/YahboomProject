@@ -29,7 +29,7 @@ _BACKEND_ROOT = _HERE.parents[2]                  # backend/
 
 try:
     from config import (
-        EDGE_AWARE_REFERENCE_THRESHOLD,
+        CLOUD_AWARE_REFERENCE_THRESHOLD,
         VIT_REFERENCE_DEFAULT_THRESHOLD,
         VIT_REFERENCE_EMBEDDINGS_FILE,
         VIT_REFERENCE_LABEL,
@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - standalone import fallback
     VIT_REFERENCE_LABEL = "target bottle"
     VIT_REFERENCE_MATCH_ENABLED = True
     VIT_REFERENCE_DEFAULT_THRESHOLD = 0.70
-    EDGE_AWARE_REFERENCE_THRESHOLD = 0.75
+    CLOUD_AWARE_REFERENCE_THRESHOLD = 0.75
 
 try:
     from dotenv import load_dotenv
@@ -103,9 +103,9 @@ _TOP_K            = int(os.getenv("VIT_TOP_K", "3"))
 # match the client reports back.
 _ENABLE_MODEL     = os.getenv("VIT_ENABLE_MODEL", "false").lower() in ("true", "1", "yes", "on")
 _LABELS_FILE      = Path(os.getenv("VIT_LABELS_FILE", str(_HERE / "labels.json")))
-# Detection mode mirrored from the test-bench toggle (edge_aware | cache_aware_offloading).
-_DEFAULT_DETECTION_MODE = os.getenv("VIT_CLIENT_DETECTION_MODE", "edge_aware")
-_VALID_DETECTION_MODES = ("edge_aware", "cache_aware_offloading")
+# Detection mode mirrored from the test-bench toggle (cloud_aware | cache_aware_offloading).
+_DEFAULT_DETECTION_MODE = os.getenv("VIT_CLIENT_DETECTION_MODE", "cloud_aware")
+_VALID_DETECTION_MODES = ("cloud_aware", "cache_aware_offloading")
 
 # Session history retention (0 = unlimited).
 _SESSION_MAX      = int(os.getenv("VIT_SESSION_MAX", "5000"))
@@ -209,7 +209,7 @@ def _infer_target_dims(raw_bytes: bytes, meta: dict | None = None) -> int:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Reference embedding store (image-to-image matching on the edge)
+# Reference embedding store (image-to-image matching on the cloud)
 # ═════════════════════════════════════════════════════════════════════════════
 
 @dataclass(frozen=True)
@@ -241,6 +241,33 @@ class ReferenceMatch:
         return out
 
 
+def _reference_match_from_payload(item: dict) -> ReferenceMatch | None:
+    """Build a ReferenceMatch from a client match payload item."""
+    if not isinstance(item, dict):
+        return None
+    try:
+        label = str(item.get("label", VIT_REFERENCE_LABEL))
+        category = item.get("category")
+        category = str(category) if category is not None else None
+        similarity = float(item.get("similarity", 0.0))
+        threshold = float(item.get("threshold", CLOUD_AWARE_REFERENCE_THRESHOLD))
+        hit = bool(item.get("hit", False))
+        stop_hit = bool(item.get("stop_hit", False))
+        sample_id = item.get("sample_id")
+        sample_id = int(sample_id) if sample_id is not None else None
+    except (TypeError, ValueError):
+        return None
+    return ReferenceMatch(
+        label=label,
+        sample_id=sample_id,
+        similarity=similarity,
+        threshold=threshold,
+        hit=hit,
+        category=category,
+        stop_hit=stop_hit,
+    )
+
+
 class ReferenceEmbeddingStore:
     """
     Loads Pi-compatible reference embeddings and matches live MQTT vectors
@@ -254,7 +281,7 @@ class ReferenceEmbeddingStore:
         label: str = VIT_REFERENCE_LABEL,
         enabled: bool = VIT_REFERENCE_MATCH_ENABLED,
         default_threshold: float = VIT_REFERENCE_DEFAULT_THRESHOLD,
-        stop_threshold: float = EDGE_AWARE_REFERENCE_THRESHOLD,
+        stop_threshold: float = CLOUD_AWARE_REFERENCE_THRESHOLD,
     ) -> None:
         self.file_path = Path(file_path)
         self.label = label
@@ -586,7 +613,7 @@ class VITService:
         self._last_decode_error: str | None = None
 
         # Detection mode mirrored from the test-bench toggle. Both modes now feed
-        # the browser: Edge Only = Pi sends every embedding (Cae_OFF); Cache Aware =
+        # the browser: Cloud Only = Pi sends every embedding (Cae_OFF); Cache Aware =
         # Pi sends only cache-miss embeddings (Cae_ON). The browser does the
         # image-to-image match against the dashboard reference library.
         self._detection_mode: str = _DEFAULT_DETECTION_MODE
@@ -780,7 +807,7 @@ class VITService:
             embedding_dim = None
 
         # Relay the Pi embedding to the browser for image-to-image matching. This
-        # happens in BOTH modes: Edge Only forwards every embedding; Cache Aware
+        # happens in BOTH modes: Cloud Only forwards every embedding; Cache Aware
         # forwards only the cache-miss embeddings the Pi chose to publish. The
         # backend does NOT match here — the client decodes and reports back.
         self._store_client_embedding(raw_bytes, embedding_dim, envelope_meta, detection_mode)
@@ -855,7 +882,7 @@ class VITService:
         """
         Record an image-to-image match the browser computed (Pi embedding vs the
         dashboard reference library), so /api/vit/status, the widget, the session
-        history/CSV, and the edge-aware estop hook stay populated. The stop itself
+        history/CSV, and the cloud-aware estop hook stay populated. The stop itself
         is triggered client-side; this is telemetry only.
         """
         try:
@@ -863,17 +890,13 @@ class VITService:
             category = payload.get("category")
             category = str(category) if category is not None else None
             similarity = float(payload.get("similarity", 0.0))
-            threshold = float(payload.get("threshold", EDGE_AWARE_REFERENCE_THRESHOLD))
+            threshold = float(payload.get("threshold", CLOUD_AWARE_REFERENCE_THRESHOLD))
             hit = bool(payload.get("hit", False))
             stop_hit = bool(payload.get("stop_hit", False))
             sample_id = payload.get("sample_id")
             sample_id = int(sample_id) if sample_id is not None else None
         except (TypeError, ValueError) as exc:
             return {"status": "error", "message": f"bad payload: {exc}"}
-
-        embedding_dim = _as_opt_int(payload.get("embedding_dim"))
-        embedding_size = _as_opt_int(payload.get("embedding_size"))
-        image_file_size = _as_opt_int(payload.get("image_file_size"))
 
         reference_match = ReferenceMatch(
             label=label,
@@ -884,6 +907,20 @@ class VITService:
             category=category,
             stop_hit=stop_hit,
         )
+        top_matches: list[dict] = []
+        raw_top = payload.get("top_matches")
+        if isinstance(raw_top, list):
+            for item in raw_top[:3]:
+                match = _reference_match_from_payload(item)
+                if match is not None:
+                    top_matches.append(match.to_dict())
+        if not top_matches:
+            top_matches = [reference_match.to_dict()]
+
+        embedding_dim = _as_opt_int(payload.get("embedding_dim"))
+        embedding_size = _as_opt_int(payload.get("embedding_size"))
+        image_file_size = _as_opt_int(payload.get("image_file_size"))
+
         results = [(label, reference_match.similarity_percent)]
         with self._lock:
             self._decodes_succeeded += 1
@@ -896,12 +933,15 @@ class VITService:
             image_file_size=image_file_size,
             source="client_match",
             reference_match=reference_match,
+            reference_top_matches=top_matches,
             match_mode="reference_embedding",
         )
         return {"status": "ok", "reference_match": reference_match.to_dict()}
 
     def set_detection_mode(self, mode: str) -> str:
-        """Mirror the test-bench detection mode (edge_aware | cache_aware_offloading)."""
+        """Mirror the test-bench detection mode (cloud_aware | cache_aware_offloading)."""
+        if mode == "edge_aware":
+            mode = "cloud_aware"
         if mode not in _VALID_DETECTION_MODES:
             return self._detection_mode
         with self._lock:
@@ -1032,6 +1072,7 @@ class VITService:
         image_file_size: Optional[int] = None,
         source: str = "embedding",
         reference_match: ReferenceMatch | None = None,
+        reference_top_matches: list[dict] | None = None,
         match_mode: str | None = None,
         text_results: list[tuple[str, float]] | None = None,
     ) -> None:
@@ -1064,6 +1105,8 @@ class VITService:
                 latest["match_mode"] = match_mode
             if reference_match is not None:
                 latest["reference_match"] = reference_match.to_dict()
+            if reference_top_matches:
+                latest["reference_top_matches"] = reference_top_matches[:3]
             if text_results:
                 latest["text_results"] = [
                     {"label": l, "confidence": c} for l, c in text_results
@@ -1088,10 +1131,10 @@ class VITService:
                 self._session = self._session[-_SESSION_MAX:]
 
         try:
-            from app.services.vit.edge_aware_estop import edge_aware_estop
-            edge_aware_estop.on_vit_results(results, reference_match=reference_match)
+            from app.services.vit.cloud_aware_estop import cloud_aware_estop
+            cloud_aware_estop.on_vit_results(results, reference_match=reference_match)
         except Exception as exc:
-            log.debug("Edge-aware estop hook failed: %s", exc)
+            log.debug("Cloud-aware estop hook failed: %s", exc)
 
     def _encoder_live_locked(self) -> bool:
         """True when recent MQTT proves the encoder pipeline is producing data."""
@@ -1194,7 +1237,7 @@ class VITService:
             "reference_file": str(ref_store.file_path),
             "reference_error": ref_store.error if library_count == 0 else None,
             "reference_match_enabled": ref_store.enabled,
-            "reference_stop_threshold": EDGE_AWARE_REFERENCE_THRESHOLD,
+            "reference_stop_threshold": CLOUD_AWARE_REFERENCE_THRESHOLD,
             "reference_stop_category": lib_status.get("stop_category"),
             "reference_stop_ready": lib_status.get("stop_category_count", 0) > 0,
             "reference_library_categories": lib_status.get("categories", []),
@@ -1430,7 +1473,7 @@ def _meta_from_envelope(obj: dict) -> dict:
                 except Exception:
                     pass
 
-    # Cache-aware relay fields (VIT.py publish_embedding_to_edge extras). Used by
+    # Cache-aware relay fields (VIT.py publish_embedding_to_cloud extras). Used by
     # the client cache-aware loop to consume only cache-miss embeddings.
     frame_id = _as_opt_int(obj.get("frame_id") or obj.get("frame"))
     if frame_id is not None:

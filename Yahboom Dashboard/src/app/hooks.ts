@@ -6,8 +6,8 @@ import { sendCommand, sendCameraCommand, setEstopState, vecToCameraCommand, type
 import { connectBroker } from '../lib/Connections';
 import {
   processVitStatusForStopLabelEstop,
-  setEdgeAwareStopEnabled,
-} from '../lib/edgeAwareStopLabelEstop';
+  setCloudAwareStopEnabled,
+} from '../lib/cloudAwareStopLabelEstop';
 import { useClientReferenceDetection } from '../lib/useClientReferenceDetection';
 import type { LiveGridData, MetricsState } from './types';
 
@@ -478,16 +478,16 @@ export function useKeyboardCamera(onChange?: (v: { pan: number; tilt: number }) 
 
 /**
  * Image-to-image bottle stop. Matching runs in the browser for both modes:
- * useClientReferenceDetection matches Pi embeddings (Edge Only = every embedding;
+ * useClientReferenceDetection matches Pi embeddings (Cloud Only = every embedding;
  * Cache Aware = cache-miss embeddings) against the dashboard reference library and
  * posts the result back. The recorded match surfaces on /api/vit/status, which
  * this hook polls to fire the stop while armed.
  */
-export function useEdgeAwareStopLabelEstop() {
+export function useCloudAwareStopLabelEstop() {
   useClientReferenceDetection();
 
   useEffect(() => {
-    setEdgeAwareStopEnabled(true);
+    setCloudAwareStopEnabled(true);
 
     let alive = true;
 

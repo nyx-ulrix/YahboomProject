@@ -95,14 +95,14 @@ VIT_COMMAND_TOPIC = os.getenv("MQTT_VIT_COMMAND_TOPIC",  "yahboom/vit/command")
 VIT_CONFIDENCE_THRESHOLD = float(os.getenv("VIT_CONFIDENCE_THRESHOLD", "60.0"))
 # Optional: set VIT_EMBED_DIM in .env to force 128/256/512-dim decode (default: auto per payload).
 
-# Edge image-to-image reference matching (vit_service.py — copy Pi cache_embeddings.json)
+# Cloud image-to-image reference matching (vit_service.py — copy Pi cache_embeddings.json)
 _VIT_SERVICES_DIR = Path(__file__).resolve().parent / "app" / "services" / "vit"
 VIT_REFERENCE_EMBEDDINGS_FILE = os.getenv(
     "VIT_REFERENCE_EMBEDDINGS_FILE",
     str(_VIT_SERVICES_DIR / "reference_embeddings.json"),
 )
 VIT_REFERENCE_LABEL = os.getenv("VIT_REFERENCE_LABEL", "target bottle")
-# Category slug that triggers edge stop (client scans the full library for display).
+# Category slug that triggers cloud stop (client scans the full library for display).
 VIT_STOP_REFERENCE_CATEGORY = os.getenv("VIT_STOP_REFERENCE_CATEGORY", "target_bottle")
 VIT_REFERENCE_MATCH_ENABLED = os.getenv(
     "VIT_REFERENCE_MATCH_ENABLED", "true"
@@ -110,8 +110,9 @@ VIT_REFERENCE_MATCH_ENABLED = os.getenv(
 VIT_REFERENCE_DEFAULT_THRESHOLD = float(
     os.getenv("VIT_REFERENCE_DEFAULT_THRESHOLD", "0.70")
 )
-EDGE_AWARE_REFERENCE_THRESHOLD = float(
-    os.getenv("EDGE_AWARE_REFERENCE_THRESHOLD", "0.75")
+CLOUD_AWARE_REFERENCE_THRESHOLD = float(
+    os.getenv("CLOUD_AWARE_REFERENCE_THRESHOLD")
+    or os.getenv("EDGE_AWARE_REFERENCE_THRESHOLD", "0.75")
 )
 
 # Reference library on the dashboard host (see reference_capture.py)
@@ -125,10 +126,13 @@ VIT_REFERENCE_LIBRARY_DIR = os.getenv(
 # backend only relays embeddings and records the reported match. Optional
 # text-label decode is OFF by default (needs torch + open_clip on the host).
 VIT_ENABLE_MODEL = os.getenv("VIT_ENABLE_MODEL", "false").lower() in ("true", "1", "yes", "on")
-# Default detection mode mirrored to vit_service (edge_aware | cache_aware_offloading).
-# Edge Only = Pi sends every embedding (Cae_OFF); Cache Aware = Pi sends only
+# Default detection mode mirrored to vit_service (cloud_aware | cache_aware_offloading).
+# Cloud Only = Pi sends every embedding (Cae_OFF); Cache Aware = Pi sends only
 # cache-miss embeddings (Cae_ON). The browser matches in both.
-VIT_CLIENT_DETECTION_MODE = os.getenv("VIT_CLIENT_DETECTION_MODE", "edge_aware")
+_detection_mode = os.getenv("VIT_CLIENT_DETECTION_MODE", "cloud_aware")
+VIT_CLIENT_DETECTION_MODE = (
+    "cloud_aware" if _detection_mode == "edge_aware" else _detection_mode
+)
 
 # SLAM settings
 # yahboom/scan  – raw LaserScan JSON (angle_min, angle_increment, ranges[])

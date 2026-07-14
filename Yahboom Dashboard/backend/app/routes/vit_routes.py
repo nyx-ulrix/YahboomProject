@@ -7,7 +7,7 @@ POST /api/vit/clear         – clear the current session history
 GET  /api/vit/export        – download the session history as a CSV file
 GET  /api/vit/reference/categories – list reference categories
 POST /api/vit/reference/capture    – save latest Pi MQTT embedding
-POST /api/vit/reference/activate   – activate a category for edge matching
+POST /api/vit/reference/activate   – activate a category for cloud matching
 GET  /api/vit/reference/status     – reference library status
 GET  /api/vit/reference/active     – active reference embeddings (for browser i2i)
 GET  /api/vit/reference/library    – full reference library for browser scan
@@ -33,15 +33,17 @@ from app.services.vit.reference_capture import (
     get_active_embedding_size_bytes,
     get_reference_capture_status,
     get_sample_image_path,
+    get_stop_category,
     list_categories,
     list_library_samples,
     load_library_for_client,
     move_library_sample,
     name_to_category,
+    set_stop_category,
 )
 from app.services.vit.image_encoder import ImageEncoderError
 from config import (
-    EDGE_AWARE_REFERENCE_THRESHOLD,
+    CLOUD_AWARE_REFERENCE_THRESHOLD,
     VIT_REFERENCE_DEFAULT_THRESHOLD,
     VIT_REFERENCE_EMBEDDINGS_FILE,
     VIT_REFERENCE_LABEL,
@@ -103,6 +105,33 @@ def export_csv():
 @vit_bp.route("/reference/categories", methods=["GET"])
 def reference_categories():
     return jsonify({"status": "ok", "categories": list_categories()})
+
+
+@vit_bp.route("/reference/stop_category", methods=["GET", "POST"])
+def reference_stop_category():
+    """
+    Get or set the reference category that qualifies for cloud stop in the test bench.
+
+    POST JSON: { "category": "target_bottle" }
+    """
+    if request.method == "GET":
+        return jsonify({
+            "status": "ok",
+            "stop_category": get_stop_category(),
+            "default_stop_category": VIT_STOP_REFERENCE_CATEGORY,
+        })
+
+    data = request.get_json(silent=True) or {}
+    category = data.get("category")
+    if not category:
+        return jsonify({"status": "error", "message": "Field 'category' is required."}), 400
+    try:
+        return jsonify(set_stop_category(category))
+    except ReferenceCaptureError as exc:
+        payload = {"status": "error", "message": str(exc)}
+        if exc.details:
+            payload["details"] = exc.details
+        return jsonify(payload), 400
 
 
 @vit_bp.route("/reference/status", methods=["GET"])
@@ -209,7 +238,7 @@ def reference_active():
         "active_embedding_size_bytes": get_active_embedding_size_bytes(),
         "label": VIT_REFERENCE_LABEL,
         "default_threshold": VIT_REFERENCE_DEFAULT_THRESHOLD,
-        "stop_threshold": EDGE_AWARE_REFERENCE_THRESHOLD,
+        "stop_threshold": CLOUD_AWARE_REFERENCE_THRESHOLD,
         "objects": [],
     }
     if not path.exists():
@@ -252,7 +281,7 @@ def reference_library():
 
     Returns every captured category at the requested embedding size. The client
     matches live Pi embeddings against all objects for display; only
-    ``stop_category`` (default ``target_bottle``) qualifies for edge stop.
+    ``stop_category`` (default ``target_bottle``) qualifies for cloud stop.
     """
     size_raw = request.args.get("embedding_size_bytes")
     embedding_size_bytes = None

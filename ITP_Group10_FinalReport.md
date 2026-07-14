@@ -897,7 +897,7 @@ publication.
 
 ### 4.5.9 Dashboard Stop-Command Handling
 
-When bottle confidence reaches 75%, edgeAwareStopLabelEstop.ts sends auto_off then stop on
+When bottle confidence reaches 75%, cloudAwareStopLabelEstop.ts sends auto_off then stop on
 yahboom/cmd. This uses a soft stop (not estop_on), so the operator can resume without clearing a
 hard emergency latch.
 

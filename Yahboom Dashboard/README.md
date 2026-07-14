@@ -66,7 +66,7 @@ Object detection is **image-to-image**. The **client never encodes images** — 
 
 | Mode | What the Pi sends | Matching | Pi `Cae_*` | Who stops |
 |------|-------------------|----------|-----------|-----------|
-| **Edge Only** | Every Pi embedding | Browser i2i vs dashboard reference | `Cae_OFF` | Dashboard on i2i hit |
+| **Cloud Only** | Every Pi embedding | Browser i2i vs dashboard reference | `Cae_OFF` | Dashboard on i2i hit |
 | **Cache Aware Offloading** | Cache-miss embeddings only | Browser i2i vs dashboard reference | `Cae_ON` | Pi on cache **hit**; dashboard on cache **miss** + i2i hit |
 
 Flow:
@@ -74,9 +74,9 @@ Flow:
 - **Pi** encodes camera frames and publishes embeddings on MQTT (`yahboom/vit/embedding`).
 - **Backend** relays each embedding to `GET /api/vit/client/latest_embedding` (no live matching).
 - **Browser** (`useClientReferenceDetection`) polls embeddings, runs i2i match (`src/lib/clientVit/`), POSTs result to `/api/vit/client/match_result`.
-- **Stop:** `useEdgeAwareStopLabelEstop()` polls `/api/vit/status` and fires on `reference_match.hit` ≥ 70% (`src/lib/edgeAwareStopLabelEstop.ts`).
+- **Stop:** `useCloudAwareStopLabelEstop()` polls `/api/vit/status` and fires on `reference_match.hit` ≥ 70% (`src/lib/cloudAwareStopLabelEstop.ts`).
 
-No MobileCLIP model runs on the dashboard host for detection. Full guide: [docs/EDGE_REFERENCE_MATCHING.md](docs/EDGE_REFERENCE_MATCHING.md).
+No MobileCLIP model runs on the dashboard host for detection. Full guide: [docs/CLOUD_REFERENCE_MATCHING.md](docs/CLOUD_REFERENCE_MATCHING.md).
 
 ## Environment
 
@@ -95,12 +95,12 @@ A `.env` file in the project root configures both frontend and backend. Common v
 | `PI_CACHE_AWARE_LOG` | Pi log file for cache-aware script (default `/tmp/yahboom_cache_aware.log`) |
 | `CACHE_SCRIPT_EMBEDDING_READY_SNIPPET` | Log substring that unlocks START in Cache Aware mode |
 | `MQTT_CACHE_AWARE_READY_TOPIC` | Retained MQTT topic for embedding-ready (default `yahboom/cache_aware/ready`) |
-| `VIT_REFERENCE_EMBEDDINGS_FILE` | Path to edge reference embeddings JSON (default `backend/app/services/vit/reference_embeddings.json`) |
+| `VIT_REFERENCE_EMBEDDINGS_FILE` | Path to cloud reference embeddings JSON (default `backend/app/services/vit/reference_embeddings.json`) |
 | `VIT_REFERENCE_LABEL` | Label filter inside the reference file (default `target bottle`) |
 | `VIT_REFERENCE_MATCH_ENABLED` | Enable image-to-image matching (default `true`) |
-| `EDGE_AWARE_REFERENCE_THRESHOLD` | Minimum cosine similarity for a reference hit (default `0.70`) |
+| `CLOUD_AWARE_REFERENCE_THRESHOLD` | Minimum cosine similarity for a reference hit (default `0.70`) |
 | `VIT_ENABLE_MODEL` | Optional backend CLIP text-label decode — off; detection is client i2i (default `false`) |
-| `VIT_CLIENT_DETECTION_MODE` | Default mode mirrored to `vit_service` (`edge_aware` \| `cache_aware_offloading`) |
+| `VIT_CLIENT_DETECTION_MODE` | Default mode mirrored to `vit_service` (`cloud_aware` \| `cache_aware_offloading`) |
 
 ## Build
 
@@ -120,17 +120,17 @@ Widgets are added from the picker (**P**). Key control widgets:
 
 ### Stop-Time Test Bench
 
-Located in `src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode logic: `backend/app/routes/test_bench_routes.py`, `backend/app/services/vit/edge_aware_estop.py`, `backend/app/services/test_bench/cache_aware_ssh.py`. Pi embedding relay: `vit_service.py`; client image-to-image: `src/lib/clientVit/` + `useClientReferenceDetection.ts`; bottle stop: `src/lib/edgeAwareStopLabelEstop.ts` via `useEdgeAwareStopLabelEstop()` in `src/app/hooks.ts`.
+Located in `src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode logic: `backend/app/routes/test_bench_routes.py`, `backend/app/services/vit/cloud_aware_estop.py`, `backend/app/services/test_bench/cache_aware_ssh.py`. Pi embedding relay: `vit_service.py`; client image-to-image: `src/lib/clientVit/` + `useClientReferenceDetection.ts`; bottle stop: `src/lib/cloudAwareStopLabelEstop.ts` via `useCloudAwareStopLabelEstop()` in `src/app/hooks.ts`.
 
 **Purpose:** Run repeated stop-time experiments, compare stop modes, and export results as CSV.
 
 #### Detection modes (mutually exclusive)
 
-Default: **Edge Only**. Preference is saved in browser `localStorage` (`yahboom_stop_bench_mode`).
+Default: **Cloud Only**. Preference is saved in browser `localStorage` (`yahboom_stop_bench_mode`).
 
 | Mode | API value | Behaviour |
 |------|-----------|-----------|
-| **Edge Only** (default) | `edge_aware` | Pi sends every embedding (`Cae_OFF`); the **browser** matches each against the dashboard reference library (image-to-image). Sends `auto_off` + `stop` when similarity ≥ 70% after START. |
+| **Cloud Only** (default) | `cloud_aware` | Pi sends every embedding (`Cae_OFF`); the **browser** matches each against the dashboard reference library (image-to-image). Sends `auto_off` + `stop` when similarity ≥ 70% after START. |
 | **Cache Aware Offloading** | `cache_aware_offloading` | Pi checks its own cache and stops on a **hit**. On a **cache miss** the Pi publishes the embedding; the **browser** runs i2i match and the dashboard stops. Publishes `Cae_ON`; START waits for `Cae_Ready`. |
 
 Selecting a mode publishes the matching `Cae_ON` / `Cae_OFF` command and mirrors the mode into `vit_service` (`POST /api/test_bench/cache_aware`).
@@ -158,17 +158,17 @@ In Cache Aware Offloading, START unlocks when the Pi confirms readiness (`Cae_Re
 
 Detection uses **image-to-image** matching in the **browser**, not CLIP text labels. The Pi generates embeddings; the client never encodes images. Reference vectors are captured on the Pi and activated on the dashboard (same format as Pi `cache_embeddings.json`). The Pi's large cache library (`/home/pi/cache_embeddings.json`) is used only for on-Pi cache checks in Cache Aware mode.
 
-**Full guide:** [docs/EDGE_REFERENCE_MATCHING.md](docs/EDGE_REFERENCE_MATCHING.md)
+**Full guide:** [docs/CLOUD_REFERENCE_MATCHING.md](docs/CLOUD_REFERENCE_MATCHING.md)
 
-**Setup:** Use the **Reference Capture** panel to save relayed Pi embeddings into categorized folders on the dashboard, then **Activate** a category. Keep **`Cae_OFF`** for Edge Only so every embedding is relayed.
+**Setup:** Use the **Reference Capture** panel to save relayed Pi embeddings into categorized folders on the dashboard, then **Activate** a category. Keep **`Cae_OFF`** for Cloud Only so every embedding is relayed.
 
 **Stop rule:**
 
-- **Edge Only:** Pi sends every embedding; browser matches vs the active reference library (`useClientReferenceDetection`).
+- **Cloud Only:** Pi sends every embedding; browser matches vs the active reference library (`useClientReferenceDetection`).
 - **Cache Aware:** Pi stops on cache hit locally; on cache miss the browser matches the forwarded embedding.
 - Both POST match results to `/api/vit/client/match_result`; `/api/vit/status` is polled and, on `hit === true` and `similarity_percent` ≥ 70% after START, sends `auto_off` + `stop`.
 - Armed only after START (pre-START detections are ignored).
-- Implemented in `useClientReferenceDetection.ts` + `edgeAwareStopLabelEstop.ts` (`processVitStatusForStopLabelEstop`).
+- Implemented in `useClientReferenceDetection.ts` + `cloudAwareStopLabelEstop.ts` (`processVitStatusForStopLabelEstop`).
 
 #### Timing and CSV
 
@@ -192,15 +192,15 @@ Client-side explore autopilot (`CLIENT AUTO` widget, `useClientAutoPilot()`, `to
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/test_bench/stop_mode` | Current mode and Pi cache-aware status. Use `?force=1` to bypass probe cache. |
-| `POST` | `/api/test_bench/stop_mode` | Body `{ "mode": "cache_aware_offloading" \| "edge_aware" }` — set mode; mirrors into `vit_service`. |
+| `POST` | `/api/test_bench/stop_mode` | Body `{ "mode": "cache_aware_offloading" \| "cloud_aware" }` — set mode; mirrors into `vit_service`. |
 | `POST` | `/api/test_bench/cache_aware` | Body `{ "on": true \| false }` — publish `Cae_ON` / `Cae_OFF` and set the mode. |
 
 **GET response fields:**
 
-- `mode`, `edge_aware_enabled`, `needs_pi_cache_script`
+- `mode`, `cloud_aware_enabled`, `needs_pi_cache_script`
 - `cache_script_running`, `cache_script_detection_ready` (cache-aware readiness)
 
-Implemented in `backend/app/routes/test_bench_routes.py`, `backend/app/services/vit/edge_aware_estop.py`, `backend/app/services/test_bench/cache_aware_ssh.py`.
+Implemented in `backend/app/routes/test_bench_routes.py`, `backend/app/services/vit/cloud_aware_estop.py`, `backend/app/services/test_bench/cache_aware_ssh.py`.
 
 ### Video and VIT API
 

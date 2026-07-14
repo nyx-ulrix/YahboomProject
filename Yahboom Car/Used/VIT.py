@@ -8,8 +8,8 @@
 # 6. When cache-aware is ON:
 #       - live embedding is compared with /home/pi/cache_embeddings.json
 #       - cache confidence is printed in the terminal
-#       - if cache MISS: embedding is published to edge/client
-#       - if cache HIT: embedding is NOT sent to edge/client
+#       - if cache MISS: embedding is published to cloud/client
+#       - if cache HIT: embedding is NOT sent to cloud/client
 #       - if HIT is stable for required frames: robot receives stop command
 #       - cache-aware stays ON until Cae_OFF is received
 
@@ -60,7 +60,7 @@ TOPIC_COMMAND = "yahboom/cmd"
 # VIT.py receives camera frames from webrtc_server.py here
 TOPIC_CAMERA_FRAME = "yahboom/camera/frame"
 
-# VIT.py publishes embeddings here only when edge/client should check
+# VIT.py publishes embeddings here only when cloud/client should check
 TOPIC_CLIP = "yahboom/vit/embedding"
 
 # VIT.py status topics
@@ -841,9 +841,9 @@ def create_mqtt_client():
 
 
 # =========================
-# EDGE PUBLISH HELPER
+# CLOUD PUBLISH HELPER
 # =========================
-def publish_embedding_to_edge(
+def publish_embedding_to_cloud(
     raw_bytes,
     embedding,
     emb_bytes,
@@ -852,7 +852,7 @@ def publish_embedding_to_edge(
     extra=None
 ):
     """
-    Publishes embedding to edge/client.
+    Publishes embedding to cloud/client.
 
     This should happen only when:
       - cache is not ready, or
@@ -923,10 +923,10 @@ def vit_worker():
 
             # =========================
             # CASE 1: CACHE NOT READY
-            # Publish to edge normally.
+            # Publish to cloud normally.
             # =========================
             if not cache_ready:
-                publish_embedding_to_edge(
+                publish_embedding_to_cloud(
                     raw_bytes=raw_bytes,
                     embedding=embedding,
                     emb_bytes=emb_bytes,
@@ -940,10 +940,10 @@ def vit_worker():
 
             # =========================
             # CASE 2: CACHE READY BUT CACHE-AWARE OFF
-            # Publish to edge normally.
+            # Publish to cloud normally.
             # =========================
             elif not test_active:
-                publish_embedding_to_edge(
+                publish_embedding_to_cloud(
                     raw_bytes=raw_bytes,
                     embedding=embedding,
                     emb_bytes=emb_bytes,
@@ -985,13 +985,13 @@ def vit_worker():
                             similarity=None,
                             threshold=None,
                             hit_streak=_hit_streak,
-                            result="NO_MATCH_EDGE",
+                            result="NO_MATCH_CLOUD",
                             latched=_detection_latched,
                             miss_streak_after_latch=_miss_streak_after_latch
                         )
 
-                    # No local cache match, so edge/client should check.
-                    publish_embedding_to_edge(
+                    # No local cache match, so cloud/client should check.
+                    publish_embedding_to_cloud(
                         raw_bytes=raw_bytes,
                         embedding=embedding,
                         emb_bytes=emb_bytes,
@@ -1026,9 +1026,9 @@ def vit_worker():
                     now = time.time()
                     cooldown_active = (now - _last_detection_time) < DETECTION_COOLDOWN_S
 
-                    result_text = "HIT_NO_EDGE" if cache_hit_now else "MISS_EDGE"
+                    result_text = "HIT_NO_CLOUD" if cache_hit_now else "MISS_CLOUD"
                     if _detection_latched and cache_hit_now:
-                        result_text = "HIT_LATCHED_NO_EDGE"
+                        result_text = "HIT_LATCHED_NO_CLOUD"
 
                     if embeddings_sent % CACHE_CONFIDENCE_LOG_EVERY_N_CHECKS == 0:
                         print_cache_confidence(
@@ -1042,7 +1042,7 @@ def vit_worker():
                             miss_streak_after_latch=_miss_streak_after_latch
                         )
 
-                    # If local cache HIT, do NOT send embedding to edge.
+                    # If local cache HIT, do NOT send embedding to cloud.
                     # This is the cache-aware offloading behavior.
                     if cache_hit_now:
                         if (
@@ -1095,13 +1095,13 @@ def vit_worker():
                             )
                             stop_thread.start()
 
-                        # No edge publish on cache hit.
+                        # No cloud publish on cache hit.
                         # Even if hit streak is only 1/3 or 2/3, this is still a cache hit.
                         pass
 
-                    # If local cache MISS, edge/client should check.
+                    # If local cache MISS, cloud/client should check.
                     else:
-                        publish_embedding_to_edge(
+                        publish_embedding_to_cloud(
                             raw_bytes=raw_bytes,
                             embedding=embedding,
                             emb_bytes=emb_bytes,

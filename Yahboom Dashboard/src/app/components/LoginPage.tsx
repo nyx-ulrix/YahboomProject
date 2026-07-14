@@ -29,7 +29,7 @@ export function LoginPage({ darkMode, toggleDark }: { darkMode: boolean; toggleD
     setError(null);
     setLoading('google');
     await new Promise((r) => setTimeout(r, 700));
-    signIn('operator@edgeops.io', 'Operator');
+    signIn('operator@cloudops.io', 'Operator');
     setLoading(null);
   };
 
@@ -56,7 +56,7 @@ export function LoginPage({ darkMode, toggleDark }: { darkMode: boolean; toggleD
             <span style={{ color: '#fff', fontWeight: 700, fontSize: 24 }}>◈</span>
           </div>
           <div>
-            <h1 style={{ letterSpacing: '-0.02em' }}>EdgeOps Console</h1>
+            <h1 style={{ letterSpacing: '-0.02em' }}>CloudOps Console</h1>
             <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginTop: 4 }}>
               5G command-and-control for Yahboom robotics
             </p>
@@ -104,7 +104,7 @@ export function LoginPage({ darkMode, toggleDark }: { darkMode: boolean; toggleD
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="operator@edgeops.io"
+                placeholder="operator@cloudops.io"
                 className="w-full bg-transparent outline-none"
                 style={{ color: 'var(--text-primary)', fontSize: 14 }}
               />

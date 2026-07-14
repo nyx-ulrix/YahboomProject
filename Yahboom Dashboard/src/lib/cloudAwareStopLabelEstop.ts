@@ -1,11 +1,12 @@
 import { sendDashboardBottleStop } from './Controls';
 import { useMetricsStore } from '../app/store';
+import { getStopCategory } from './clientVit/referenceStore';
 import { benchModeHasDashboardBottleStop } from './testBenchSession';
 import { notifyTestBenchStopLabelStop } from './testBenchSession';
 
-/** Minimum reference similarity (%) before edge-aware dashboard stop fires. */
-export const EDGE_AWARE_MIN_CONFIDENCE = 75;
-const EDGE_AWARE_COOLDOWN_MS = 5_000;
+/** Minimum reference similarity (%) before cloud-aware dashboard stop fires. */
+export const CLOUD_AWARE_MIN_CONFIDENCE = 75;
+const CLOUD_AWARE_COOLDOWN_MS = 5_000;
 
 export type VitReferenceMatch = {
   label: string;
@@ -31,22 +32,22 @@ export type VitStatusForStopLabel = {
   activity?: { last_decode_at?: string | null };
 };
 
-let edgeAwareEnabled = false;
+let cloudAwareEnabled = false;
 let stopLabelEstopArmed = false;
 let lastHandledKey: string | null = null;
 let lastTriggerAt = 0;
 
 /** Called when the test bench stop-mode toggle changes (or loads from backend). */
-export function setEdgeAwareStopEnabled(enabled: boolean) {
-  const was = edgeAwareEnabled;
-  edgeAwareEnabled = enabled;
+export function setCloudAwareStopEnabled(enabled: boolean) {
+  const was = cloudAwareEnabled;
+  cloudAwareEnabled = enabled;
   if (enabled && !was) {
     lastHandledKey = null;
   }
 }
 
-export function isEdgeAwareStopEnabled(): boolean {
-  return edgeAwareEnabled;
+export function isCloudAwareStopEnabled(): boolean {
+  return cloudAwareEnabled;
 }
 
 /** Dedupe key for a VIT decode (timestamp from latest or last_decode_at). */
@@ -77,36 +78,36 @@ export function bestReferenceMatchConfidence(vit: VitStatusForStopLabel): number
   return ref.similarity_percent;
 }
 
-/** True when the latest match qualifies for edge stop (stop category only). */
+/** True when the latest match qualifies for cloud stop (stop category only). */
 export function hasQualifyingReferenceMatch(vit: VitStatusForStopLabel): boolean {
   const ref = vit.latest?.reference_match;
   if (!ref) return false;
-  const stopHit = ref.stop_hit ?? (ref.category === 'target_bottle' && ref.hit);
+  const stopHit = ref.stop_hit ?? (ref.category === getStopCategory() && ref.hit);
   if (!stopHit) return false;
-  return ref.similarity_percent >= EDGE_AWARE_MIN_CONFIDENCE;
+  return ref.similarity_percent >= CLOUD_AWARE_MIN_CONFIDENCE;
 }
 
 /**
- * When edge-aware mode is on, session is armed, and reference match hits threshold,
+ * When cloud-aware mode is on, session is armed, and reference match hits threshold,
  * send stop (same as manual stop). Returns true if triggered.
  */
 export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): boolean {
-  if (!edgeAwareEnabled || !stopLabelEstopArmed || !benchModeHasDashboardBottleStop()) return false;
+  if (!cloudAwareEnabled || !stopLabelEstopArmed || !benchModeHasDashboardBottleStop()) return false;
 
   const latest = vit.latest;
   const key = vitDecodeEventKey(vit);
   if (!latest || !key || key === lastHandledKey) return false;
 
   const ref = latest.reference_match;
-  const stopHit = ref?.stop_hit ?? (ref?.category === 'target_bottle' && ref?.hit);
-  if (!ref || !stopHit || ref.similarity_percent < EDGE_AWARE_MIN_CONFIDENCE) return false;
+  const stopHit = ref?.stop_hit ?? (ref?.category === getStopCategory() && ref?.hit);
+  if (!ref || !stopHit || ref.similarity_percent < CLOUD_AWARE_MIN_CONFIDENCE) return false;
 
   return triggerStopLabelStop(key, ref.similarity_percent, ref.label);
 }
 
 function triggerStopLabelStop(key: string, confidence: number, label: string): boolean {
   const now = Date.now();
-  if (now - lastTriggerAt < EDGE_AWARE_COOLDOWN_MS) return false;
+  if (now - lastTriggerAt < CLOUD_AWARE_COOLDOWN_MS) return false;
   if (useMetricsStore.getState().estopActive) return false;
 
   lastHandledKey = key;
@@ -115,7 +116,7 @@ function triggerStopLabelStop(key: string, confidence: number, label: string): b
   sendDashboardBottleStop();
   useMetricsStore.getState().pushEvent(
     'warning',
-    `Edge Stop — ${label} reference match ${confidence.toFixed(2)} percent (minimum ${EDGE_AWARE_MIN_CONFIDENCE} percent), mission ended`,
+    `Cloud Stop — ${label} reference match ${confidence.toFixed(2)} percent (minimum ${CLOUD_AWARE_MIN_CONFIDENCE} percent), mission ended`,
     'yahboom/vit/status',
   );
   return true;

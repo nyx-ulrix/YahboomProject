@@ -4,14 +4,14 @@ import { TopBar } from './TopBar';
 import { DashboardGrid } from './DashboardGrid';
 import { WidgetPickerOverlay } from './WidgetPickerOverlay';
 import {
-  useConnectionSync, useDriveStatusPoll, useEdgeAwareStopLabelEstop, useGlobalShortcuts,
+  useConnectionSync, useDriveStatusPoll, useCloudAwareStopLabelEstop, useGlobalShortcuts,
   useGridStatusPoll, useKeyboardCamera, useKeyboardMovement, useSafetyStatusPoll,
 } from '../hooks';
 import { useMetricsStore } from '../store';
 
 export function Dashboard({ darkMode, toggleDark }: { darkMode: boolean; toggleDark: () => void }) {
   useConnectionSync();
-  useEdgeAwareStopLabelEstop();
+  useCloudAwareStopLabelEstop();
   useSafetyStatusPoll();
   useGridStatusPoll();
   useDriveStatusPoll();
@@ -38,7 +38,7 @@ export function Dashboard({ darkMode, toggleDark }: { darkMode: boolean; toggleD
         <div>
           <h2>Mission Console</h2>
           <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginTop: 2 }}>
-            Real-time telemetry, video, and command surface for the edge robot fleet
+            Real-time telemetry, video, and command surface for the cloud robot fleet
           </p>
         </div>
 
