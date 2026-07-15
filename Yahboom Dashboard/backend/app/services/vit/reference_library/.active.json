@@ -1,4 +1,5 @@
 {
+  "stop_category": "target_bottle",
   "category": "target_bottle",
   "embedding_size_bytes": 2048
 }
