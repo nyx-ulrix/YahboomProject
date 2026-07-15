@@ -12,6 +12,7 @@ import type { WidgetDefinition, MetricsState } from '../types';
 import { sendCommand, sendCameraCommand, setEstopState, toggleRosAuto, vecToCommand, vecToCameraCommand } from '../../lib/Controls';
 import { setCloudAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/cloudAwareStopLabelEstop';
 import { loadReferenceLibrary, applyStopCategory } from '../../lib/clientVit/referenceStore';
+import { dedupeReferenceMatchesByLabel } from '../../lib/clientVit/referenceMatch';
 import { uploadEmbeddingsDef } from './UploadEmbeddingsWidget';
 import { liveReferenceCaptureDef } from './LiveReferenceCaptureWidget';
 import {
@@ -40,6 +41,7 @@ import {
   setTestBenchStopMode,
   skipAutoOffAfterBenchRun,
   takeTestBenchStopConfidence,
+  takeTestBenchStopIsAutoOffPending,
   takeTestBenchStopIsStopLabel,
   takeTestBenchStopReason,
 } from '../../lib/testBenchSession';
@@ -1472,11 +1474,8 @@ function VitDecoderWidget() {
       return 'Capture reference snapshots in Live Reference Capture (any category)';
     }
     if (isReferenceMatch && referenceMatch) {
-      const sample = referenceMatch.sample_id != null
-        ? ` · sample ${referenceMatch.sample_id}`
-        : '';
       const cat = referenceMatch.category ? ` · ${referenceMatch.category}` : '';
-      return `${referenceMatch.label}${cat}${sample}`;
+      return `${referenceMatch.label}${cat}`;
     }
     if (detectionMode === 'cloud_aware') {
       if (!encoderLive) return 'Waiting for Pi embeddings — start VIT.py on the Pi';
@@ -1494,7 +1493,9 @@ function VitDecoderWidget() {
 
   const topMatches = (() => {
     const fromStatus = displayLatest?.reference_top_matches;
-    if (fromStatus && fromStatus.length > 0) return fromStatus.slice(0, 3);
+    if (fromStatus && fromStatus.length > 0) {
+      return dedupeReferenceMatchesByLabel(fromStatus).slice(0, 3);
+    }
     if (referenceMatch) return [referenceMatch];
     return [];
   })();
@@ -1581,13 +1582,12 @@ function VitDecoderWidget() {
             const pct = match.similarity_percent;
             const rowThreshold = match.threshold * 100;
             const rowColor = vitMatchConfidenceColor(pct, rowThreshold);
-            const sample = match.sample_id != null ? ` · sample ${match.sample_id}` : '';
             const cat = match.category ? ` · ${match.category}` : '';
             return (
-              <div key={`${match.label}-${match.sample_id ?? index}`} className="flex flex-col gap-0.5">
+              <div key={`${match.label}-${match.category ?? index}`} className="flex flex-col gap-0.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate" style={{ fontSize: 11, color: rowColor }}>
-                    {`${index + 1}. ${match.label}${cat}${sample}`}
+                    {`${index + 1}. ${match.label}${cat}`}
                   </span>
                   <div className="flex items-center gap-1 flex-shrink-0">
                     {match.stop_hit && (
@@ -1782,13 +1782,39 @@ type StopTestRun = {
 
 type CacheDetectionApi = {
   detection?: {
+    label?: string;
     similarity?: number;
     similarity_percent?: number;
     threshold?: number;
     threshold_percent?: number;
+    /** Pi `time.time()` seconds when VIT.py published detect/status. */
+    timestamp?: number;
+    /** Dashboard wall ms when the backend received the MQTT message. */
     updated_at?: number;
   };
 };
+
+/** Allow small clock skew between Pi time samples at Start vs detect publish. */
+const CACHE_DETECT_START_SLACK_MS = 250;
+
+function isCacheDetectionAfterRunStart(
+  detection: CacheDetectionApi['detection'] | null | undefined,
+  commandSentAtMs: number | null,
+  sessionStartWallMs: number | null,
+): boolean {
+  if (!detection || commandSentAtMs == null || sessionStartWallMs == null) return false;
+
+  const piDetectMs = robotTimestampToMs(detection.timestamp);
+  if (piDetectMs != null) {
+    return piDetectMs >= commandSentAtMs - CACHE_DETECT_START_SLACK_MS;
+  }
+
+  if (detection.updated_at != null && Number.isFinite(detection.updated_at)) {
+    return detection.updated_at >= sessionStartWallMs - CACHE_DETECT_START_SLACK_MS;
+  }
+
+  return false;
+}
 
 function cacheDetectionSimilarityPercent(
   detection: CacheDetectionApi['detection'] | null | undefined,
@@ -1831,32 +1857,26 @@ function isPiAutoOffStatus(status: string | undefined): boolean {
   return status === 'auto_disabled';
 }
 
-/** True when the Pi has processed auto_off (primary: auto_disabled; fallback while waiting). */
+/** True when the Pi has processed auto_off after we explicitly disengaged explore. */
 function isPiAutoOffAck(
   drive: DriveStatusPayload | null | undefined,
   awaitingAutoOff: boolean,
 ): boolean {
-  if (!drive) return false;
+  if (!drive || !awaitingAutoOff) return false;
   if (isPiAutoOffStatus(drive.status)) return true;
   // Brief auto_disabled can be missed between polls; auto_mode clears on auto_off.
-  if (awaitingAutoOff && drive.auto_mode === false) return true;
+  if (drive.auto_mode === false) return true;
   return false;
 }
 
-/**
- * Cache-aware Pi hit ack — VIT sends stop before auto_off, so drive status is
- * often "stopped" before auto_disabled. Restores pre-d39446f0 test-bench behavior.
- */
+/** Mission end ack — auto_off only (not Pi stop / stopped while still in auto). */
 function isPiCacheStopAck(
   drive: DriveStatusPayload | null | undefined,
   awaitingAutoOff: boolean,
-  cacheAwareMode: boolean,
 ): boolean {
   if (!drive) return false;
   if (isEstopDriveStatus(drive.status)) return false;
-  if (isPiAutoOffAck(drive, awaitingAutoOff)) return true;
-  if (cacheAwareMode && drive.status === 'stopped') return true;
-  return false;
+  return isPiAutoOffAck(drive, awaitingAutoOff);
 }
 
 /** Pi drive-status values that mean the wheels are (or were just) in motion. */
@@ -1922,6 +1942,12 @@ async function fetchLatestRobotMs(): Promise<number | null> {
   return fetchGridRobotMs();
 }
 
+async function clearStaleCacheDetectionOnBackend(): Promise<void> {
+  try {
+    await fetch('/api/test_bench/latest_detection', { method: 'DELETE' });
+  } catch { /* backend may be offline */ }
+}
+
 async function fetchLatestCacheDetection(): Promise<CacheDetectionApi['detection'] | null> {
   try {
     const res = await fetch('/api/test_bench/latest_detection', { cache: 'no-store' });
@@ -1940,13 +1966,26 @@ async function fetchLatestCacheDetection(): Promise<CacheDetectionApi['detection
 /** Pi publishes detect/status just before stop — brief retry avoids an empty read at run end. */
 async function fetchLatestCacheDetectionForStop(
   cached: CacheDetectionApi['detection'] | null,
+  runStart: { commandSentAtMs: number; sessionStartWallMs: number } | null,
 ): Promise<CacheDetectionApi['detection'] | null> {
-  if (cached?.similarity != null || cached?.similarity_percent != null) {
-    return cached;
-  }
+  const accept = (detection: CacheDetectionApi['detection'] | null | undefined) => (
+    detection
+    && isCacheDetectionAfterRunStart(
+      detection,
+      runStart?.commandSentAtMs ?? null,
+      runStart?.sessionStartWallMs ?? null,
+    )
+      ? detection
+      : null
+  );
+
+  const cachedFresh = accept(cached);
+  if (cachedFresh) return cachedFresh;
+
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const detection = await fetchLatestCacheDetection();
-    if (detection) return detection;
+    const fresh = accept(detection);
+    if (fresh) return fresh;
     if (attempt < 5) {
       await new Promise((resolve) => { setTimeout(resolve, 50); });
     }
@@ -2067,6 +2106,7 @@ function StopTestBenchWidget() {
   const stopConfidenceRef = useRef<number | null>(null);
   const autoOffWarnedRef = useRef(false);
   const latestCacheDetectionRef = useRef<CacheDetectionApi['detection'] | null>(null);
+  const sessionStartWallMsRef = useRef<number | null>(null);
   const cacheDetectPollCountRef = useRef(0);
   const networkTypeRef = useRef(networkType);
   const stopModeRef = useRef(stopMode);
@@ -2144,6 +2184,7 @@ function StopTestBenchWidget() {
     setTestBenchManualStopHook(() => {
       if (!sessionActiveRef.current) return;
       const isStopLabel = takeTestBenchStopIsStopLabel();
+      const isAutoOffPending = takeTestBenchStopIsAutoOffPending();
       const confidence = takeTestBenchStopConfidence();
       if (!stopCommandPendingRef.current) {
         stopCommandPendingRef.current = true;
@@ -2157,7 +2198,7 @@ function StopTestBenchWidget() {
         if (useMetricsStore.getState().autoRunning) {
           sendCommand('auto_off');
         }
-      } else {
+      } else if (!isAutoOffPending && stopSourceRef.current == null) {
         latchStopSource('manual');
       }
       freezeTimerAtNow();
@@ -2237,6 +2278,7 @@ function StopTestBenchWidget() {
     stopConfidenceRef.current = null;
     autoOffWarnedRef.current = false;
     latestCacheDetectionRef.current = null;
+    sessionStartWallMsRef.current = null;
     cacheDetectPollCountRef.current = 0;
     setFrozenElapsedMs(null);
     setStopLabelEstopArmed(false);
@@ -2259,7 +2301,15 @@ function StopTestBenchWidget() {
     if (source === 'cloud_dashboard') {
       return { stopConfidencePercent: stopConfidenceRef.current };
     }
-    const detection = await fetchLatestCacheDetectionForStop(latestCacheDetectionRef.current);
+    const detection = await fetchLatestCacheDetectionForStop(
+      latestCacheDetectionRef.current,
+      commandSentAtRef.current != null && sessionStartWallMsRef.current != null
+        ? {
+          commandSentAtMs: commandSentAtRef.current,
+          sessionStartWallMs: sessionStartWallMsRef.current,
+        }
+        : null,
+    );
     return { stopConfidencePercent: cacheDetectionSimilarityPercent(detection) };
   }, []);
 
@@ -2304,8 +2354,6 @@ function StopTestBenchWidget() {
   const isAwaitingAutoOff = useCallback(() => (
     stopCommandPendingRef.current
     || isCloudAwareStopLabelBenchStop()
-    || stopSourceRef.current != null
-    || (sessionActiveRef.current && armedRef.current)
   ), []);
 
   const warnAutoOffStillPending = useCallback(() => {
@@ -2337,7 +2385,17 @@ function StopTestBenchWidget() {
       || stopCommandPendingRef.current
       || cacheStop;
     if (!missionArmed) return false;
-    if (!isPiCacheStopAck(drive, isAwaitingAutoOff(), benchNeedsPiScript(stopModeRef.current))) {
+    if (!isPiCacheStopAck(drive, isAwaitingAutoOff())) {
+      return false;
+    }
+
+    const cmdAt = commandSentAtRef.current;
+    const driveStopMs = robotMsFromPayload(drive as Record<string, unknown>);
+    if (
+      cmdAt != null
+      && driveStopMs != null
+      && driveStopMs < cmdAt - CACHE_DETECT_START_SLACK_MS
+    ) {
       return false;
     }
 
@@ -2379,6 +2437,13 @@ function StopTestBenchWidget() {
 
   const latchCacheDetectionStop = useCallback((detection: CacheDetectionApi['detection']) => {
     if (!detection || cacheDetectionSimilarityPercent(detection) == null) return;
+    if (!isCacheDetectionAfterRunStart(
+      detection,
+      commandSentAtRef.current,
+      sessionStartWallMsRef.current,
+    )) {
+      return;
+    }
     const firstLatch = stopSourceRef.current !== 'cache_pi';
     latestCacheDetectionRef.current = detection;
     latchStopSource('cache_pi');
@@ -2401,27 +2466,6 @@ function StopTestBenchWidget() {
     }
   }, [armMissionTimerIfNeeded, freezeTimerAtNow, latchStopSource]);
 
-  /** Fallback when yahboom/detect/status MQTT is missed but drive status shows Pi stopped. */
-  const latchCacheStopFromDriveStatus = useCallback((drive: DriveStatusPayload | null) => {
-    if (!drive?.status || !isPiCacheStopAck(drive, true, benchNeedsPiScript(stopModeRef.current))) {
-      return;
-    }
-    if (stopSourceRef.current === 'cache_pi') return;
-    latchStopSource('cache_pi');
-    armMissionTimerIfNeeded();
-    if (!stopCommandPendingRef.current) {
-      stopCommandPendingRef.current = true;
-      stopCommandPendingAtRef.current = Date.now();
-      firstStopTsRef.current = null;
-    }
-    freezeTimerAtNow();
-    useMetricsStore.getState().pushEvent(
-      'warning',
-      `Cache stop — Pi drive status ${drive.status}, mission ended`,
-      'yahboom/drive/status',
-    );
-  }, [armMissionTimerIfNeeded, freezeTimerAtNow, latchStopSource]);
-
   const cancelSession = useCallback((message: string) => {
     if (!sessionActiveRef.current) return;
     resetSession();
@@ -2430,12 +2474,6 @@ function StopTestBenchWidget() {
 
   const cancelSessionOnEstop = useCallback(() => {
     cancelSession('Mission test — emergency stop engaged (run not recorded)');
-  }, [cancelSession]);
-
-  const cancelPreMoveStop = useCallback((suffix?: string) => {
-    const base = preMoveStopReasonRef.current
-      ?? 'Mission test — ended before movement started';
-    cancelSession(suffix ? `${base} (${suffix})` : base);
   }, [cancelSession]);
 
   const startTest = async () => {
@@ -2457,6 +2495,12 @@ function StopTestBenchWidget() {
 
     recordedBenchModeRef.current = benchMode;
     setTestBenchStopMode(benchMode);
+    sessionStartWallMsRef.current = Date.now();
+    latestCacheDetectionRef.current = null;
+    cacheDetectPollCountRef.current = 0;
+    if (benchNeedsPiScript(benchMode)) {
+      await clearStaleCacheDetectionOnBackend();
+    }
     sessionActiveRef.current = true;
     setTestBenchSessionActive(true);
     commandSentAtRef.current = commandTs;
@@ -2508,43 +2552,28 @@ function StopTestBenchWidget() {
       // Cache-aware Pi stop: poll yahboom/detect/status for the whole session.
       if (cacheAwareSession) {
         cacheDetectPollCountRef.current += 1;
+        const runStart = commandSentAtRef.current != null && sessionStartWallMsRef.current != null
+          ? {
+            commandSentAtMs: commandSentAtRef.current,
+            sessionStartWallMs: sessionStartWallMsRef.current,
+          }
+          : null;
         const detection = await fetchLatestCacheDetectionForStop(
           latestCacheDetectionRef.current,
+          runStart,
         );
         if (detection && alive) {
           latchCacheDetectionStop(detection);
         }
       }
 
-      // Drive-status fallback when detect MQTT is missed (VIT still sends stop on yahboom/cmd).
-      if (cacheAwareSession && drive) {
-        latchCacheStopFromDriveStatus(drive);
-      }
-
       if (activeStartRef.current == null) {
-        const awaitingAutoOff = isAwaitingAutoOff();
-        const cacheAware = benchNeedsPiScript(stopModeRef.current);
-        if (drive && isPiCacheStopAck(drive, awaitingAutoOff, cacheAware)) {
-          if (cacheAware && sessionActiveRef.current) {
-            await tryEndRunOnPiAutoOff(drive);
-            return;
-          }
-          const cacheStop = stopSourceRef.current === 'cache_pi'
-            || latestCacheDetectionRef.current != null;
-          if (cacheStop) {
-            await tryEndRunOnPiAutoOff(drive);
-            return;
-          }
-          cancelPreMoveStop();
-          return;
-        }
-
         if (stopCommandPendingRef.current) {
           const pendingAt = stopCommandPendingAtRef.current;
           if (pendingAt != null && Date.now() - pendingAt > AUTO_OFF_WARN_MS) {
             warnAutoOffStillPending();
           }
-          if (drive && isPiCacheStopAck(drive, true, benchNeedsPiScript(stopModeRef.current))) {
+          if (drive && isPiCacheStopAck(drive, true)) {
             await tryEndRunOnPiAutoOff(drive);
           }
           return;
@@ -2592,8 +2621,7 @@ function StopTestBenchWidget() {
 
       if (!armedRef.current && stopSourceRef.current !== 'cache_pi') return;
 
-      const cacheAware = benchNeedsPiScript(stopModeRef.current);
-      if (isPiCacheStopAck(drive, isAwaitingAutoOff(), cacheAware)) {
+      if (isPiCacheStopAck(drive, isAwaitingAutoOff())) {
         await tryEndRunOnPiAutoOff(drive);
         return;
       }
@@ -2603,7 +2631,7 @@ function StopTestBenchWidget() {
         if (pendingAt != null && Date.now() - pendingAt > AUTO_OFF_WARN_MS) {
           warnAutoOffStillPending();
         }
-        if (drive && isPiCacheStopAck(drive, true, cacheAware)) {
+        if (drive && isPiCacheStopAck(drive, true)) {
           await tryEndRunOnPiAutoOff(drive);
         }
         return;
@@ -2628,7 +2656,7 @@ function StopTestBenchWidget() {
     const id = setInterval(() => { void poll(); }, ROBOT_TIME_POLL_MS);
     void poll();
     return () => { alive = false; clearInterval(id); };
-  }, [armMissionTimerIfNeeded, cancelPreMoveStop, cancelSession, cancelSessionOnEstop, commandSentAt, disableAutoRoam, freezeTimerAtNow, isAwaitingAutoOff, latchCacheDetectionStop, latchCacheStopFromDriveStatus, latchStopSource, tryEndRunOnPiAutoOff, warnAutoOffStillPending]);
+  }, [armMissionTimerIfNeeded, cancelSession, cancelSessionOnEstop, commandSentAt, disableAutoRoam, freezeTimerAtNow, isAwaitingAutoOff, latchCacheDetectionStop, latchStopSource, tryEndRunOnPiAutoOff, warnAutoOffStillPending]);
 
   // Re-render ~10×/s so the live Pi-clock extrapolation advances between MQTT samples.
   useEffect(() => {

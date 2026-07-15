@@ -161,7 +161,7 @@ CAE_NOT_READY_COMMAND = "Cae_NotReady"
 AUTO_OFF_COMMAND = "auto_off"
 STOP_COMMAND = "stop"
 
-# Only Cae_ON turns cache-aware ON.
+# Only   turns cache-aware ON.
 # auto_on is NOT included here on purpose.
 START_COMMANDS = {
     "cae_on",

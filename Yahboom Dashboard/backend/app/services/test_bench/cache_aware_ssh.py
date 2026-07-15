@@ -323,7 +323,7 @@ def start_cache_aware_script(*, wait: bool = True) -> dict:
 
     _close_pi_cache_session(client)
     mqtt_service.clear_cache_aware_ready()
-    mqtt_service.latest_cache_detection = None
+    mqtt_service.clear_latest_cache_detection()
     _start_in_pi_terminal(client)
     launch_mode = "terminal"
     time.sleep(1.0)
@@ -352,7 +352,7 @@ def stop_cache_aware_script() -> dict:
     host = resolved_host()
     _invalidate_probe_cache()
     mqtt_service.clear_cache_aware_ready()
-    mqtt_service.latest_cache_detection = None
+    mqtt_service.clear_latest_cache_detection()
     client = ssh_client(host)
     _close_pi_cache_session(client)
     probe = _probe_on_pi(client, host)

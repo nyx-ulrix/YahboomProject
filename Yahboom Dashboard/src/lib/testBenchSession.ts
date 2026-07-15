@@ -6,6 +6,7 @@ import { benchHasDashboardBottleStop, benchNeedsPiScript } from './testBenchStor
 let onManualStopDuringSession: (() => void) | null = null;
 let pendingStopReason: string | undefined;
 let pendingStopIsStopLabel = false;
+let pendingStopIsAutoOffPending = false;
 let pendingStopConfidence: number | null = null;
 let cloudAwareStopLabelActive = false;
 let benchSessionActive = false;
@@ -55,6 +56,7 @@ export function notifyTestBenchAutoOffPending(reason?: string) {
   if (!benchSessionActive || cloudAwareStopLabelActive) return;
   pendingStopReason = reason ?? pendingStopReason ?? 'Mission test — explore disengaged';
   pendingStopIsStopLabel = false;
+  pendingStopIsAutoOffPending = true;
   onManualStopDuringSession?.();
 }
 
@@ -87,6 +89,12 @@ export function takeTestBenchStopIsStopLabel(): boolean {
   const isStopLabel = pendingStopIsStopLabel;
   pendingStopIsStopLabel = false;
   return isStopLabel;
+}
+
+export function takeTestBenchStopIsAutoOffPending(): boolean {
+  const isAutoOffPending = pendingStopIsAutoOffPending;
+  pendingStopIsAutoOffPending = false;
+  return isAutoOffPending;
 }
 
 /** Confidence (%) latched for the most recent bottle stop, if any. */

@@ -64,6 +64,60 @@ function scoreReference(
   };
 }
 
+function matchNameKey(label: string): string {
+  return label.trim().toLowerCase();
+}
+
+function matchSimilarityValue(similarity: number, similarityPercent?: number): number {
+  if (Number.isFinite(similarity)) return similarity;
+  if (similarityPercent != null) return similarityPercent / 100;
+  return 0;
+}
+
+/** One row per reference name — keep the highest-similarity sample only. */
+function dedupeMatchesByName(matches: ClientReferenceMatch[]): ClientReferenceMatch[] {
+  const bestByName = new Map<string, ClientReferenceMatch>();
+  for (const match of matches) {
+    const key = matchNameKey(match.label);
+    const existing = bestByName.get(key);
+    if (!existing || match.similarity > existing.similarity) {
+      bestByName.set(key, match);
+    }
+  }
+  return Array.from(bestByName.values()).sort((a, b) => b.similarity - a.similarity);
+}
+
+export type ReferenceMatchLike = {
+  label: string;
+  category?: string;
+  sample_id?: number | null;
+  similarity: number;
+  similarity_percent?: number;
+  threshold?: number;
+  hit?: boolean;
+  stop_hit?: boolean;
+};
+
+/** Dedupe API/status match rows by label for display. */
+export function dedupeReferenceMatchesByLabel<T extends ReferenceMatchLike>(matches: T[]): T[] {
+  const bestByName = new Map<string, T>();
+  for (const match of matches) {
+    const key = matchNameKey(match.label);
+    const score = matchSimilarityValue(match.similarity, match.similarity_percent);
+    const existing = bestByName.get(key);
+    const existingScore = existing
+      ? matchSimilarityValue(existing.similarity, existing.similarity_percent)
+      : -1;
+    if (!existing || score > existingScore) {
+      bestByName.set(key, match);
+    }
+  }
+  return Array.from(bestByName.values()).sort(
+    (a, b) => matchSimilarityValue(b.similarity, b.similarity_percent)
+      - matchSimilarityValue(a.similarity, a.similarity_percent),
+  );
+}
+
 /** Every library match for a live Pi embedding, highest similarity first. */
 export function matchAllEmbeddings(live: Float32Array): ClientReferenceMatch[] {
   if (!hasReferenceVectors() || live.length === 0) return [];
@@ -75,9 +129,11 @@ export function matchAllEmbeddings(live: Float32Array): ClientReferenceMatch[] {
   const stopThreshold = getStopThreshold();
   const stopCategory = getStopCategory();
 
-  return references
+  const scored = references
     .map((ref) => scoreReference(normalized, ref, live.length, stopThreshold, stopCategory))
     .sort((a, b) => b.similarity - a.similarity);
+
+  return dedupeMatchesByName(scored);
 }
 
 /** Best library match for a live Pi embedding, or null when none apply. */

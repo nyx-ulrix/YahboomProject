@@ -179,6 +179,10 @@ class MQTTService:
     def get_latest_cache_detection(self) -> dict:
         return dict(self.latest_cache_detection) if self.latest_cache_detection else {}
 
+    def clear_latest_cache_detection(self) -> None:
+        """Drop stale Pi detect/status so a new bench run cannot latch an old hit."""
+        self.latest_cache_detection = None
+
     def _parse_cache_aware_ready(self, raw: str) -> bool:
         text = raw.strip()
         if not text:

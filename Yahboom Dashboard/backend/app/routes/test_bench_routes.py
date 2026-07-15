@@ -41,9 +41,12 @@ def get_stop_mode():
     return jsonify(_stop_mode_payload())
 
 
-@test_bench_bp.route("/latest_detection", methods=["GET"])
-def get_latest_detection():
+@test_bench_bp.route("/latest_detection", methods=["GET", "DELETE"])
+def latest_detection():
     """Latest Pi cache-aware bottle detection from MQTT yahboom/detect/status."""
+    if request.method == "DELETE":
+        mqtt_service.clear_latest_cache_detection()
+        return jsonify({"status": "ok"})
     return jsonify({
         "detection": mqtt_service.get_latest_cache_detection(),
     })
