@@ -19,7 +19,7 @@ MODES_NEED_PI_SCRIPT = frozenset({STOP_MODE_CACHE})
 
 _MIN_CONFIDENCE = float(
     os.getenv("CLOUD_AWARE_MIN_CONFIDENCE")
-    or os.getenv("EDGE_AWARE_MIN_CONFIDENCE", "75.0")
+    or os.getenv("EDGE_AWARE_MIN_CONFIDENCE", "70.0")
 )
 _COOLDOWN_SEC = float(
     os.getenv("CLOUD_AWARE_ESTOP_COOLDOWN_SEC")

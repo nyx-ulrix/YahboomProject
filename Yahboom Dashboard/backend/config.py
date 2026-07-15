@@ -112,7 +112,7 @@ VIT_REFERENCE_DEFAULT_THRESHOLD = float(
 )
 CLOUD_AWARE_REFERENCE_THRESHOLD = float(
     os.getenv("CLOUD_AWARE_REFERENCE_THRESHOLD")
-    or os.getenv("EDGE_AWARE_REFERENCE_THRESHOLD", "0.75")
+    or os.getenv("EDGE_AWARE_REFERENCE_THRESHOLD", "0.70")
 )
 
 # Reference library on the dashboard host (see reference_capture.py)

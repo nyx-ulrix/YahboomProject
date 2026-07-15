@@ -106,6 +106,13 @@ class BackhaulDelay:
             return 0.0
 
 
+def format_hop_suffix(delay_ms: float) -> str:
+    """Fragment appended to event-log MQTT lines when a hop delay was applied."""
+    if delay_ms <= 0:
+        return ""
+    return f" ({delay_ms:.1f}ms hop)"
+
+
 # Global singleton (used by the MQTT services and Flask routes).
 backhaul_delay = BackhaulDelay()
 

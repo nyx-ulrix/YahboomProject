@@ -5,7 +5,7 @@ import { benchModeHasDashboardBottleStop } from './testBenchSession';
 import { notifyTestBenchStopLabelStop } from './testBenchSession';
 
 /** Minimum reference similarity (%) before cloud-aware dashboard stop fires. */
-export const CLOUD_AWARE_MIN_CONFIDENCE = 75;
+export const CLOUD_AWARE_MIN_CONFIDENCE = 70;
 const CLOUD_AWARE_COOLDOWN_MS = 5_000;
 
 export type VitReferenceMatch = {

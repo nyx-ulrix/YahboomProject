@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - standalone import fallback
     VIT_REFERENCE_LABEL = "target bottle"
     VIT_REFERENCE_MATCH_ENABLED = True
     VIT_REFERENCE_DEFAULT_THRESHOLD = 0.70
-    CLOUD_AWARE_REFERENCE_THRESHOLD = 0.75
+    CLOUD_AWARE_REFERENCE_THRESHOLD = 0.70
 
 try:
     from dotenv import load_dotenv
@@ -1276,12 +1276,16 @@ class VITService:
 
         try:
             # Simulate wired-backhaul send delay (non-video path).
-            from app.services.backhaul_delay import backhaul_delay
-            backhaul_delay.apply()
+            from app.services.backhaul_delay import backhaul_delay, format_hop_suffix
+            hop_ms = backhaul_delay.apply()
             result = ms.mqtt_client.publish(_COMMAND_TOPIC, command)
             if PUBLISH_TIMEOUT > 0:
                 result.wait_for_publish(timeout=PUBLISH_TIMEOUT)
-            ms.log_event("info", f"MQTT -> {_COMMAND_TOPIC}: {command}", tag=_COMMAND_TOPIC)
+            ms.log_event(
+                "info",
+                f"MQTT -> {_COMMAND_TOPIC}: {command}{format_hop_suffix(hop_ms)}",
+                tag=_COMMAND_TOPIC,
+            )
         except Exception as exc:
             ms.connected = False
             ms.log_event("error", f"Publish failed: {exc}", tag=_COMMAND_TOPIC)

@@ -5,7 +5,7 @@ API routes for Yahboom bot control and connection
 import time
 from flask import Blueprint, request, jsonify
 from app.services.mqtt_service import mqtt_service
-from app.services.backhaul_delay import backhaul_delay
+from app.services.backhaul_delay import backhaul_delay, format_hop_suffix
 from config import DEFAULT_BROKER_IP, ALLOWED_COMMANDS, CAMERA_COMMANDS, TOPIC, PUBLISH_TIMEOUT
 
 bot_bp = Blueprint("bot", __name__, url_prefix="/api")
@@ -78,12 +78,16 @@ def send_command():
 
     try:
         # Simulate wired-backhaul send delay (non-video path).
-        backhaul_delay.apply()
+        hop_ms = backhaul_delay.apply()
         result = mqtt_service.mqtt_client.publish(TOPIC, command)
         if PUBLISH_TIMEOUT > 0:
             result.wait_for_publish(timeout=PUBLISH_TIMEOUT)
         latency = (time.time() - start_time) * 1000
-        mqtt_service.log_event("info", f"MQTT -> {TOPIC}: {command}", tag=TOPIC)
+        mqtt_service.log_event(
+            "info",
+            f"MQTT -> {TOPIC}: {command}{format_hop_suffix(hop_ms)}",
+            tag=TOPIC,
+        )
         try:
             from slam_service import slam_service
             slam_service.slam.apply_command(command)
@@ -95,6 +99,7 @@ def send_command():
             "command": command,
             "topic": TOPIC,
             "latency": round(latency, 2),
+            "backhaul_delay_ms": round(hop_ms, 2),
             "message": f"Published '{command}' to topic '{TOPIC}'"
         })
 

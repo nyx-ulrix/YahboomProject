@@ -134,14 +134,25 @@ function commandState(command: BotCommand, source?: CommandSource) {
   };
 }
 
+function formatHopSuffix(hopMs: number | undefined): string {
+  if (hopMs == null || hopMs <= 0) return '';
+  return `, ${hopMs}ms hop`;
+}
+
 async function postBotCommand(command: BotCommand): Promise<void> {
   const res = await fetch('/api/send_command', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ command }),
   });
-  const data: { status: string; command: string; topic?: string; latency?: number; message?: string } =
-    await res.json();
+  const data: {
+    status: string;
+    command: string;
+    topic?: string;
+    latency?: number;
+    backhaul_delay_ms?: number;
+    message?: string;
+  } = await res.json();
 
   if (!res.ok) {
     useMetricsStore.getState().pushEvent(
@@ -155,7 +166,7 @@ async function postBotCommand(command: BotCommand): Promise<void> {
   const latencyStr = data.latency != null ? `${data.latency}ms` : '—';
   useMetricsStore.getState().pushEvent(
     'info',
-    `POST -> ${data.topic ?? 'yahboom/cmd'}: ${data.command ?? command} (${latencyStr} publish)`,
+    `POST -> ${data.topic ?? 'yahboom/cmd'}: ${data.command ?? command} (${latencyStr} publish${formatHopSuffix(data.backhaul_delay_ms)})`,
     data.topic ?? 'yahboom/cmd',
   );
   useMetricsStore.setState({
@@ -289,8 +300,14 @@ export async function sendCameraCommand(command: CameraCommand): Promise<void> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command }),
     });
-    const data: { status: string; command: string; topic?: string; latency?: number; message?: string } =
-      await res.json();
+    const data: {
+      status: string;
+      command: string;
+      topic?: string;
+      latency?: number;
+      backhaul_delay_ms?: number;
+      message?: string;
+    } = await res.json();
 
     if (!res.ok) {
       useMetricsStore.getState().pushEvent('error', `Camera command '${command}' rejected — ${data.message ?? res.statusText}`, data.topic ?? 'yahboom/cmd');
@@ -299,7 +316,11 @@ export async function sendCameraCommand(command: CameraCommand): Promise<void> {
 
     useMetricsStore.setState({ latencyMs: data.latency ?? useMetricsStore.getState().latencyMs });
     const latencyStr = data.latency != null ? `${data.latency}ms` : '—';
-    useMetricsStore.getState().pushEvent('info', `POST -> ${data.topic ?? 'yahboom/cmd'}: ${data.command ?? command} (${latencyStr} publish)`, data.topic ?? 'yahboom/cmd');
+    useMetricsStore.getState().pushEvent(
+      'info',
+      `POST -> ${data.topic ?? 'yahboom/cmd'}: ${data.command ?? command} (${latencyStr} publish${formatHopSuffix(data.backhaul_delay_ms)})`,
+      data.topic ?? 'yahboom/cmd',
+    );
   } catch {
     useMetricsStore.getState().pushEvent('error', 'Failed to send camera command — backend unreachable', 'yahboom/cmd');
   }

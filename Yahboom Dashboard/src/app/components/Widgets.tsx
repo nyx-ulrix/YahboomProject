@@ -1428,7 +1428,7 @@ function VitDecoderWidget() {
   const isReferenceMatch = displayLatest?.match_mode === 'reference_embedding';
   const referenceMatch = isReferenceMatch ? displayLatest?.reference_match ?? null : null;
   const referenceStopThresholdPct =
-    (status?.reference_stop_threshold ?? 0.75) * 100;
+    (status?.reference_stop_threshold ?? 0.70) * 100;
   const threshold = isReferenceMatch
     ? referenceStopThresholdPct
     : (status?.confidence_threshold ?? 60);
@@ -2862,7 +2862,7 @@ function StopTestBenchWidget() {
         : 'Waiting for Raspberry Pi to confirm cache-aware ready — Start is disabled.';
     }
     if (effectiveStopMode === 'cloud_aware') {
-      return 'Cloud Only — Pi sends every embedding (Cae_OFF); the client scans the full reference library and stops only on the selected stop target (≥ 75% similarity). Needs VIT.py running on the Pi.';
+      return 'Cloud Only — Pi sends every embedding (Cae_OFF); the client scans the full reference library and stops only on the selected stop target (≥ 70% similarity). Needs VIT.py running on the Pi.';
     }
     return '';
   })();

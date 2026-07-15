@@ -6,7 +6,7 @@ import paho.mqtt.client as mqtt
 from datetime import datetime, timezone
 import time
 import json
-from app.services.backhaul_delay import backhaul_delay
+from app.services.backhaul_delay import backhaul_delay, format_hop_suffix
 from config import (
     BROKER_PORT, CACHE_AWARE_READY_TOPIC, DETECT_STATUS_TOPIC, DRIVE_STATUS_TOPIC, GRID_TOPIC, TOPIC, MQTT_TIMEOUT, PUBLISH_TIMEOUT,
     SAFETY_TOPIC, EVENT_LOG_MAX, EVENT_LOG_MESSAGE_MAXLEN,
@@ -87,9 +87,9 @@ class MQTTService:
         if self.connected:
             try:
                 # Simulate wired-backhaul send delay (non-video path).
-                backhaul_delay.apply()
+                hop_ms = backhaul_delay.apply()
                 self.mqtt_client.publish(TOPIC, cmd)
-                self.log_event('info', f'MQTT -> {TOPIC}: {cmd}', tag=TOPIC)
+                self.log_event('info', f'MQTT -> {TOPIC}: {cmd}{format_hop_suffix(hop_ms)}', tag=TOPIC)
             except Exception as e:
                 self.log_event('error', f'E-stop MQTT publish failed: {e}', tag=TOPIC)
 
@@ -238,9 +238,9 @@ class MQTTService:
             return False, msg
         try:
             # Simulate wired-backhaul send delay (non-video path).
-            backhaul_delay.apply()
+            hop_ms = backhaul_delay.apply()
             self.mqtt_client.publish(TOPIC, cmd)
-            self.log_event("info", f"MQTT -> {TOPIC}: {cmd}", tag=TOPIC)
+            self.log_event("info", f"MQTT -> {TOPIC}: {cmd}{format_hop_suffix(hop_ms)}", tag=TOPIC)
             return True, f"Published '{cmd}' to '{TOPIC}'"
         except Exception as e:
             self.connected = False
@@ -421,10 +421,11 @@ class MQTTService:
 
     def _on_message(self, _client, _userdata, message) -> None:
         # Simulate wired-backhaul receive delay (non-video path).
-        backhaul_delay.apply()
+        hop_ms = backhaul_delay.apply()
+        hop = format_hop_suffix(hop_ms)
         raw = message.payload.decode(errors="replace")
         if message.topic == TOPIC:
-            self.log_event("info", f"MQTT <- {TOPIC}: {raw}", tag=TOPIC)
+            self.log_event("info", f"MQTT <- {TOPIC}: {raw}{hop}", tag=TOPIC)
             if raw == "estop_on":
                 self.estop_active = True
             elif raw == "estop_off":
@@ -467,7 +468,7 @@ class MQTTService:
             if text == "Cae_Ready":
                 if not self.cache_aware_embedding_ready:
                     self.set_cache_aware_ready(ready=True)
-                    self.log_event("info", "Cache-aware script ready (Cae_Ready)", tag=CACHE_AWARE_READY_TOPIC)
+                    self.log_event("info", f"Cache-aware script ready (Cae_Ready){hop}", tag=CACHE_AWARE_READY_TOPIC)
                 return
             ready = self._parse_cache_aware_ready(raw)
             dims = None
@@ -488,7 +489,7 @@ class MQTTService:
                 pct = parsed.get("similarity_percent")
                 self.log_event(
                     "info",
-                    f"Cache detect: {label} {pct}%",
+                    f"Cache detect: {label} {pct}%{hop}",
                     tag=DETECT_STATUS_TOPIC,
                 )
             return
