@@ -22,7 +22,7 @@ FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "3000"))
 FLASK_DEBUG = os.getenv("FLASK_DEBUG", "false").lower() in ("true", "1", "yes")
 
-# Raspberry Pi SSH settings (used for cache_aware_offloading.py on the test bench)
+# Raspberry Pi SSH settings (legacy — cache_aware_ssh.py is unused; cache-aware runs in VIT.py)
 PI_SSH_USER = os.getenv("PI_SSH_USER",          "pi")
 PI_SSH_PASSWORD = os.getenv("PI_SSH_PASSWORD",      "raspberry")
 # optional: path to private key file
@@ -62,19 +62,19 @@ CAMERA_COMMANDS = {
 AUTO_COMMANDS = {"auto_on", "auto_off"}
 ESTOP_COMMANDS = {"estop_on", "estop_off"}
 
-# VIT encoder venv on the Pi (shared with cache_aware_offloading.py)
+# VIT encoder venv on the Pi (webrtc_server.py, VIT.py, capture scripts)
 PI_VIT_VENV = os.getenv("PI_VIT_VENV", "~/vit_env/bin/activate")
 
-# Cache-aware offloading script on the Pi (test bench — cache aware stop mode)
+# Legacy SSH cache-script settings (unused — VIT.py handles Cae_ON/Cae_OFF over MQTT)
 PI_CACHE_AWARE_SCRIPT_PATH = os.getenv(
-    "PI_CACHE_AWARE_SCRIPT_PATH", "cache_aware_offloading.py")
+    "PI_CACHE_AWARE_SCRIPT_PATH", "VIT.py")
 PI_CACHE_AWARE_LOG = os.getenv(
     "PI_CACHE_AWARE_LOG", "/tmp/yahboom_cache_aware.log")
 PI_CACHE_AWARE_TERMINAL_TITLE = os.getenv(
     "PI_CACHE_AWARE_TERMINAL_TITLE", "Cache Aware Offloading")
 CACHE_SCRIPT_START_TIMEOUT_SEC = float(os.getenv("CACHE_SCRIPT_START_TIMEOUT_SEC", "30"))
 CACHE_SCRIPT_START_POLL_SEC = float(os.getenv("CACHE_SCRIPT_START_POLL_SEC", "1"))
-# Pi log line that unlocks test-bench START in cache-aware offloading mode (see cache_aware_offloading.py).
+# Legacy log snippet from removed cache_aware_offloading.py (readiness is MQTT-only now)
 CACHE_SCRIPT_EMBEDDING_READY_SNIPPET = os.getenv(
     "CACHE_SCRIPT_EMBEDDING_READY_SNIPPET",
     "[DETECT] Text embedding ready: 'a water bottle'",
