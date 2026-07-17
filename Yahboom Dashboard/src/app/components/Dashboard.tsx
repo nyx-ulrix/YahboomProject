@@ -4,7 +4,7 @@ import { TopBar } from './TopBar';
 import { DashboardGrid } from './DashboardGrid';
 import { WidgetPickerOverlay } from './WidgetPickerOverlay';
 import {
-  useConnectionSync, useDriveStatusPoll, useCloudAwareStopLabelEstop, useYoloBottleStop, useStopModeBackendSync, useTestBenchSessionSync, useGlobalShortcuts,
+  useConnectionSync, useDriveStatusPoll, useCloudAwareStopLabelEstop, useYoloBottleStop, useStopModeBackendSync, useGlobalShortcuts,
   useGridStatusPoll, useKeyboardCamera, useKeyboardMovement, useSafetyStatusPoll,
 } from '../hooks';
 import { useMetricsStore } from '../store';
@@ -12,7 +12,6 @@ import { useMetricsStore } from '../store';
 export function Dashboard({ darkMode, toggleDark }: { darkMode: boolean; toggleDark: () => void }) {
   useConnectionSync();
   useStopModeBackendSync();
-  useTestBenchSessionSync();
   useCloudAwareStopLabelEstop();
   useYoloBottleStop();
   useSafetyStatusPoll();

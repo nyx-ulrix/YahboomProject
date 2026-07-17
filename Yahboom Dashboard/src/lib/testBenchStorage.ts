@@ -181,17 +181,9 @@ const STOP_MODE_PREF_KEY = 'yahboom_stop_bench_mode';
 const STOP_TOGGLES_KEY = 'yahboom_stop_toggles';
 
 export function loadStopToggles(): StopModeToggles {
-  try {
-    const raw = localStorage.getItem(STOP_TOGGLES_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<StopModeToggles>;
-      if (typeof parsed.cacheOn === 'boolean') {
-        return { cacheOn: parsed.cacheOn, cloudOn: true };
-      }
-    }
-  } catch {
-    /* ignore */
-  }
+  // Cache Aware Offloading always starts OFF (never restored from a prior session);
+  // it must be re-enabled explicitly so the car receives a fresh Cao_ON + Cao_Ready.
+  // cloudOn is always true — cloud-aware bottle stop has no toggle.
   return { ...DEFAULT_STOP_TOGGLES };
 }
 
@@ -311,113 +303,22 @@ export function applyStopBenchLayoutForMode(mode: StopBenchMode): void {
   useLayoutStore.getState().applyTemplate(templateId);
 }
 
-/** GET /api/test_bench/stop_mode payload — backend is the cross-browser source of truth. */
-export type StopModeApiResponse = {
-  mode?: StopBenchMode;
-  cache_script_running?: boolean;
-  cache_script_detection_ready?: boolean;
-  cache_aware_mqtt_ready?: boolean;
-  cloud_aware_enabled?: boolean;
-  message?: string;
-  status?: string;
-};
-
-export const STOP_MODE_SYNC_EVENT = 'yahboom-stop-mode-sync';
-
-let cachedClientStopMode: StopBenchMode | null = null;
-let stopModeSyncLockUntil = 0;
-const stopModeSyncOriginId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-const stopModeBroadcast = typeof BroadcastChannel !== 'undefined'
-  ? new BroadcastChannel('yahboom-stop-mode')
-  : null;
-
-/** Brief lock while this tab pushes a mode change so polling does not revert it. */
-export function lockStopModeSync(ms = 5000): void {
-  stopModeSyncLockUntil = Date.now() + ms;
-}
-
-export function isStopModeSyncLocked(): boolean {
-  return Date.now() < stopModeSyncLockUntil;
-}
-
-export function getStopModeSyncOrigin(): string {
-  return stopModeSyncOriginId;
-}
-
-export function getClientStopMode(): StopBenchMode {
-  if (cachedClientStopMode) return cachedClientStopMode;
-  const toggles = loadStopToggles();
-  return togglesToStopMode(toggles.cacheOn, true);
-}
-
-/** Persist mode locally and return matching toggles (does not POST to backend). */
-export function setClientStopMode(mode: StopBenchMode): StopModeToggles {
-  cachedClientStopMode = mode;
-  const toggles = stopModeToToggles(mode);
-  saveStopToggles(toggles);
-  saveStopModePreference(mode);
-  return toggles;
-}
-
-export function stopModeFromApi(data: StopModeApiResponse | null | undefined): StopBenchMode | null {
-  if (!data?.mode) return null;
-  return normalizeStopBenchMode(data.mode);
-}
-
-export async function fetchBackendStopMode(): Promise<StopModeApiResponse | null> {
+/** Align backend stop mode + YOLO with local toggles (fixes stale Cache Aware after refresh). */
+export async function syncStopModeToBackend(): Promise<void> {
+  const { cacheOn } = loadStopToggles();
+  const localMode = togglesToStopMode(cacheOn, true);
+  applyStopBenchLayoutForMode(localMode);
   try {
     const res = await fetch('/api/test_bench/stop_mode', { cache: 'no-store' });
-    if (!res.ok) return null;
-    return await res.json() as StopModeApiResponse;
+    if (!res.ok) return;
+    const data = await res.json() as { mode?: StopBenchMode };
+    if (data.mode === localMode) return;
+    await fetch('/api/test_bench/cache_aware', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on: localMode === 'cache_aware_offloading' }),
+    });
   } catch {
-    return null;
+    /* backend unreachable */
   }
-}
-
-export type StopModeSyncDetail = {
-  mode: StopBenchMode;
-  data: StopModeApiResponse;
-  origin: string;
-};
-
-export function broadcastStopModeSync(detail: StopModeSyncDetail): void {
-  stopModeBroadcast?.postMessage(detail);
-  window.dispatchEvent(new CustomEvent(STOP_MODE_SYNC_EVENT, { detail }));
-}
-
-export function subscribeStopModeSync(
-  handler: (detail: StopModeSyncDetail) => void,
-): () => void {
-  const onWindow = (event: Event) => {
-    const detail = (event as CustomEvent<StopModeSyncDetail>).detail;
-    if (detail?.mode) handler(detail);
-  };
-  const onChannel = (event: MessageEvent<StopModeSyncDetail>) => {
-    const detail = event.data;
-    if (detail?.mode && detail.origin !== stopModeSyncOriginId) handler(detail);
-  };
-  window.addEventListener(STOP_MODE_SYNC_EVENT, onWindow);
-  stopModeBroadcast?.addEventListener('message', onChannel);
-  return () => {
-    window.removeEventListener(STOP_MODE_SYNC_EVENT, onWindow);
-    stopModeBroadcast?.removeEventListener('message', onChannel);
-  };
-}
-
-/** Pull backend mode; update local mirror + layout when another dashboard changed it. */
-export async function pullAndReconcileStopMode(): Promise<StopModeApiResponse | null> {
-  if (isStopModeSyncLocked()) return null;
-  const data = await fetchBackendStopMode();
-  const mode = stopModeFromApi(data);
-  if (!mode || !data) return null;
-  if (mode === getClientStopMode()) return data;
-  setClientStopMode(mode);
-  applyStopBenchLayoutForMode(mode);
-  broadcastStopModeSync({ mode, data, origin: stopModeSyncOriginId });
-  return data;
-}
-
-/** On dashboard load: adopt backend mode (do not push local defaults over other browsers). */
-export async function syncStopModeToBackend(): Promise<void> {
-  await pullAndReconcileStopMode();
 }

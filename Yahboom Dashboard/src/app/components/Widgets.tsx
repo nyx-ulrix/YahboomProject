@@ -35,14 +35,6 @@ import {
   STOP_SOURCE_LABELS,
   togglesToStopMode,
   applyStopBenchLayoutForMode,
-  broadcastStopModeSync,
-  getClientStopMode,
-  getStopModeSyncOrigin,
-  lockStopModeSync,
-  setClientStopMode,
-  stopModeFromApi,
-  subscribeStopModeSync,
-  type StopModeApiResponse,
   type StopBenchMode,
   type StopModeToggles,
   type StopSource,
@@ -60,19 +52,6 @@ import {
   takeTestBenchStopIsStopLabel,
   takeTestBenchStopReason,
 } from '../../lib/testBenchSession';
-import {
-  broadcastTestBenchSessionSync,
-  clearTestBenchSession,
-  completeTestBenchSession,
-  fetchTestBenchSession,
-  getSessionSyncOrigin,
-  lockSessionSync,
-  patchTestBenchSession,
-  startTestBenchSession,
-  subscribeTestBenchSessionSync,
-  type CompletedRunApi,
-  type TestBenchSessionApi,
-} from '../../lib/testBenchSessionSync';
 import { inferEventTag, shortEventTag } from '../../lib/eventLogTag';
 import { VideoFeedCore } from '../../lib/VideoFeed';
 import { Slider } from './ui/slider';
@@ -2021,6 +2000,17 @@ export const yoloModelDef: WidgetDefinition = {
 // STOP-TIME TEST BENCH — measure how long the robot takes to stop after EXPLORE.
 // Command time is stamped on the Pi clock when START is pressed; the official run
 // start is when the Pi reports movement. Mission time ends at Pi drive-status halt.
+type StopModeApiResponse = {
+  mode?: StopBenchMode;
+  cache_script_running?: boolean;
+  cache_script_detection_ready?: boolean;
+  cache_aware_mqtt_ready?: boolean;
+  cache_script_launch_mode?: 'terminal';
+  cache_script_log?: string;
+  cloud_aware_enabled?: boolean;
+  status?: string;
+  message?: string;
+};
 
 function cacheBenchStartReady(data: StopModeApiResponse): boolean {
   if (data.mode === 'cloud_aware') return true;
@@ -2387,7 +2377,6 @@ function StopTestBenchWidget() {
   const pendingDistanceFocusRunIdRef = useRef<number | null>(null);
   const startTestRef = useRef<() => void>(() => {});
   const startBlockedRef = useRef(false);
-  const resettingFromRemoteRef = useRef(false);
   useEffect(() => { networkTypeRef.current = networkType; }, [networkType]);
   useEffect(() => { stopModeRef.current = stopMode; }, [stopMode]);
   useEffect(() => { stopTogglesRef.current = stopToggles; }, [stopToggles]);
@@ -2480,9 +2469,7 @@ function StopTestBenchWidget() {
       lastPiMsRef.current != null && lastPiWallMsRef.current != null
         ? lastPiMsRef.current + (Date.now() - lastPiWallMsRef.current)
         : lastPiMsRef.current ?? anchor;
-    const elapsed = Math.max(0, piNow - anchor);
-    setFrozenElapsedMs(elapsed);
-    void patchTestBenchSession({ frozen_elapsed_ms: elapsed });
+    setFrozenElapsedMs(Math.max(0, piNow - anchor));
   }, []);
 
   const latchStopSource = useCallback((source: StopSource) => {
@@ -2516,28 +2503,18 @@ function StopTestBenchWidget() {
     return () => setTestBenchManualStopHook(null);
   }, [freezeTimerAtNow, latchStopSource]);
 
-  const applyStopModeApi = useCallback((data: StopModeApiResponse, options?: { layout?: boolean }) => {
-    const mode = stopModeFromApi(data) ?? getClientStopMode();
-    const toggles = setClientStopMode(mode);
-    stopTogglesRef.current = toggles;
-    setStopToggles(toggles);
+  const applyStopModeApi = useCallback((data: StopModeApiResponse) => {
+    // Mode follows the local toggle (off on startup), not any stale backend mode.
+    const cacheOn = stopTogglesRef.current.cacheOn;
+    const mode = togglesToStopMode(cacheOn, true);
     setStopMode(mode);
     setTestBenchStopMode(mode);
     setCloudAwareStopEnabled(benchUsesCosineSimilarity(mode));
-    const cacheOn = toggles.cacheOn;
     const mqttReady = data.cache_aware_mqtt_ready === true || data.cache_script_running === true;
+    // Cache-aware readiness comes solely from the car's Cao_Ready over MQTT.
     setCacheScriptRunning(cacheOn && mqttReady);
     setCacheScriptReady(!cacheOn || mqttReady);
-    if (options?.layout !== false) {
-      applyStopBenchLayoutForMode(mode);
-    }
   }, []);
-
-  useEffect(() => {
-    return subscribeStopModeSync(({ data }) => {
-      applyStopModeApi(data, { layout: false });
-    });
-  }, [applyStopModeApi]);
 
   useEffect(() => {
     saveTestBenchCache({ runs });
@@ -2580,7 +2557,7 @@ function StopTestBenchWidget() {
     if (!userPickedNetworkRef.current && networkMode) setNetworkType(networkMode);
   }, [networkMode]);
 
-  const resetSession = useCallback((options?: { skipBackend?: boolean }) => {
+  const resetSession = useCallback(() => {
     const hadSession = sessionActiveRef.current;
     const recordedStopSource = stopSourceRef.current;
     commandSentAtRef.current = null;
@@ -2614,166 +2591,7 @@ function StopTestBenchWidget() {
         sendCommand('auto_off');
       }
     }
-    if (!options?.skipBackend && !resettingFromRemoteRef.current) {
-      void clearTestBenchSession();
-    }
   }, []);
-
-  const appendCompletedRun = useCallback((apiRun: CompletedRunApi) => {
-    setRuns((prev) => {
-      if (prev.some((r) => (
-        r.commandSentAt === apiRun.commandSentAt
-        && r.stoppedAt === apiRun.stoppedAt
-        && r.startedAt === apiRun.startedAt
-      ))) {
-        return prev;
-      }
-      const newRunId = Date.now() + Math.random();
-      pendingDistanceFocusRunIdRef.current = newRunId;
-      return [
-        ...prev,
-        {
-          id: newRunId,
-          run: apiRun.run || prev.length + 1,
-          commandSentAt: apiRun.commandSentAt,
-          startedAt: apiRun.startedAt,
-          stoppedAt: apiRun.stoppedAt,
-          durationMs: apiRun.durationMs,
-          commandToMoveMs: apiRun.commandToMoveMs,
-          stoppingDistance: apiRun.stoppingDistance ?? '',
-          networkType: apiRun.networkType,
-          stopMode: apiRun.stopMode,
-          stopSource: apiRun.stopSource as StopSource | undefined,
-          stopConfidencePercent: apiRun.stopConfidencePercent,
-        },
-      ];
-    });
-  }, []);
-
-  const beginLocalSession = useCallback(async (
-    commandTs: number,
-    benchMode: StopBenchMode,
-    sessionWallMs: number,
-    options: { sendAuto: boolean },
-  ) => {
-    recordedBenchModeRef.current = benchMode;
-    setTestBenchStopMode(benchMode);
-    sessionStartWallMsRef.current = sessionWallMs;
-    latestCacheDetectionRef.current = null;
-    cacheDetectPollCountRef.current = 0;
-    if (benchNeedsPiScript(benchMode)) {
-      await clearStaleCacheDetectionOnBackend();
-    }
-    sessionActiveRef.current = true;
-    setTestBenchSessionActive(true);
-    commandSentAtRef.current = commandTs;
-    lastPiMsRef.current = commandTs;
-    lastPiWallMsRef.current = Date.now();
-    movementDeadlineRef.current = Date.now() + MOVEMENT_WAIT_MS;
-    activeStartRef.current = null;
-    armedRef.current = false;
-    stopCommandPendingRef.current = false;
-    stopCommandPendingAtRef.current = null;
-    firstStopTsRef.current = null;
-    preMoveStopReasonRef.current = null;
-    stopSourceRef.current = null;
-    stopConfidenceRef.current = null;
-    autoOffWarnedRef.current = false;
-    setFrozenElapsedMs(null);
-    setActiveStart(null);
-
-    let ignoreDecodeKey: string | null = null;
-    if (benchUsesCosineSimilarity(benchMode)) {
-      try {
-        const vitRes = await fetch('/api/vit/status', { cache: 'no-store' });
-        if (vitRes.ok) {
-          const vit = await vitRes.json() as VitStatusForStopLabel;
-          ignoreDecodeKey = vitDecodeEventKey(vit);
-        }
-      } catch { /* VIT may be offline */ }
-      setStopLabelEstopArmed(true, ignoreDecodeKey);
-    } else if (benchHasYoloBottleStop(benchMode)) {
-      let ignoreYoloKey: string | null = null;
-      try {
-        const yoloRes = await fetch('/api/yolo/status', { cache: 'no-store' });
-        if (yoloRes.ok) {
-          const yolo = await yoloRes.json() as YoloStatusForBottleStop;
-          ignoreYoloKey = yoloStopEventKey(yolo);
-        }
-      } catch { /* YOLO may be offline */ }
-      setYoloStopArmed(true, ignoreYoloKey);
-    }
-
-    setCommandSentAt(commandTs);
-    setTick((n) => n + 1);
-    if (options.sendAuto) {
-      toggleRosAuto();
-    }
-  }, []);
-
-  const applySessionFromSync = useCallback((data: TestBenchSessionApi) => {
-    if (data.completed_run) {
-      appendCompletedRun(data.completed_run);
-    }
-
-    if (!data.active) {
-      if (sessionActiveRef.current) {
-        resettingFromRemoteRef.current = true;
-        resetSession({ skipBackend: true });
-        resettingFromRemoteRef.current = false;
-      }
-      return;
-    }
-
-    const cmdAt = data.command_sent_at_ms;
-    const benchMode = data.stop_mode ?? stopModeRef.current;
-    if (cmdAt == null || benchMode == null) return;
-
-    const alreadySame = sessionActiveRef.current && commandSentAtRef.current === cmdAt;
-    const syncSessionFields = () => {
-      if (data.active_start_ms != null && activeStartRef.current !== data.active_start_ms) {
-        activeStartRef.current = data.active_start_ms;
-        armedRef.current = true;
-        setActiveStart(data.active_start_ms);
-      }
-      if (data.frozen_elapsed_ms != null) {
-        setFrozenElapsedMs(data.frozen_elapsed_ms);
-      }
-    };
-
-    if (!alreadySame) {
-      void beginLocalSession(
-        cmdAt,
-        benchMode,
-        data.session_start_wall_ms ?? Date.now(),
-        { sendAuto: false },
-      ).then(() => {
-        syncSessionFields();
-      });
-      return;
-    }
-
-    syncSessionFields();
-  }, [appendCompletedRun, beginLocalSession, resetSession]);
-
-  useEffect(() => {
-    return subscribeTestBenchSessionSync(({ data }) => {
-      applySessionFromSync(data);
-    });
-  }, [applySessionFromSync]);
-
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const data = await fetchTestBenchSession();
-        if (!alive || !data) return;
-        applySessionFromSync(data);
-      } catch { /* backend may be starting */ }
-    };
-    void load();
-    return () => { alive = false; };
-  }, [applySessionFromSync]);
 
   const captureStopMetrics = useCallback(async (source: StopSource) => {
     if (source === 'manual') {
@@ -2801,32 +2619,27 @@ function StopTestBenchWidget() {
     const recordedSource = stopSourceRef.current ?? 'manual';
     const metrics = await captureStopMetrics(recordedSource);
     const mode = recordedBenchModeRef.current;
-    let runNumber = 0;
-    setRuns((prev) => {
-      runNumber = prev.length + 1;
-      return prev;
-    });
-    const runPayload: CompletedRunApi = {
-      run: runNumber,
-      commandSentAt: cmdAt,
-      startedAt,
-      stoppedAt,
-      durationMs: Math.max(0, stoppedAt - startedAt),
-      commandToMoveMs: Math.max(0, startedAt - cmdAt),
-      stoppingDistance: '',
-      networkType: networkTypeRef.current,
-      stopMode: mode,
-      stopSource: recordedSource,
-      stopConfidencePercent: metrics.stopConfidencePercent,
-    };
-    const completeResult = await completeTestBenchSession(runPayload, getSessionSyncOrigin());
-    resetSession({ skipBackend: true });
-    if (completeResult?.completed_run) {
-      appendCompletedRun(completeResult.completed_run);
-    } else {
-      appendCompletedRun(runPayload);
-    }
-  }, [appendCompletedRun, captureStopMetrics, resetSession]);
+    const newRunId = Date.now() + Math.random();
+    pendingDistanceFocusRunIdRef.current = newRunId;
+    resetSession();
+    setRuns((prev) => [
+      ...prev,
+      {
+        id: newRunId,
+        run: prev.length + 1,
+        commandSentAt: cmdAt,
+        startedAt,
+        stoppedAt,
+        durationMs: Math.max(0, stoppedAt - startedAt),
+        commandToMoveMs: Math.max(0, startedAt - cmdAt),
+        stoppingDistance: '',
+        networkType: networkTypeRef.current,
+        stopMode: mode,
+        stopSource: recordedSource,
+        stopConfidencePercent: metrics.stopConfidencePercent,
+      },
+    ]);
+  }, [captureStopMetrics, resetSession]);
 
   const disableAutoRoam = useCallback(() => {
     // Pi owns disengage when its cache-aware script stopped the run; otherwise
@@ -2859,7 +2672,6 @@ function StopTestBenchWidget() {
     activeStartRef.current = startTs;
     armedRef.current = true;
     setActiveStart(startTs);
-    void patchTestBenchSession({ active_start_ms: startTs });
   }, []);
 
   const tryEndRunOnPiAutoOff = useCallback(async (drive: DriveStatusPayload | null) => {
@@ -2982,40 +2794,45 @@ function StopTestBenchWidget() {
       return;
     }
 
-    const sessionWallMs = Date.now();
-    const origin = getSessionSyncOrigin();
-    lockSessionSync();
-
-    const startRes = await startTestBenchSession({
-      origin,
-      command_sent_at_ms: commandTs,
-      stop_mode: benchMode,
-      session_start_wall_ms: sessionWallMs,
-    });
-
-    if (!startRes.data) {
-      useMetricsStore.getState().pushEvent(
-        'error',
-        'Mission test — failed to reach backend for session start',
-      );
-      return;
+    recordedBenchModeRef.current = benchMode;
+    setTestBenchStopMode(benchMode);
+    sessionStartWallMsRef.current = Date.now();
+    latestCacheDetectionRef.current = null;
+    cacheDetectPollCountRef.current = 0;
+    if (benchNeedsPiScript(benchMode)) {
+      await clearStaleCacheDetectionOnBackend();
     }
+    sessionActiveRef.current = true;
+    setTestBenchSessionActive(true);
+    commandSentAtRef.current = commandTs;
+    lastPiMsRef.current = commandTs;
+    lastPiWallMsRef.current = Date.now();
+    movementDeadlineRef.current = Date.now() + MOVEMENT_WAIT_MS;
 
-    if (startRes.status === 409) {
-      applySessionFromSync(startRes.data);
-      return;
+    let ignoreDecodeKey: string | null = null;
+    if (benchUsesCosineSimilarity(benchMode)) {
+      try {
+        const vitRes = await fetch('/api/vit/status', { cache: 'no-store' });
+        if (vitRes.ok) {
+          const vit = await vitRes.json() as VitStatusForStopLabel;
+          ignoreDecodeKey = vitDecodeEventKey(vit);
+        }
+      } catch { /* VIT may be offline */ }
+      setStopLabelEstopArmed(true, ignoreDecodeKey);
+    } else if (benchHasYoloBottleStop(benchMode)) {
+      let ignoreYoloKey: string | null = null;
+      try {
+        const yoloRes = await fetch('/api/yolo/status', { cache: 'no-store' });
+        if (yoloRes.ok) {
+          const yolo = await yoloRes.json() as YoloStatusForBottleStop;
+          ignoreYoloKey = yoloStopEventKey(yolo);
+        }
+      } catch { /* YOLO may be offline */ }
+      setYoloStopArmed(true, ignoreYoloKey);
     }
-
-    if (!startRes.ok) {
-      useMetricsStore.getState().pushEvent(
-        'error',
-        'Mission test — failed to start shared session on backend',
-      );
-      return;
-    }
-
-    await beginLocalSession(commandTs, benchMode, sessionWallMs, { sendAuto: true });
-    broadcastTestBenchSessionSync({ data: startRes.data, origin });
+    setCommandSentAt(commandTs);
+    setTick((n) => n + 1);
+    toggleRosAuto();
   };
 
   // Single session poll — Pi time, movement start, stop detection, live timer tick.
@@ -3304,10 +3121,8 @@ function StopTestBenchWidget() {
   // Cache-Aware Offloading toggle: publish Cao_ON / Cao_OFF over MQTT. Cloud-aware
   // bottle stop stays armed regardless. Start stays gated on the Pi's ready reply.
   const applyCacheAware = (nextCache: boolean) => {
-    const mode = togglesToStopMode(nextCache, true);
-    lockStopModeSync();
-    setClientStopMode(mode);
     persistStopToggles({ cacheOn: nextCache, cloudOn: true });
+    const mode = togglesToStopMode(nextCache, true);
     applyStopBenchLayoutForMode(mode);
     setStopMode(mode);
     setTestBenchStopMode(mode);
@@ -3336,9 +3151,8 @@ function StopTestBenchWidget() {
               ? 'Cache Aware Offloading — sent Cao_ON to the Raspberry Pi'
               : 'Cache Aware Offloading — sent Cao_OFF to the Raspberry Pi',
           );
-          broadcastStopModeSync({ mode, data, origin: getStopModeSyncOrigin() });
         }
-        applyStopModeApi(data, { layout: false });
+        applyStopModeApi(data);
       } catch {
         useMetricsStore.getState().pushEvent(
           'error',
