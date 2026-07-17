@@ -53,7 +53,16 @@ The backend also auto-connects to `MQTT_BROKER_IP` on startup. The settings moda
 
 ## Default layout
 
-The default dashboard layout is **Stop Test** (VIT decoder, video feed, Stop-Time Test Bench, stop button, event log). Switch layouts from the template menu in the top bar (**VIT View**, **LiDAR View**, **Stop Test**).
+The default dashboard layout is **Stop Test CAO** (VIT decoder, video feed, Stop-Time Test Bench, stop button, event log). Switch layouts from the template menu in the top bar:
+
+| Template | Use when |
+|----------|----------|
+| **Stop Test CAO** | Cache Aware Offloading — cosine / VIT decoder widget |
+| **Stop Test YOLO** | YOLO mode — YOLO Model widget |
+| **VIT View** | General VIT monitoring |
+| **LiDAR View** | LiDAR grid and SLAM |
+
+Pressing **Cache Aware** or **YOLO** on the Stop-Time Test Bench automatically switches to **Stop Test CAO** or **Stop Test YOLO** respectively (`applyStopBenchLayoutForMode()` in `testBenchStorage.ts`). On dashboard load, `syncStopModeToBackend()` restores the saved mode and matching layout.
 
 ## Video and VIT on the Pi
 
@@ -75,7 +84,7 @@ cd ~/YahboomProject/Yahboom\ Car/Code
 python3 VIT.py
 ```
 
-`webrtc_server.py` streams WebRTC on port `8080` and publishes JPEG frames to `yahboom/camera/frame`. `VIT.py` consumes those frames, runs MobileCLIP-S1, and publishes embeddings on `yahboom/vit/embedding`. Cache-aware offloading is built into `VIT.py` — the dashboard toggles it with `Cao_ON` / `Cao_OFF` over MQTT (no separate `cache_aware_offloading.py` script).
+`webrtc_server.py` streams WebRTC on port `8080`, serves **`GET /frame.jpg`** (latest camera JPEG for dashboard YOLO when WebRTC is the display path), and publishes JPEG frames to `yahboom/camera/frame`. `VIT.py` consumes those frames, runs MobileCLIP-S1, and publishes embeddings on `yahboom/vit/embedding`. Cache-aware offloading is built into `VIT.py` — the dashboard toggles it with **`Cao_ON` / `Cao_OFF`** over MQTT (no separate `cache_aware_offloading.py` script).
 
 The backend detects a running stream with an **HTTP probe** to port `8080` (`VIDEO_SERVER_PORT`) and exposes WebRTC via `/api/webrtc/offer`.
 
@@ -102,21 +111,35 @@ The backend detects a running stream with an **HTTP probe** to port `8080` (`VID
 
 **Pi cache file:** `/home/pi/cache_embeddings.json` — create with `capture_bottle_cache_multi.py` while `VIT.py` is running, or copy from the dashboard reference library when testing cache-aware mode locally on the Pi.
 
-## MobileCLIP detection (client i2i from Pi embeddings)
+## Stop bench detection modes
 
-Object detection is **image-to-image**. The **client never encodes images** — it receives **image embeddings generated on the Pi** (relayed by the backend) and matches them in the browser against the dashboard reference library. Optional backend text-label decode is off by default (`VIT_ENABLE_MODEL=false`). The Stop Test Bench has a mutually exclusive **Detection Mode** toggle:
+The Stop Test Bench has a mutually exclusive **Detection Mode** toggle (**YOLO** vs **Cache Aware Offloading**). Preference is saved in browser `localStorage` (`yahboom_stop_bench_mode`).
 
-| Mode | What the Pi sends | Matching | Pi `Cao_*` | Who stops |
-|------|-------------------|----------|-----------|-----------|
-| **Cloud Only** | Every Pi embedding | Browser i2i vs full reference library; stop on **Stop Target** category | `Cao_OFF` | Dashboard on `stop_hit` |
-| **Cache Aware Offloading** | Cache-miss embeddings only | Browser i2i vs full reference library on miss | `Cao_ON` | Pi on cache **hit**; dashboard on cache **miss** + `stop_hit` |
+| Mode | API value | What the Pi sends | Matching | Pi `Cao_*` | Who stops |
+|------|-----------|-------------------|----------|-----------|-----------|
+| **YOLO** (default) | `cloud_aware` | Every Pi embedding (for Edge path) + live video frames to backend | Backend **YOLOv8** on video; optional **Edge Stop** via browser i2i cosine match | `Cao_OFF` | **YOLO Stop** when bottle class ≥ Stop Similarity (%); **Edge Stop** when i2i match ≥ threshold |
+| **Cache Aware Offloading (CAO)** | `cache_aware_offloading` | Cache-miss embeddings only | Browser i2i vs full reference library on miss | `Cao_ON` | Pi on cache **hit** (**Cache Stop**); dashboard on cache **miss** + match (**Edge Stop**) |
+
+**CAO (Cache Aware Offloading)** — MQTT commands use the **`Cao_*`** prefix (`Cao_ON`, `Cao_OFF`, `Cao_Ready`). The former `Cae_*` names are retired; dashboard and `VIT.py` must be deployed together.
+
+### YOLO mode
+
+- Backend **`yolo_service.py`** runs Ultralytics YOLOv8 (`yolov8n.pt` by default) on frames from MQTT `yahboom/camera/frame` and HTTP poll fallback to `http://<pi>:8080/frame.jpg`.
+- YOLO inference runs only when test-bench mode is `cloud_aware`; it pauses in CAO mode.
+- When **hops** backhaul simulation is enabled, YOLO frame ingest gets hop delay (live WebRTC video is not delayed).
+- **`useYoloBottleStop()`** polls `/api/yolo/status` and fires **YOLO Stop** when the stop-target class (default bottle) meets the Stop Similarity threshold.
+- Widget: **YOLO Model** — latched readings, paused state when CAO is active.
+
+### CAO / Edge (image-to-image) mode
+
+Object matching is **image-to-image**. The **client never encodes live camera images** — it receives **embeddings from the Pi** (relayed by the backend) and matches them in the browser against the dashboard reference library. Optional backend text-label decode is off by default (`VIT_ENABLE_MODEL=false`).
 
 Flow:
 
 - **Pi** encodes camera frames and publishes embeddings on MQTT (`yahboom/vit/embedding`).
 - **Backend** relays each embedding to `GET /api/vit/client/latest_embedding` (no live matching).
 - **Browser** (`useClientReferenceDetection`) polls embeddings every 180 ms, scans the **full reference library** (`GET /api/vit/reference/library`), runs i2i match (`Yahboom Dashboard/src/lib/clientVit/`), and POSTs the result to `/api/vit/client/match_result`.
-- **Stop:** `useCloudAwareStopLabelEstop()` polls `/api/vit/status` every 500 ms and fires when `reference_match.stop_hit` is true and similarity ≥ 70% (`Yahboom Dashboard/src/lib/cloudAwareStopLabelEstop.ts`). Only the **Stop Target** category (default `target_bottle`) qualifies — other library categories are shown in the VIT decoder but do not trigger stop.
+- **Edge Stop:** `useCloudAwareStopLabelEstop()` polls `/api/vit/status` every 500 ms and fires when `reference_match.stop_hit` is true and similarity ≥ Stop Similarity (%). Only the **Stop Target** category (default `target_bottle`) qualifies.
 
 Live detection never encodes images on the dashboard host. The optional **Upload Embeddings** widget can encode static images on the backend when `torch` + `open_clip_torch` are installed.
 
@@ -145,6 +168,13 @@ A `.env` file in **`Yahboom Dashboard/`** configures both frontend and backend. 
 | `CLOUD_AWARE_REFERENCE_THRESHOLD` | Minimum cosine similarity floor for a stop hit (default `0.70`) |
 | `VIT_ENABLE_MODEL` | Optional backend CLIP text-label decode — off; live detection is client i2i (default `false`) |
 | `VIT_CLIENT_DETECTION_MODE` | Default mode mirrored to `vit_service` (`cloud_aware` \| `cache_aware_offloading`) |
+| `YOLO_ENABLED` | Enable YOLO inference on live frames (default `true`) |
+| `YOLO_HF_REPO` | Hugging Face repo for weights (default `Ultralytics/YOLOv8`) |
+| `YOLO_MODEL` | Weights filename (default `yolov8n.pt`) |
+| `YOLO_CONFIDENCE` | Detection confidence floor (default `0.25`) |
+| `YOLO_IMGSZ` | Inference input size (default `640`) |
+| `YOLO_INFERENCE_INTERVAL_SEC` | Min seconds between YOLO runs (default `0.4`) |
+| `YOLO_READINGS_STALE_MS` | Widget stale threshold (default `5000`) |
 
 ## Build
 
@@ -161,27 +191,37 @@ Widgets are added from the picker (**P**). Key control widgets:
 | Widget | Purpose |
 |--------|---------|
 | **ROS Auto Button** | Sends `auto_on` / `auto_off` to the Pi (`toggleRosAuto()`). Label: **EXPLORE** / **STOP EXPLORING**. |
-| **Stop-Time Test Bench** | Measures stop time after explore. Three stop modes; Pi timestamps; CSV export. |
+| **Stop-Time Test Bench** | Measures stop time after explore. YOLO vs CAO modes; Pi timestamps; CSV export. Auto-switches layout on mode buttons. |
+| **YOLO Model** | Live YOLOv8 detections from `/api/yolo/status` (latched display; paused in CAO mode). |
 | **Live Reference Capture** | Save the latest Pi MQTT embedding into a named category in the reference library. |
 | **Upload Embeddings** | Encode a static image on the dashboard backend and save it to the reference library (requires `torch` + `open_clip_torch`). |
 | **Emergency Stop**, **Movement Joystick**, **Camera Joystick**, **System Status**, **Local LiDAR Grid**, **Persistent SLAM Map**, **VIT Scene Decoder**, **Event Log**, **Video Feed** | Standard monitoring and control. |
 
 ### Stop-Time Test Bench
 
-Located in `Yahboom Dashboard/src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode logic: `Yahboom Dashboard/backend/app/routes/test_bench_routes.py`, `Yahboom Dashboard/backend/app/services/vit/cloud_aware_estop.py`. Cache-aware readiness comes from retained MQTT on `yahboom/cache_aware/ready` (no SSH log probe). Pi embedding relay: `vit_service.py`; client image-to-image: `src/lib/clientVit/` + `useClientReferenceDetection.ts`; bottle stop: `src/lib/cloudAwareStopLabelEstop.ts` via `useCloudAwareStopLabelEstop()` in `src/app/hooks.ts`.
+Located in `Yahboom Dashboard/src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode logic: `Yahboom Dashboard/backend/app/routes/test_bench_routes.py`, `Yahboom Dashboard/backend/app/services/vit/cloud_aware_estop.py`, `Yahboom Dashboard/backend/app/services/yolo_service.py`. Cache-aware readiness comes from retained MQTT on `yahboom/cache_aware/ready` (no SSH log probe). Pi embedding relay: `vit_service.py`; client image-to-image: `src/lib/clientVit/` + `useClientReferenceDetection.ts`; **Edge Stop:** `src/lib/cloudAwareStopLabelEstop.ts` via `useCloudAwareStopLabelEstop()`; **YOLO Stop:** `src/lib/yoloBottleStop.ts` via `useYoloBottleStop()` in `src/app/hooks.ts`. Layout sync: `applyStopBenchLayoutForMode()` / `syncStopModeToBackend()` in `testBenchStorage.ts`.
 
 **Purpose:** Run repeated stop-time experiments, compare stop modes, and export results as CSV.
 
 #### Detection modes (mutually exclusive)
 
-Default: **Cloud Only**. Preference is saved in browser `localStorage` (`yahboom_stop_bench_mode`).
+Default: **YOLO**. Preference is saved in browser `localStorage` (`yahboom_stop_bench_mode`).
 
 | Mode | API value | Behaviour |
 |------|-----------|-----------|
-| **Cloud Only** (default) | `cloud_aware` | Pi sends every embedding (`Cao_OFF`); the **browser** matches each against the dashboard reference library (image-to-image). Sends `auto_off` + `stop` when similarity ≥ 70% after START. |
-| **Cache Aware Offloading** | `cache_aware_offloading` | Pi checks its own cache and stops on a **hit**. On a **cache miss** the Pi publishes the embedding; the **browser** runs i2i match and the dashboard stops. Publishes `Cao_ON`; START waits for `Cao_Ready`. |
+| **YOLO** (default) | `cloud_aware` | Pi sends every embedding (`Cao_OFF`). Backend runs YOLOv8 on live video frames. **YOLO Stop** when bottle detection ≥ Stop Similarity (%). **Edge Stop** still available via browser i2i match on Pi embeddings. Layout: **Stop Test YOLO**. |
+| **Cache Aware Offloading (CAO)** | `cache_aware_offloading` | Pi checks its own cache and stops on a **hit** (**Cache Stop**). On a **cache miss** the Pi publishes the embedding; the **browser** runs i2i match and the dashboard stops (**Edge Stop**). Publishes `Cao_ON`; START waits for `Cao_Ready`. YOLO inference is paused. Layout: **Stop Test CAO**. |
 
-Selecting a mode publishes the matching `Cao_ON` / `Cao_OFF` command and mirrors the mode into `vit_service` (`POST /api/test_bench/cache_aware`).
+Selecting a mode publishes the matching `Cao_ON` / `Cao_OFF` command, mirrors the mode into `vit_service` and `yolo_service` (`POST /api/test_bench/cache_aware`), and switches the dashboard layout template.
+
+#### Stop sources (event log / CSV “Stopped by”)
+
+| Source key | Label | When |
+|------------|-------|------|
+| `cache_pi` | **Cache Stop** | Pi cache hit in CAO mode |
+| `edge_dashboard` | **Edge Stop** | Browser i2i cosine match ≥ threshold |
+| `yolo_dashboard` | **YOLO Stop** | YOLO bottle detection ≥ Stop Similarity (%) |
+| `manual` | **Manual stop** | Operator e-stop or manual halt |
 
 #### START button gating
 
@@ -210,16 +250,17 @@ Detection uses **image-to-image** matching in the **browser**, not CLIP text lab
 
 - **Live Reference Capture** widget — save relayed Pi embeddings into categorized folders (default category `target_bottle`).
 - **Upload Embeddings** widget — encode a static image on the dashboard backend and save it to the library.
-- **Stop Target** dropdown on the Stop Test Bench — choose which category qualifies for cloud stop (persisted in browser `localStorage`).
-- Keep **`Cao_OFF`** for Cloud Only so every embedding is relayed.
+- **Stop Target** dropdown on the Stop Test Bench — choose which category qualifies for Edge Stop (persisted in browser `localStorage`).
+- Keep **`Cao_OFF`** for YOLO mode so every embedding is relayed for Edge matching.
+- Keep **`Cao_ON`** for CAO mode so the Pi filters to cache misses only.
 
 **Stop rule:**
 
-- **Cloud Only:** Pi sends every embedding; browser scans the full library but stops only when the best match is in the **Stop Target** category with `stop_hit === true`.
-- **Cache Aware:** Pi stops on cache hit locally; on cache miss the browser matches the forwarded embedding against the library.
-- Both POST match results to `/api/vit/client/match_result`; `/api/vit/status` is polled and, on `stop_hit === true` and `similarity_percent` ≥ 70% after START, sends `auto_off` + `stop`.
+- **YOLO:** YOLOv8 bottle class ≥ Stop Similarity (%) triggers **YOLO Stop**; browser i2i can still trigger **Edge Stop** on Pi embeddings.
+- **CAO:** Pi stops on cache hit locally (**Cache Stop**); on cache miss the browser matches the forwarded embedding against the library (**Edge Stop**).
+- Edge path POSTs match results to `/api/vit/client/match_result`; `/api/vit/status` is polled and, on `stop_hit === true` and similarity ≥ threshold after START, sends `auto_off` + `stop`.
 - Armed only after START (pre-START detections are ignored).
-- Implemented in `useClientReferenceDetection.ts` + `cloudAwareStopLabelEstop.ts` (`processVitStatusForStopLabelEstop`).
+- Implemented in `useClientReferenceDetection.ts` + `cloudAwareStopLabelEstop.ts` (`processVitStatusForStopLabelEstop`) and `yoloBottleStop.ts` (`useYoloBottleStop`).
 
 #### Timing and CSV
 
@@ -277,6 +318,36 @@ Implemented in `Yahboom Dashboard/backend/app/routes/test_bench_routes.py`, `Yah
 | `POST` | `/api/vit/config` | Set embedding size (512 / 1024 / 2048 B) |
 | `POST` | `/api/vit/clear` | Clear VIT session history |
 | `GET` | `/api/vit/export` | Download session CSV |
+
+### YOLO API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/yolo/status` | Latest YOLO detections, model state, paused flag (when CAO mode active) |
+| `POST` | `/api/yolo/config` | Body `{ "enabled": true }` and/or `{ "confidence": 0.25 }` or `{ "confidence_percent": 25 }` |
+| `POST` | `/api/yolo/clear` | Clear YOLO session history |
+
+Implemented in `Yahboom Dashboard/backend/app/services/yolo_service.py`, `Yahboom Dashboard/backend/app/routes/yolo_routes.py`.
+
+## Graphify knowledge graph
+
+This repo maintains a local code knowledge graph under **`graphify-out/`** (gitignored). Cursor agents use it via `.cursor/rules/graphify.mdc` to navigate cross-file dependencies before reading source.
+
+| Command | Purpose |
+|---------|---------|
+| `graphify update .` | Re-extract AST graph after code changes (no API cost) |
+| `graphify query "<question>"` | Scoped subgraph for architecture questions |
+| `graphify path "<A>" "<B>"` | Dependency path between two symbols |
+| `graphify explain "<concept>"` | Nodes related to a concept |
+
+Key symbols for recent stop-bench work:
+
+- **`stop_test_cao`** / **`stop_test_yolo`** — layout templates in `store.ts`
+- **`applyStopBenchLayoutForMode()`** — mode → layout switch in `testBenchStorage.ts`
+- **`YoloService`** — backend YOLOv8 on live frames (`yolo_service.py`)
+- **`Cao_ON` / `Cao_OFF` / `Cao_Ready`** — MQTT cache-aware commands in `VIT.py` and `mqtt_service.py`
+
+Open `graphify-out/GRAPH_REPORT.md` for community hubs, god nodes, and import cycles. Run `graphify update .` after modifying code so the graph stays current.
 
 ## Scripts
 
