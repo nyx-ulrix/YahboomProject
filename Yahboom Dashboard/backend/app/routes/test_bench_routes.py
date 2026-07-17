@@ -9,7 +9,7 @@ the Pi's retained {"ready": ...} status on yahboom/cache_aware/ready.
 from flask import Blueprint, jsonify, request
 
 from app.services.mqtt_service import mqtt_service
-from app.services.vit.cloud_aware_estop import (
+from app.services.vit.yolo_aware_estop import (
     STOP_MODE_CACHE,
     STOP_MODE_CLOUD,
     STOP_MODES,

@@ -1131,7 +1131,7 @@ class VITService:
                 self._session = self._session[-_SESSION_MAX:]
 
         try:
-            from app.services.vit.cloud_aware_estop import cloud_aware_estop
+            from app.services.vit.yolo_aware_estop import cloud_aware_estop
             cloud_aware_estop.on_vit_results(results, reference_match=reference_match)
         except Exception as exc:
             log.debug("Cloud-aware estop hook failed: %s", exc)

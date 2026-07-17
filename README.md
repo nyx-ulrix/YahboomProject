@@ -200,7 +200,7 @@ Widgets are added from the picker (**P**). Key control widgets:
 
 ### Stop-Time Test Bench
 
-Located in `Yahboom Dashboard/src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode logic: `Yahboom Dashboard/backend/app/routes/test_bench_routes.py`, `Yahboom Dashboard/backend/app/services/vit/cloud_aware_estop.py`, `Yahboom Dashboard/backend/app/services/yolo_service.py`. Cache-aware readiness comes from retained MQTT on `yahboom/cache_aware/ready` (no SSH log probe). Pi embedding relay: `vit_service.py`; client image-to-image: `src/lib/clientVit/` + `useClientReferenceDetection.ts`; **Edge Stop:** `src/lib/yoloStopLabelEstop.ts` via `useCloudAwareStopLabelEstop()`; **YOLO Stop:** `src/lib/yoloBottleStop.ts` via `useYoloBottleStop()` in `src/app/hooks.ts`. Layout sync: `applyStopBenchLayoutForMode()` / `syncStopModeToBackend()` in `testBenchStorage.ts`.
+Located in `Yahboom Dashboard/src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode logic: `Yahboom Dashboard/backend/app/routes/test_bench_routes.py`, `Yahboom Dashboard/backend/app/services/vit/yolo_aware_estop.py` (stop-mode registry; formerly `cloud_aware_estop.py`), `Yahboom Dashboard/backend/app/services/yolo_service.py`. Cache-aware readiness comes from retained MQTT on `yahboom/cache_aware/ready` (no SSH log probe). Pi embedding relay: `vit_service.py`; client image-to-image: `src/lib/clientVit/` + `useClientReferenceDetection.ts`; **Edge Stop:** `src/lib/yoloStopLabelEstop.ts` (formerly `cloudAwareStopLabelEstop.ts`) via `useCloudAwareStopLabelEstop()`; **YOLO Stop:** `src/lib/yoloBottleStop.ts` via `useYoloBottleStop()` in `src/app/hooks.ts`. Layout sync: `applyStopBenchLayoutForMode()` / `syncStopModeToBackend()` in `testBenchStorage.ts`.
 
 **Purpose:** Run repeated stop-time experiments, compare stop modes, and export results as CSV.
 
@@ -233,7 +233,7 @@ START is disabled when:
 - Detection mode is switching (`SENDING COMMAND` pill)
 - **Cache Aware Offloading:** the Pi has not confirmed cache-aware ready yet
 
-In Cache Aware Offloading, START unlocks when the Pi confirms readiness (`Cao_Ready`, surfaced via retained MQTT on `yahboom/cache_aware/ready`). The test bench reads this through `cache_aware_mqtt_ready` / `cache_script_running` in `GET /api/test_bench/stop_mode` — not via SSH log tailing. VIT encoder and video must be running on the Pi (`webrtc_server.py`) so the Pi produces embeddings.
+In Cache Aware Offloading, START unlocks when the Pi confirms readiness (`Cao_Ready`, surfaced via retained MQTT on `yahboom/cache_aware/ready`). The test bench reads this through `cache_aware_mqtt_ready` / `cache_script_running` in `GET /api/test_bench/stop_mode` — not via SSH log tailing. VIT encoder and video must be running on the Pi (`webrtc_server.py`) so the Pi produces embeddings. For display-only WebRTC without MQTT/`/frame.jpg` frames, use `webrtc_video_only.py` instead (YOLO/VIT will not receive frames).
 
 #### How a run works
 
@@ -294,14 +294,14 @@ Client-side explore autopilot (`CLIENT AUTO` widget, `useClientAutoPilot()`, `to
 - `mode`, `cloud_aware_enabled`, `needs_pi_cache_script`
 - `cache_script_running`, `cache_script_detection_ready`, `cache_aware_mqtt_ready` (all mirror Pi MQTT readiness on `yahboom/cache_aware/ready`)
 
-Implemented in `Yahboom Dashboard/backend/app/routes/test_bench_routes.py`, `Yahboom Dashboard/backend/app/services/vit/cloud_aware_estop.py`.
+Implemented in `Yahboom Dashboard/backend/app/routes/test_bench_routes.py`, `Yahboom Dashboard/backend/app/services/vit/yolo_aware_estop.py`.
 
 ### Video and VIT API
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/stream_status` | Pi video state (`?force=1` for live HTTP probe) |
-| `POST` | `/api/webrtc/offer` | WebRTC SDP proxy to Pi `webrtc_server.py` |
+| `POST` | `/api/webrtc/offer` | WebRTC SDP proxy to Pi `webrtc_server.py` (or `webrtc_video_only.py`) |
 | `GET` | `/api/video_feed` | MJPEG relay (when `VIDEO_USE_MJPEG_RELAY=true`) |
 | `GET` | `/api/vit/status` | VIT status: `detection_mode`, `reference_ready`, `reference_stop_ready`, `reference_stop_category`, `reference_library_categories`, `reference_stop_threshold` |
 | `GET` | `/api/vit/client/latest_embedding` | Latest Pi embedding relayed to browser (dedupe on `seq`) |
