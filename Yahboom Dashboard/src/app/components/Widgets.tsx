@@ -12,12 +12,13 @@ import type { WidgetDefinition, MetricsState } from '../types';
 import { sendCommand, sendCameraCommand, setEstopState, toggleRosAuto, vecToCommand, vecToCameraCommand } from '../../lib/Controls';
 import { setCloudAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/cloudAwareStopLabelEstop';
 import { loadReferenceLibrary, applyStopCategory, applyStopThreshold, getStopThreshold } from '../../lib/clientVit/referenceStore';
-import { dedupeReferenceMatchesByLabel } from '../../lib/clientVit/referenceMatch';
+import { dedupeCosineSimilarityCheckByLabel } from '../../lib/clientVit/cosineSimilarityCheck';
 import { uploadEmbeddingsDef } from './UploadEmbeddingsWidget';
 import { liveReferenceCaptureDef } from './LiveReferenceCaptureWidget';
 import {
   benchNeedsPiScript,
   benchHasDashboardBottleStop,
+  benchUsesCosineSimilarity,
   clearTestBenchCache,
   loadStopToggles,
   loadStopTargetCategory,
@@ -1298,7 +1299,7 @@ function vitMatchConfidenceColor(pct: number, threshold: number): string {
   return accents.red;
 }
 
-function VitDecoderWidget() {
+function VitDecoderWidget({ variant }: { variant: 'cosine' | 'yolo' }) {
   const [status, setStatus] = useState<VitStatusResponse | null>(null);
   const streamRunning = useMetricsStore((s: MetricsState) => s.streamRunning);
   const mqttLink = useMetricsStore((s: MetricsState) => s.mqttLinkStatus);
@@ -1420,14 +1421,16 @@ function VitDecoderWidget() {
   // Show detections while MQTT confirms the encoder pipeline is active.
   const displayLatest = encoderLive ? latest : null;
 
-  // Detection is image-to-image and runs in the browser for both modes: the
-  // client matches Pi embeddings (Cloud Only = every embedding; Cache Aware =
-  // cache-miss embeddings) against the dashboard reference library and posts the
-  // result back. The widget shows that recorded reference match.
+  // Both widgets always render; match labels/confidence only in the active mode.
   const detectionMode = status?.detection_mode ?? 'cloud_aware';
+  const yoloActive = detectionMode === 'cloud_aware';
+  const showCosineData = variant === 'cosine' && !yoloActive;
+  const widgetTitle = variant === 'cosine' ? 'Cosine Similarity Decoder' : 'YOLO Model';
+  const HeaderIcon = variant === 'yolo' ? Radar : ScanEye;
+  const headerAccent = variant === 'yolo' ? accents.cyan : accents.purple;
   const referenceReady = status?.reference_ready ?? false;
 
-  const isReferenceMatch = displayLatest?.match_mode === 'reference_embedding';
+  const isReferenceMatch = showCosineData && displayLatest?.match_mode === 'reference_embedding';
   const referenceMatch = isReferenceMatch ? displayLatest?.reference_match ?? null : null;
   const referenceStopThresholdPct =
     (status?.reference_stop_threshold ?? getStopThreshold()) * 100;
@@ -1441,16 +1444,11 @@ function VitDecoderWidget() {
     : topConf >= threshold * 0.6 ? accents.yellow
     : accents.red;
 
-  const matchSource = detectionMode === 'cache_aware_offloading'
-    ? 'Pi cache-miss embedding'
-    : 'Pi embedding';
+  const matchSource = 'Pi cache-miss embedding';
 
-  const modeStatusLabel = (() => {
-    if (detectionMode === 'cache_aware_offloading') {
-      return encoderLive ? 'CACHE AWARE — CLIENT MATCH' : 'CACHE AWARE — WAITING PI';
-    }
-    return encoderLive ? 'CLOUD — CLIENT MATCH' : 'CLOUD — WAITING PI';
-  })();
+  const modeStatusLabel = encoderLive
+    ? 'CACHE AWARE — COSINE MATCH'
+    : 'CACHE AWARE — WAITING PI';
 
   // Decoder activity pill — "MODEL READY" only while actively decoding; otherwise
   // shows what the server is doing (waiting, receiving embeddings, errors, etc.).
@@ -1479,10 +1477,6 @@ function VitDecoderWidget() {
       const cat = referenceMatch.category ? ` · ${referenceMatch.category}` : '';
       return `${referenceMatch.label}${cat}`;
     }
-    if (detectionMode === 'cloud_aware') {
-      if (!encoderLive) return 'Waiting for Pi embeddings — start VIT.py on the Pi';
-      return 'Client matching Pi embeddings — no match yet';
-    }
     return 'Cache Aware — waiting for a Pi cache-miss embedding';
   })();
 
@@ -1494,9 +1488,10 @@ function VitDecoderWidget() {
       : undefined;
 
   const topMatches = (() => {
+    if (!showCosineData) return [];
     const fromStatus = displayLatest?.reference_top_matches;
     if (fromStatus && fromStatus.length > 0) {
-      return dedupeReferenceMatchesByLabel(fromStatus).slice(0, 3);
+      return dedupeCosineSimilarityCheckByLabel(fromStatus).slice(0, 3);
     }
     if (referenceMatch) return [referenceMatch];
     return [];
@@ -1508,17 +1503,19 @@ function VitDecoderWidget() {
       <div className="flex-shrink-0 flex items-center justify-between gap-2 uppercase tracking-wider"
         style={{ color: 'var(--text-muted)', fontSize: 9, lineHeight: 1.1 }}>
         <div className="flex items-center gap-1 min-w-0">
-          <ScanEye size={11} style={{ color: accents.purple, flexShrink: 0 }} />
-          <span className="truncate">VIT Scene Decoder</span>
+          <HeaderIcon size={11} style={{ color: headerAccent, flexShrink: 0 }} />
+          <span className="truncate">{widgetTitle}</span>
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          <span className="pill" style={{
-            padding: '1px 6px', fontSize: 8, fontWeight: 700,
-            background: detectionMode === 'cloud_aware' ? 'rgba(6,182,212,0.18)' : 'rgba(139,92,246,0.18)',
-            color: detectionMode === 'cloud_aware' ? accents.cyan : accents.purple,
-          }}>
-            {modeStatusLabel}
-          </span>
+          {variant === 'cosine' && !yoloActive ? (
+            <span className="pill" style={{
+              padding: '1px 6px', fontSize: 8, fontWeight: 700,
+              background: 'rgba(139,92,246,0.18)',
+              color: accents.purple,
+            }}>
+              {modeStatusLabel}
+            </span>
+          ) : null}
           <span className="w-1.5 h-1.5 rounded-full"
             style={{ background: dotActive ? accents.green : 'var(--text-muted)',
               boxShadow: dotActive ? `0 0 5px ${accents.green}` : 'none' }} />
@@ -1532,45 +1529,49 @@ function VitDecoderWidget() {
           Reference Match
         </div>
         <div className="truncate" style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.25 }}>
-          {detectionHint}
+          {showCosineData ? detectionHint : '\u00A0'}
         </div>
         <div className="flex items-baseline gap-1.5" style={{ marginTop: 2 }}>
           <span style={{ fontSize: 22, fontWeight: 800, color: confColor, fontFamily: 'monospace' }}>
-            {topConf != null ? topConf.toFixed(1) : '--'}
+            {showCosineData && topConf != null ? topConf.toFixed(1) : '--'}
           </span>
           <span style={{ fontSize: 12, fontWeight: 700, color: confColor }}>%</span>
-          <span className="uppercase" style={{ fontSize: 8, color: 'var(--text-muted)', marginLeft: 4 }}>
-            {isReferenceMatch ? 'similarity' : 'confidence'}
-          </span>
-          {isReferenceMatch && referenceMatch?.hit && (
-            <span className="pill" style={{
-              marginLeft: 'auto', padding: '1px 6px', fontSize: 8, fontWeight: 700,
-              background: 'rgba(34,197,94,0.18)', color: accents.green,
-            }}>
-              MATCH
-            </span>
-          )}
-          {isReferenceMatch && referenceMatch?.stop_hit && (
-            <span className="pill" style={{
-              marginLeft: 6, padding: '1px 6px', fontSize: 8, fontWeight: 700,
-              background: 'rgba(244,63,94,0.18)', color: accents.red,
-            }}>
-              STOP
-            </span>
-          )}
-          {!isReferenceMatch && displayLatest?.alert && (
-            <span className="pill" style={{
-              marginLeft: 'auto', padding: '1px 6px', fontSize: 8, fontWeight: 700,
-              background: 'rgba(244,63,94,0.18)', color: accents.red,
-            }}>
-              LOW / UNKNOWN
-            </span>
-          )}
-          {displayLatest?.embedding_dim != null && (
-            <span className="uppercase" style={{ fontSize: 8, color: 'var(--text-muted)', marginLeft: 6 }}>
-              {`dims ${displayLatest.embedding_dim}`}
-            </span>
-          )}
+          {showCosineData ? (
+            <>
+              <span className="uppercase" style={{ fontSize: 8, color: 'var(--text-muted)', marginLeft: 4 }}>
+                {isReferenceMatch ? 'similarity' : 'confidence'}
+              </span>
+              {isReferenceMatch && referenceMatch?.hit && (
+                <span className="pill" style={{
+                  marginLeft: 'auto', padding: '1px 6px', fontSize: 8, fontWeight: 700,
+                  background: 'rgba(34,197,94,0.18)', color: accents.green,
+                }}>
+                  MATCH
+                </span>
+              )}
+              {isReferenceMatch && referenceMatch?.stop_hit && (
+                <span className="pill" style={{
+                  marginLeft: 6, padding: '1px 6px', fontSize: 8, fontWeight: 700,
+                  background: 'rgba(244,63,94,0.18)', color: accents.red,
+                }}>
+                  STOP
+                </span>
+              )}
+              {!isReferenceMatch && displayLatest?.alert && (
+                <span className="pill" style={{
+                  marginLeft: 'auto', padding: '1px 6px', fontSize: 8, fontWeight: 700,
+                  background: 'rgba(244,63,94,0.18)', color: accents.red,
+                }}>
+                  LOW / UNKNOWN
+                </span>
+              )}
+              {displayLatest?.embedding_dim != null && (
+                <span className="uppercase" style={{ fontSize: 8, color: 'var(--text-muted)', marginLeft: 6 }}>
+                  {`dims ${displayLatest.embedding_dim}`}
+                </span>
+              )}
+            </>
+          ) : null}
         </div>
       </div>
 
@@ -1624,28 +1625,29 @@ function VitDecoderWidget() {
           })
         ) : (
           <div className="flex-1 flex items-center justify-center text-center px-2" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            {!referenceReady
-              ? 'Capture reference snapshots in Live Reference Capture — library scan runs automatically'
-              : detectionMode === 'cloud_aware'
-                ? (!encoderLive
-                    ? 'Waiting for Pi embeddings — start VIT.py on the Pi'
-                    : 'Scanning full reference library — similarity will appear here')
-                : 'Cache Aware — waiting for a Pi cache-miss embedding'}
+            {showCosineData
+              ? (!referenceReady
+                  ? 'Capture reference snapshots in Live Reference Capture — library scan runs automatically'
+                  : 'Cache Aware — waiting for a Pi cache-miss embedding')
+              : null}
           </div>
         )}
-        {topMatches.length > 0 && (
+        {showCosineData && topMatches.length > 0 && (
           <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
             {`threshold ${referenceStopThresholdPct.toFixed(0)}% · ${matchSource} · top ${topMatches.length}`}
           </span>
         )}
-        <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
-          {referenceReady
-            ? `${status?.reference_count ?? 0} sample${(status?.reference_count ?? 0) === 1 ? '' : 's'} · ${libraryCategoryCount} categor${libraryCategoryCount === 1 ? 'y' : 'ies'} · stop: ${referenceStopCategory}${referenceStopReady ? '' : ' (no samples)'}`
-            : 'no reference library loaded'}
-        </span>
+        {showCosineData ? (
+          <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+            {referenceReady
+              ? `${status?.reference_count ?? 0} sample${(status?.reference_count ?? 0) === 1 ? '' : 's'} · ${libraryCategoryCount} categor${libraryCategoryCount === 1 ? 'y' : 'ies'} · stop: ${referenceStopCategory}${referenceStopReady ? '' : ' (no samples)'}`
+              : 'no reference library loaded'}
+          </span>
+        ) : null}
       </div>
 
-      {/* Embedding size — 1024 B is the physical centre of 512–2048 */}
+      {/* Embedding size — Cosine Similarity Decoder only */}
+      {variant === 'cosine' ? (
       <div className="flex-shrink-0 flex flex-col gap-1">
         <div className="flex items-center justify-between" style={{ fontSize: 9, color: 'var(--text-muted)' }}>
           <span className="uppercase tracking-wider">Embedding Size</span>
@@ -1699,12 +1701,15 @@ function VitDecoderWidget() {
           ))}
         </div>
       </div>
+      ) : null}
 
       {/* Session controls */}
       <div className="flex-shrink-0 flex items-center gap-2">
-        <span style={{ fontSize: 9, color: 'var(--text-muted)' }}>
-          {sessionCount} record{sessionCount === 1 ? '' : 's'}
-        </span>
+        {showCosineData ? (
+          <span style={{ fontSize: 9, color: 'var(--text-muted)' }}>
+            {sessionCount} record{sessionCount === 1 ? '' : 's'}
+          </span>
+        ) : <span className="flex-1" />}
         <button
           onClick={exportCsv}
           disabled={exporting || sessionCount === 0}
@@ -1740,10 +1745,24 @@ function VitDecoderWidget() {
   );
 }
 
+function CosineSimilarityDecoderWidget() {
+  return <VitDecoderWidget variant="cosine" />;
+}
+
+function YoloModelWidget() {
+  return <VitDecoderWidget variant="yolo" />;
+}
+
 export const vitDecoderDef: WidgetDefinition = {
-  id: 'vit_decoder_widget', name: 'VIT Scene Decoder', group: 'video',
+  id: 'vit_decoder_widget', name: 'Cosine Similarity Decoder', group: 'video',
   sizeClass: 'L', defaultSize: { w: 3, h: 4, minW: 2, minH: 3 },
-  icon: 'ScanEye', pinned: false, component: VitDecoderWidget,
+  icon: 'ScanEye', pinned: false, component: CosineSimilarityDecoderWidget,
+};
+
+export const yoloModelDef: WidgetDefinition = {
+  id: 'yolo_model_widget', name: 'YOLO Model', group: 'video',
+  sizeClass: 'L', defaultSize: { w: 3, h: 4, minW: 2, minH: 3 },
+  icon: 'Radar', pinned: false, component: YoloModelWidget,
 };
 
 // STOP-TIME TEST BENCH — measure how long the robot takes to stop after EXPLORE.
@@ -2132,6 +2151,8 @@ function StopTestBenchWidget() {
   useEffect(() => {
     void applyStopCategory(loadStopTargetCategory());
     void applyStopThreshold(loadStopSimilarityThresholdPct() / 100);
+    const mode = togglesToStopMode(loadStopToggles().cacheOn, loadStopToggles().cloudOn);
+    setCloudAwareStopEnabled(benchUsesCosineSimilarity(mode));
   }, []);
 
   useEffect(() => {
@@ -2190,7 +2211,7 @@ function StopTestBenchWidget() {
       if (mqttPublished) {
         useMetricsStore.getState().pushEvent(
           'info',
-          `Stop similarity threshold set to ${pct}% — sent ${pct} on cossim`,
+          `Stop similarity threshold set to ${pct}% — sent ${pct} on yahboom/cossim`,
           'vit/stop_threshold',
         );
       } else {
@@ -2206,6 +2227,7 @@ function StopTestBenchWidget() {
   useEffect(() => {
     const mode = togglesToStopMode(stopToggles.cacheOn, stopToggles.cloudOn);
     if (mode) setTestBenchStopMode(mode);
+    setCloudAwareStopEnabled(benchUsesCosineSimilarity(mode));
   }, [stopToggles]);
 
   const freezeTimerAtNow = useCallback(() => {
@@ -2252,9 +2274,10 @@ function StopTestBenchWidget() {
   const applyStopModeApi = useCallback((data: StopModeApiResponse) => {
     // Mode follows the local toggle (off on startup), not any stale backend mode.
     const cacheOn = stopTogglesRef.current.cacheOn;
-    setStopMode(togglesToStopMode(cacheOn, true));
-    // Cloud-aware bottle stop has no toggle — always on.
-    setCloudAwareStopEnabled(true);
+    const mode = togglesToStopMode(cacheOn, true);
+    setStopMode(mode);
+    setTestBenchStopMode(mode);
+    setCloudAwareStopEnabled(benchUsesCosineSimilarity(mode));
     const mqttReady = data.cache_aware_mqtt_ready === true || data.cache_script_running === true;
     // Cache-aware readiness comes solely from the car's Cae_Ready over MQTT.
     setCacheScriptRunning(cacheOn && mqttReady);
@@ -2857,8 +2880,8 @@ function StopTestBenchWidget() {
     const mode = togglesToStopMode(nextCache, true);
     setStopMode(mode);
     setTestBenchStopMode(mode);
-    setCloudAwareStopEnabled(true);
-    // Cache needs Pi confirmation; cloud-only is always ready.
+    setCloudAwareStopEnabled(benchUsesCosineSimilarity(mode));
+    // Cache needs Pi confirmation; YOLO is always ready.
     setCacheScriptReady(!nextCache);
     setCacheScriptRunning(false);
     setModeSwitching(true);
@@ -2901,11 +2924,11 @@ function StopTestBenchWidget() {
     }
     if (effectiveStopMode === 'cache_aware_offloading') {
       return cacheScriptReady
-        ? 'Cache Aware — Pi stops on cache hits; on a cache miss the client matches the Pi embedding and stops.'
+        ? 'Cache Aware — Pi stops on cache hits; on a cache miss the dashboard runs cosine similarity and stops.'
         : 'Waiting for Raspberry Pi to confirm cache-aware ready — Start is disabled.';
     }
     if (effectiveStopMode === 'cloud_aware') {
-      return `Cloud Only — Pi sends every embedding (Cae_OFF); the client scans the full reference library and stops only on the selected stop target (≥ ${stopSimilarityPct}% similarity). Needs VIT.py running on the Pi.`;
+      return 'YOLO — Pi sends every embedding (Cae_OFF); cosine similarity matching is off on the dashboard. Needs VIT.py running on the Pi.';
     }
     return '';
   })();
@@ -3070,7 +3093,7 @@ function StopTestBenchWidget() {
                 || stopSimilarityDraft < 1
                 || stopSimilarityDraft > 100
               }
-              title="Save threshold and send to robot on cossim topic"
+              title="Save threshold and send to robot on yahboom/cossim"
               className="pill shrink-0"
               style={{
                 background: 'var(--bg-elevated)',
@@ -3088,9 +3111,7 @@ function StopTestBenchWidget() {
         </div>
       </div>
 
-      {/* Detection mode — mutually exclusive: Cloud Only (Pi sends every embedding,
-          Cae_OFF) or Cache Aware Offloading (Pi sends cache-miss embeddings,
-          Cae_ON). The client matches Pi embeddings in both. */}
+      {/* Detection mode — YOLO (Cae_OFF, no cosine) or Cache Aware (Cae_ON, cosine on cache miss). */}
       <div className="flex-shrink-0 rounded-xl px-2.5 py-2"
         style={{ background: 'rgba(0,0,0,0.12)', border: '1px solid var(--stroke-subtle)' }}>
         <div className="flex items-center justify-between gap-2 mb-2">
@@ -3124,10 +3145,10 @@ function StopTestBenchWidget() {
               border: !cacheOn ? '1px solid rgba(255,255,255,0.22)' : '1px solid var(--stroke-subtle)',
               boxShadow: !cacheOn ? '0 8px 24px rgba(6,182,212,0.4), inset 0 1px 0 rgba(255,255,255,0.2)' : 'none',
             }}
-            title="Cloud Only — Pi sends every embedding (Cae_OFF); the client matches each against your reference library"
+            title="YOLO — Pi sends every embedding (Cae_OFF); dashboard cosine similarity is off"
           >
             <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
-              Cloud Only
+              YOLO
             </span>
             {!cacheOn ? 'Active' : 'Select'}
           </button>
@@ -3418,6 +3439,7 @@ export const WIDGET_REGISTRY: WidgetDefinition[] = [
   lidarScanDef,
   slamMapDef,
   vitDecoderDef,
+  yoloModelDef,
   uploadEmbeddingsDef,
   liveReferenceCaptureDef,
   movementJoystickDef,

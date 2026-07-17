@@ -1,13 +1,14 @@
-// Client image-to-image detection loop.
+// Cosine similarity check loop (Cache Aware cache-miss path).
 //
 // The browser is fed ONLY by image embeddings the Pi generates (relayed by the
-// backend). Each new Pi embedding is matched against the full dashboard
-// reference library in the browser (image-to-image), and the result is posted
-// back so /api/vit/status, the widget, and the CSV stay populated. Cloud stop
-// fires only when stop_hit is true (default: best match is target_bottle).
+// backend). Each new Pi embedding runs cosineSimilarityCheck against the full
+// dashboard reference library; results are posted back so /api/vit/status, the
+// Cosine Similarity Decoder widget, and the CSV stay populated. Cloud stop fires
+// only when stop_hit is true (default: best match is target_bottle).
 
 import { useEffect } from 'react';
-import { loadStopSimilarityThresholdPct, loadStopTargetCategory } from './testBenchStorage';
+import { loadStopSimilarityThresholdPct, loadStopTargetCategory, benchUsesCosineSimilarity } from './testBenchStorage';
+import { getTestBenchStopMode } from './testBenchSession';
 import {
   applyStopCategory,
   applyStopThreshold,
@@ -16,7 +17,7 @@ import {
   isReferenceLoaded,
   loadReferenceLibrary,
 } from './clientVit/referenceStore';
-import { matchAllEmbeddings } from './clientVit/referenceMatch';
+import { cosineSimilarityCheck } from './clientVit/cosineSimilarityCheck';
 
 const EMBEDDING_POLL_MS = 180;
 
@@ -28,7 +29,7 @@ type LatestEmbedding = {
   image_file_size?: number | null;
 };
 
-export function useClientReferenceDetection() {
+export function useCosineSimilarityCheck() {
   useEffect(() => {
     void applyStopCategory(loadStopTargetCategory());
     void applyStopThreshold(loadStopSimilarityThresholdPct() / 100);
@@ -43,6 +44,7 @@ export function useClientReferenceDetection() {
 
     const poll = async () => {
       if (!alive || posting) return;
+      if (!benchUsesCosineSimilarity(getTestBenchStopMode())) return;
       try {
         const res = await fetch('/api/vit/client/latest_embedding', { cache: 'no-store' });
         if (!res.ok || !alive) return;
@@ -67,7 +69,7 @@ export function useClientReferenceDetection() {
         }
 
         const live = base64ToFloat32(data.data);
-        const matches = matchAllEmbeddings(live).slice(0, 3);
+        const matches = cosineSimilarityCheck(live).slice(0, 3);
         const match = matches[0];
         if (!match || !alive) return;
 

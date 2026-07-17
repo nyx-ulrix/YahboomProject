@@ -149,7 +149,7 @@ export const STOP_SOURCE_LABELS: Record<StopSource, string> = {
 
 export const STOP_MODE_LABELS: Record<StopBenchMode, string> = {
   cache_aware_offloading: 'Cache Aware',
-  cloud_aware: 'Cloud Stop',
+  cloud_aware: 'YOLO',
 };
 
 export const STOP_BENCH_MODES: StopBenchMode[] = [
@@ -247,9 +247,14 @@ export function benchNeedsPiScript(mode: StopBenchMode): boolean {
   return mode === 'cache_aware_offloading';
 }
 
-// Cloud-aware dashboard bottle stop is always armed, in every mode.
-export function benchHasDashboardBottleStop(_mode: StopBenchMode): boolean {
-  return true;
+// Dashboard cosine stop runs only in Cache Aware mode (not YOLO).
+export function benchHasDashboardBottleStop(mode: StopBenchMode): boolean {
+  return mode === 'cache_aware_offloading';
+}
+
+/** Client-side cosine similarity matching (Cache Aware cache-miss path only). */
+export function benchUsesCosineSimilarity(mode: StopBenchMode): boolean {
+  return mode === 'cache_aware_offloading';
 }
 
 export type StopModeToggles = { cacheOn: boolean; cloudOn: boolean };
@@ -272,8 +277,8 @@ export function stopModeToToggles(mode: StopBenchMode): StopModeToggles {
 }
 
 /**
- * Map cache/cloud toggles to backend stop mode. Cloud-aware bottle stop is always
- * armed, so cache-on -> cache_aware_offloading (Pi script + cloud), else cloud_aware.
+ * Map cache/cloud toggles to backend stop mode. Cache-on enables cosine similarity
+ * on cache misses; otherwise YOLO (cloud_aware) — no client-side cosine matching.
  */
 export function togglesToStopMode(cacheOn: boolean, _cloudOn: boolean): StopBenchMode {
   return cacheOn ? 'cache_aware_offloading' : 'cloud_aware';

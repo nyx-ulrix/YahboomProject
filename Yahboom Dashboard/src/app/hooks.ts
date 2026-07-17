@@ -8,7 +8,7 @@ import {
   processVitStatusForStopLabelEstop,
   setCloudAwareStopEnabled,
 } from '../lib/cloudAwareStopLabelEstop';
-import { useClientReferenceDetection } from '../lib/useClientReferenceDetection';
+import { useCosineSimilarityCheck } from '../lib/useCosineSimilarityCheck';
 import type { LiveGridData, MetricsState } from './types';
 
 // Polls /api/status every 3 s and writes the backend's
@@ -477,18 +477,14 @@ export function useKeyboardCamera(onChange?: (v: { pan: number; tilt: number }) 
 }
 
 /**
- * Image-to-image bottle stop. Matching runs in the browser for both modes:
- * useClientReferenceDetection matches Pi embeddings (Cloud Only = every embedding;
- * Cache Aware = cache-miss embeddings) against the dashboard reference library and
- * posts the result back. The recorded match surfaces on /api/vit/status, which
+ * Cache Aware cosine-similarity bottle stop. Matching runs in the browser only when
+ * Cache Aware is selected (not YOLO). Posts match results to /api/vit/status, which
  * this hook polls to fire the stop while armed.
  */
 export function useCloudAwareStopLabelEstop() {
-  useClientReferenceDetection();
+  useCosineSimilarityCheck();
 
   useEffect(() => {
-    setCloudAwareStopEnabled(true);
-
     let alive = true;
 
     const poll = async () => {

@@ -1,6 +1,8 @@
 import { sendDashboardBottleStop } from './Controls';
 import { useMetricsStore } from '../app/store';
 import { getStopCategory, getStopThreshold } from './clientVit/referenceStore';
+import { benchUsesCosineSimilarity } from './testBenchStorage';
+import { getTestBenchStopMode } from './testBenchSession';
 import { benchModeHasDashboardBottleStop } from './testBenchSession';
 import { notifyTestBenchStopLabelStop } from './testBenchSession';
 
@@ -96,7 +98,8 @@ export function hasQualifyingReferenceMatch(vit: VitStatusForStopLabel): boolean
  * send stop (same as manual stop). Returns true if triggered.
  */
 export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): boolean {
-  if (!cloudAwareEnabled || !stopLabelEstopArmed || !benchModeHasDashboardBottleStop()) return false;
+  if (!cloudAwareEnabled || !benchUsesCosineSimilarity(getTestBenchStopMode())) return false;
+  if (!stopLabelEstopArmed || !benchModeHasDashboardBottleStop()) return false;
 
   const latest = vit.latest;
   const key = vitDecodeEventKey(vit);

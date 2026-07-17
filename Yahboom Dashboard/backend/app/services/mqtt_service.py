@@ -252,7 +252,7 @@ class MQTTService:
         """
         Tell the Pi VIT script the stop-similarity threshold (1–100 %) via MQTT.
 
-        Publishes the percent alone on COSSIM_TOPIC (default ``cossim``), e.g. ``70``.
+        Publishes the percent alone on COSSIM_TOPIC (default ``yahboom/cossim``), e.g. ``70``.
         """
         pct = int(percent)
         if pct < 1 or pct > 100:

@@ -1,8 +1,8 @@
-// Client image-to-image matching (cosine similarity via dot product).
+// Cosine similarity check — client image-to-image matching via L2-normalized dot product.
 //
-// Scans every reference vector in the library and reports the best match for
-// scene-decoder display. Cloud stop uses stopHit, which is true only when the
-// best match belongs to the stop category (default target_bottle).
+// Scans every reference vector in the library and reports matches for the
+// Cosine Similarity Decoder widget. Cache Aware cloud stop uses stopHit, which
+// is true only when the best match belongs to the stop category (default target_bottle).
 
 import {
   getReferenceVectorsForDim,
@@ -11,7 +11,7 @@ import {
   hasReferenceVectors,
 } from './referenceStore';
 
-export type ClientReferenceMatch = {
+export type CosineSimilarityCheckResult = {
   label: string;
   category: string;
   sampleId: number | null;
@@ -22,6 +22,9 @@ export type ClientReferenceMatch = {
   stopHit: boolean; // cloud stop — stop category only
   embeddingDim: number;
 };
+
+/** @deprecated Use CosineSimilarityCheckResult */
+export type ClientReferenceMatch = CosineSimilarityCheckResult;
 
 function l2normalize(v: Float32Array): Float32Array {
   let sum = 0;
@@ -40,13 +43,13 @@ function dot(a: Float32Array, b: Float32Array): number {
   return sum;
 }
 
-function scoreReference(
+function scoreReferenceForCosineSimilarityCheck(
   normalized: Float32Array,
   ref: ReturnType<typeof getReferenceVectorsForDim>[number],
   liveDim: number,
   stopThreshold: number,
   stopCategory: string,
-): ClientReferenceMatch {
+): CosineSimilarityCheckResult {
   const similarity = dot(normalized, ref.vec);
   const effectiveThreshold = Math.max(ref.threshold, stopThreshold);
   const hit = similarity >= effectiveThreshold;
@@ -75,8 +78,10 @@ function matchSimilarityValue(similarity: number, similarityPercent?: number): n
 }
 
 /** One row per reference name — keep the highest-similarity sample only. */
-function dedupeMatchesByName(matches: ClientReferenceMatch[]): ClientReferenceMatch[] {
-  const bestByName = new Map<string, ClientReferenceMatch>();
+function dedupeCosineSimilarityCheckByName(
+  matches: CosineSimilarityCheckResult[],
+): CosineSimilarityCheckResult[] {
+  const bestByName = new Map<string, CosineSimilarityCheckResult>();
   for (const match of matches) {
     const key = matchNameKey(match.label);
     const existing = bestByName.get(key);
@@ -87,7 +92,7 @@ function dedupeMatchesByName(matches: ClientReferenceMatch[]): ClientReferenceMa
   return Array.from(bestByName.values()).sort((a, b) => b.similarity - a.similarity);
 }
 
-export type ReferenceMatchLike = {
+export type CosineSimilarityCheckMatchLike = {
   label: string;
   category?: string;
   sample_id?: number | null;
@@ -98,8 +103,13 @@ export type ReferenceMatchLike = {
   stop_hit?: boolean;
 };
 
-/** Dedupe API/status match rows by label for display. */
-export function dedupeReferenceMatchesByLabel<T extends ReferenceMatchLike>(matches: T[]): T[] {
+/** @deprecated Use CosineSimilarityCheckMatchLike */
+export type ReferenceMatchLike = CosineSimilarityCheckMatchLike;
+
+/** Dedupe API/status cosine similarity rows by label for display. */
+export function dedupeCosineSimilarityCheckByLabel<T extends CosineSimilarityCheckMatchLike>(
+  matches: T[],
+): T[] {
   const bestByName = new Map<string, T>();
   for (const match of matches) {
     const key = matchNameKey(match.label);
@@ -118,8 +128,11 @@ export function dedupeReferenceMatchesByLabel<T extends ReferenceMatchLike>(matc
   );
 }
 
-/** Every library match for a live Pi embedding, highest similarity first. */
-export function matchAllEmbeddings(live: Float32Array): ClientReferenceMatch[] {
+/** @deprecated Use dedupeCosineSimilarityCheckByLabel */
+export const dedupeReferenceMatchesByLabel = dedupeCosineSimilarityCheckByLabel;
+
+/** Cosine similarity check — every library match for a live Pi embedding, highest first. */
+export function cosineSimilarityCheck(live: Float32Array): CosineSimilarityCheckResult[] {
   if (!hasReferenceVectors() || live.length === 0) return [];
 
   const references = getReferenceVectorsForDim(live.length);
@@ -130,14 +143,16 @@ export function matchAllEmbeddings(live: Float32Array): ClientReferenceMatch[] {
   const stopCategory = getStopCategory();
 
   const scored = references
-    .map((ref) => scoreReference(normalized, ref, live.length, stopThreshold, stopCategory))
+    .map((ref) => scoreReferenceForCosineSimilarityCheck(
+      normalized, ref, live.length, stopThreshold, stopCategory,
+    ))
     .sort((a, b) => b.similarity - a.similarity);
 
-  return dedupeMatchesByName(scored);
+  return dedupeCosineSimilarityCheckByName(scored);
 }
 
-/** Best library match for a live Pi embedding, or null when none apply. */
-export function matchEmbedding(live: Float32Array): ClientReferenceMatch | null {
-  const all = matchAllEmbeddings(live);
+/** Best cosine similarity check result for a live Pi embedding, or null when none apply. */
+export function cosineSimilarityCheckBest(live: Float32Array): CosineSimilarityCheckResult | null {
+  const all = cosineSimilarityCheck(live);
   return all[0] ?? null;
 }

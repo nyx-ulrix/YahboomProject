@@ -12,6 +12,10 @@ let cloudAwareStopLabelActive = false;
 let benchSessionActive = false;
 let benchStopMode: StopBenchMode = 'cloud_aware';
 
+export function getTestBenchStopMode(): StopBenchMode {
+  return benchStopMode;
+}
+
 export function setTestBenchSessionActive(active: boolean) {
   benchSessionActive = active;
 }

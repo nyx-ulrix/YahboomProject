@@ -58,7 +58,7 @@ CACHE_FILE_PATH = "/home/pi/cache_embeddings.json"
 TOPIC_COMMAND = "yahboom/cmd"
 
 # Dashboard publishes stop-similarity percent (1–100) as plain text on this topic.
-TOPIC_COSSIM = "cossim"
+TOPIC_COSSIM = "yahboom/cossim"
 
 # VIT.py receives camera frames from webrtc_server.py here
 TOPIC_CAMERA_FRAME = "yahboom/camera/frame"
