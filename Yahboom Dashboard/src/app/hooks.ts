@@ -10,7 +10,7 @@ import {
 } from '../lib/cloudAwareStopLabelEstop';
 import { useCosineSimilarityCheck } from '../lib/useCosineSimilarityCheck';
 import { processYoloStatusForBottleStop } from '../lib/yoloBottleStop';
-import { syncStopModeToBackend } from '../lib/testBenchStorage';
+import { pullAndReconcileStopMode } from '../lib/testBenchStorage';
 import type { LiveGridData, MetricsState } from './types';
 
 // Polls /api/status every 3 s and writes the backend's
@@ -506,10 +506,20 @@ export function useCloudAwareStopLabelEstop() {
   }, []);
 }
 
-/** Keep backend YOLO/cache mode aligned with local toggles after refresh. */
+/** Keep test-bench mode buttons aligned with backend across browsers/tabs. */
 export function useStopModeBackendSync() {
   useEffect(() => {
-    void syncStopModeToBackend();
+    let alive = true;
+    const sync = async () => {
+      if (!alive) return;
+      await pullAndReconcileStopMode();
+    };
+    void sync();
+    const id = setInterval(sync, 2000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
   }, []);
 }
 

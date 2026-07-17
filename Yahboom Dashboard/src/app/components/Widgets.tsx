@@ -35,6 +35,14 @@ import {
   STOP_SOURCE_LABELS,
   togglesToStopMode,
   applyStopBenchLayoutForMode,
+  broadcastStopModeSync,
+  getClientStopMode,
+  getStopModeSyncOrigin,
+  lockStopModeSync,
+  setClientStopMode,
+  stopModeFromApi,
+  subscribeStopModeSync,
+  type StopModeApiResponse,
   type StopBenchMode,
   type StopModeToggles,
   type StopSource,
@@ -2000,17 +2008,6 @@ export const yoloModelDef: WidgetDefinition = {
 // STOP-TIME TEST BENCH — measure how long the robot takes to stop after EXPLORE.
 // Command time is stamped on the Pi clock when START is pressed; the official run
 // start is when the Pi reports movement. Mission time ends at Pi drive-status halt.
-type StopModeApiResponse = {
-  mode?: StopBenchMode;
-  cache_script_running?: boolean;
-  cache_script_detection_ready?: boolean;
-  cache_aware_mqtt_ready?: boolean;
-  cache_script_launch_mode?: 'terminal';
-  cache_script_log?: string;
-  cloud_aware_enabled?: boolean;
-  status?: string;
-  message?: string;
-};
 
 function cacheBenchStartReady(data: StopModeApiResponse): boolean {
   if (data.mode === 'cloud_aware') return true;
@@ -2503,18 +2500,28 @@ function StopTestBenchWidget() {
     return () => setTestBenchManualStopHook(null);
   }, [freezeTimerAtNow, latchStopSource]);
 
-  const applyStopModeApi = useCallback((data: StopModeApiResponse) => {
-    // Mode follows the local toggle (off on startup), not any stale backend mode.
-    const cacheOn = stopTogglesRef.current.cacheOn;
-    const mode = togglesToStopMode(cacheOn, true);
+  const applyStopModeApi = useCallback((data: StopModeApiResponse, options?: { layout?: boolean }) => {
+    const mode = stopModeFromApi(data) ?? getClientStopMode();
+    const toggles = setClientStopMode(mode);
+    stopTogglesRef.current = toggles;
+    setStopToggles(toggles);
     setStopMode(mode);
     setTestBenchStopMode(mode);
     setCloudAwareStopEnabled(benchUsesCosineSimilarity(mode));
+    const cacheOn = toggles.cacheOn;
     const mqttReady = data.cache_aware_mqtt_ready === true || data.cache_script_running === true;
-    // Cache-aware readiness comes solely from the car's Cao_Ready over MQTT.
     setCacheScriptRunning(cacheOn && mqttReady);
     setCacheScriptReady(!cacheOn || mqttReady);
+    if (options?.layout !== false) {
+      applyStopBenchLayoutForMode(mode);
+    }
   }, []);
+
+  useEffect(() => {
+    return subscribeStopModeSync(({ data }) => {
+      applyStopModeApi(data, { layout: false });
+    });
+  }, [applyStopModeApi]);
 
   useEffect(() => {
     saveTestBenchCache({ runs });
@@ -3121,8 +3128,10 @@ function StopTestBenchWidget() {
   // Cache-Aware Offloading toggle: publish Cao_ON / Cao_OFF over MQTT. Cloud-aware
   // bottle stop stays armed regardless. Start stays gated on the Pi's ready reply.
   const applyCacheAware = (nextCache: boolean) => {
-    persistStopToggles({ cacheOn: nextCache, cloudOn: true });
     const mode = togglesToStopMode(nextCache, true);
+    lockStopModeSync();
+    setClientStopMode(mode);
+    persistStopToggles({ cacheOn: nextCache, cloudOn: true });
     applyStopBenchLayoutForMode(mode);
     setStopMode(mode);
     setTestBenchStopMode(mode);
@@ -3151,8 +3160,9 @@ function StopTestBenchWidget() {
               ? 'Cache Aware Offloading — sent Cao_ON to the Raspberry Pi'
               : 'Cache Aware Offloading — sent Cao_OFF to the Raspberry Pi',
           );
+          broadcastStopModeSync({ mode, data, origin: getStopModeSyncOrigin() });
         }
-        applyStopModeApi(data);
+        applyStopModeApi(data, { layout: false });
       } catch {
         useMetricsStore.getState().pushEvent(
           'error',
