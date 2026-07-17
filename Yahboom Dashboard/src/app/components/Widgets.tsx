@@ -1171,6 +1171,8 @@ type YoloDetection = {
 
 type YoloStatusResponse = {
   enabled: boolean;
+  paused_for_cache_aware?: boolean;
+  detection_mode?: 'cloud_aware' | 'cache_aware_offloading';
   model_ready: boolean;
   model_error: string | null;
   model_file: string;
@@ -1811,7 +1813,10 @@ function YoloModelWidget() {
         const data = await res.json() as YoloStatusResponse;
         if (!alive) return;
         setYoloStatus(data);
-        if (data.latest) {
+        if (data.paused_for_cache_aware) {
+          displayKeyRef.current = null;
+          setDisplayLatest(null);
+        } else if (data.latest) {
           const key = yoloReadingDisplayKey(data.latest);
           if (key && key !== displayKeyRef.current) {
             displayKeyRef.current = key;
@@ -1843,11 +1848,14 @@ function YoloModelWidget() {
     : yoloTopConf >= yoloThresholdPct * 0.6 ? accents.yellow
     : accents.red;
 
+  const yoloPaused = yoloStatus?.paused_for_cache_aware === true;
+
   const dotActive = Boolean(
-    yoloStatus?.model_ready && (yoloReadingsFresh || hasLatchedReadings) && hasDetections,
+    !yoloPaused && yoloStatus?.model_ready && (yoloReadingsFresh || hasLatchedReadings) && hasDetections,
   );
 
   const detectionHint = (() => {
+    if (yoloPaused) return 'Paused — Cache Aware mode (switch to YOLO to run)';
     if (yoloStatus?.model_error) return `YOLO error — ${yoloStatus.model_error}`;
     if (!yoloStatus?.model_ready) return 'Loading YOLOv8 (Ultralytics/YOLOv8)…';
     if (!streamRunning && !yoloStatus?.video_active && !hasLatchedReadings) return 'Start webrtc_server.py on the Pi';
@@ -1928,7 +1936,9 @@ function YoloModelWidget() {
           })
         ) : (
           <div className="flex-1 flex items-center justify-center text-center px-2" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            {yoloStatus?.model_ready
+            {yoloPaused
+              ? 'YOLO paused while Cache Aware mode is active'
+              : yoloStatus?.model_ready
               ? (yoloReadingsFresh || hasLatchedReadings
                   ? 'YOLOv8 — waiting for objects in the live video feed'
                   : 'YOLOv8 — waiting for live video frames')
