@@ -8,7 +8,7 @@ import time
 import json
 from app.services.backhaul_delay import backhaul_delay, format_hop_suffix
 from config import (
-    BROKER_PORT, CACHE_AWARE_READY_TOPIC, DETECT_STATUS_TOPIC, DRIVE_STATUS_TOPIC, GRID_TOPIC, TOPIC, MQTT_TIMEOUT, PUBLISH_TIMEOUT,
+    BROKER_PORT, CACHE_AWARE_READY_TOPIC, COSSIM_TOPIC, DETECT_STATUS_TOPIC, DRIVE_STATUS_TOPIC, GRID_TOPIC, TOPIC, MQTT_TIMEOUT, PUBLISH_TIMEOUT,
     SAFETY_TOPIC, EVENT_LOG_MAX, EVENT_LOG_MESSAGE_MAXLEN,
 )
 
@@ -246,6 +246,39 @@ class MQTTService:
             self.connected = False
             msg = f"Cache-aware command publish failed: {e}"
             self.log_event("error", msg, tag=TOPIC)
+            return False, msg
+
+    def publish_stop_similarity_threshold(self, percent: int) -> tuple[bool, str]:
+        """
+        Tell the Pi VIT script the stop-similarity threshold (1–100 %) via MQTT.
+
+        Publishes the percent alone on COSSIM_TOPIC (default ``cossim``), e.g. ``70``.
+        """
+        pct = int(percent)
+        if pct < 1 or pct > 100:
+            return False, f"Invalid stop similarity percent: {pct}"
+        payload = str(pct)
+        if not self.connected:
+            reconnect_ip = self.broker_ip or ""
+            if reconnect_ip:
+                self.connect_to_broker(reconnect_ip)
+        if not self.connected:
+            msg = f"MQTT broker not connected — skipped {COSSIM_TOPIC}: {payload}"
+            self.log_event("warning", msg, tag=COSSIM_TOPIC)
+            return False, msg
+        try:
+            hop_ms = backhaul_delay.apply()
+            self.mqtt_client.publish(COSSIM_TOPIC, payload)
+            self.log_event(
+                "info",
+                f"Stop similarity threshold set to {pct}% — MQTT -> {COSSIM_TOPIC}: {payload}{format_hop_suffix(hop_ms)}",
+                tag="vit/stop_threshold",
+            )
+            return True, f"Published '{payload}' to '{COSSIM_TOPIC}'"
+        except Exception as e:
+            self.connected = False
+            msg = f"Stop similarity MQTT publish failed: {e}"
+            self.log_event("error", msg, tag=COSSIM_TOPIC)
             return False, msg
 
     @staticmethod

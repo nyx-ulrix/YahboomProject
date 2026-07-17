@@ -11,7 +11,7 @@ import { useMetricsStore, useSettingsStore } from '../store';
 import type { WidgetDefinition, MetricsState } from '../types';
 import { sendCommand, sendCameraCommand, setEstopState, toggleRosAuto, vecToCommand, vecToCameraCommand } from '../../lib/Controls';
 import { setCloudAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/cloudAwareStopLabelEstop';
-import { loadReferenceLibrary, applyStopCategory } from '../../lib/clientVit/referenceStore';
+import { loadReferenceLibrary, applyStopCategory, applyStopThreshold, getStopThreshold } from '../../lib/clientVit/referenceStore';
 import { dedupeReferenceMatchesByLabel } from '../../lib/clientVit/referenceMatch';
 import { uploadEmbeddingsDef } from './UploadEmbeddingsWidget';
 import { liveReferenceCaptureDef } from './LiveReferenceCaptureWidget';
@@ -22,6 +22,8 @@ import {
   loadStopToggles,
   loadStopTargetCategory,
   saveStopTargetCategory,
+  loadStopSimilarityThresholdPct,
+  saveStopSimilarityThresholdPct,
   DEFAULT_STOP_TARGET_CATEGORY,
   loadTestBenchCache,
   saveStopToggles,
@@ -1428,7 +1430,7 @@ function VitDecoderWidget() {
   const isReferenceMatch = displayLatest?.match_mode === 'reference_embedding';
   const referenceMatch = isReferenceMatch ? displayLatest?.reference_match ?? null : null;
   const referenceStopThresholdPct =
-    (status?.reference_stop_threshold ?? 0.70) * 100;
+    (status?.reference_stop_threshold ?? getStopThreshold()) * 100;
   const threshold = isReferenceMatch
     ? referenceStopThresholdPct
     : (status?.confidence_threshold ?? 60);
@@ -2079,6 +2081,13 @@ function StopTestBenchWidget() {
   const [stopTargetCategory, setStopTargetCategory] = useState(
     () => loadStopTargetCategory(),
   );
+  const [stopSimilarityPct, setStopSimilarityPct] = useState(
+    () => loadStopSimilarityThresholdPct(),
+  );
+  const [stopSimilarityDraft, setStopSimilarityDraft] = useState(
+    () => loadStopSimilarityThresholdPct(),
+  );
+  const [stopSimilaritySending, setStopSimilaritySending] = useState(false);
   const [stopTargetOptions, setStopTargetOptions] = useState<Array<{ category: string; snapshot_count: number }>>(
     () => [{ category: DEFAULT_STOP_TARGET_CATEGORY, snapshot_count: 0 }],
   );
@@ -2122,6 +2131,7 @@ function StopTestBenchWidget() {
   useEffect(() => { stopTogglesRef.current = stopToggles; }, [stopToggles]);
   useEffect(() => {
     void applyStopCategory(loadStopTargetCategory());
+    void applyStopThreshold(loadStopSimilarityThresholdPct() / 100);
   }, []);
 
   useEffect(() => {
@@ -2158,6 +2168,39 @@ function StopTestBenchWidget() {
     setStopTargetCategory(category);
     saveStopTargetCategory(category);
     void applyStopCategory(category);
+  };
+
+  const commitStopSimilarity = () => {
+    if (stopSimilaritySending) return;
+    const pct = Math.min(100, Math.max(1, Math.round(stopSimilarityDraft)));
+    setStopSimilarityDraft(pct);
+    setStopSimilarityPct(pct);
+    saveStopSimilarityThresholdPct(pct);
+    setStopSimilaritySending(true);
+    void applyStopThreshold(pct / 100, { publishMqtt: true }).then(({ ok, mqttPublished }) => {
+      setStopSimilaritySending(false);
+      if (!ok) {
+        useMetricsStore.getState().pushEvent(
+          'warning',
+          `Stop similarity threshold could not be saved (${pct}%)`,
+          'vit/stop_threshold',
+        );
+        return;
+      }
+      if (mqttPublished) {
+        useMetricsStore.getState().pushEvent(
+          'info',
+          `Stop similarity threshold set to ${pct}% — sent ${pct} on cossim`,
+          'vit/stop_threshold',
+        );
+      } else {
+        useMetricsStore.getState().pushEvent(
+          'warning',
+          `Stop similarity threshold set to ${pct}% but MQTT notify failed (connect to robot first)`,
+          'vit/stop_threshold',
+        );
+      }
+    });
   };
 
   useEffect(() => {
@@ -2862,7 +2905,7 @@ function StopTestBenchWidget() {
         : 'Waiting for Raspberry Pi to confirm cache-aware ready — Start is disabled.';
     }
     if (effectiveStopMode === 'cloud_aware') {
-      return 'Cloud Only — Pi sends every embedding (Cae_OFF); the client scans the full reference library and stops only on the selected stop target (≥ 70% similarity). Needs VIT.py running on the Pi.';
+      return `Cloud Only — Pi sends every embedding (Cae_OFF); the client scans the full reference library and stops only on the selected stop target (≥ ${stopSimilarityPct}% similarity). Needs VIT.py running on the Pi.`;
     }
     return '';
   })();
@@ -2981,22 +3024,69 @@ function StopTestBenchWidget() {
         </div>
       </div>
 
-      <label className="flex-shrink-0 flex flex-col gap-0.5">
-        <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
-          Stop Target
-        </span>
-        <select
-          value={stopTargetCategory}
-          onChange={(e) => onStopTargetChange(e.target.value)}
-          style={inputStyle}
-        >
-          {stopTargetOptions.map((cat) => (
-            <option key={cat.category} value={cat.category}>
-              {cat.category}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="flex-shrink-0 grid grid-cols-2 gap-1.5">
+        <label className="flex flex-col gap-0.5">
+          <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+            Stop Target
+          </span>
+          <select
+            value={stopTargetCategory}
+            onChange={(e) => onStopTargetChange(e.target.value)}
+            style={inputStyle}
+          >
+            {stopTargetOptions.map((cat) => (
+              <option key={cat.category} value={cat.category}>
+                {cat.category}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="flex flex-col gap-0.5">
+          <span className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+            Stop Similarity (%)
+          </span>
+          <div className="flex items-center gap-1">
+            <input
+              type="number"
+              min={1}
+              max={100}
+              step={1}
+              inputMode="numeric"
+              value={stopSimilarityDraft}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (Number.isFinite(n)) setStopSimilarityDraft(n);
+              }}
+              title="Minimum cosine similarity (%) required to trigger a cloud stop — press Send to apply"
+              aria-label="Stop similarity threshold percent"
+              style={{ ...inputStyle, flex: 1, minWidth: 0 }}
+            />
+            <button
+              type="button"
+              onClick={commitStopSimilarity}
+              disabled={
+                stopSimilaritySending
+                || !Number.isFinite(stopSimilarityDraft)
+                || stopSimilarityDraft < 1
+                || stopSimilarityDraft > 100
+              }
+              title="Save threshold and send to robot on cossim topic"
+              className="pill shrink-0"
+              style={{
+                background: 'var(--bg-elevated)',
+                color: 'var(--text-primary)',
+                border: '1px solid var(--stroke-subtle)',
+                padding: '4px 8px',
+                fontWeight: 600,
+                fontSize: 10,
+                opacity: stopSimilaritySending ? 0.5 : 1,
+              }}
+            >
+              {stopSimilaritySending ? '…' : 'Send'}
+            </button>
+          </div>
+        </div>
+      </div>
 
       {/* Detection mode — mutually exclusive: Cloud Only (Pi sends every embedding,
           Cae_OFF) or Cache Aware Offloading (Pi sends cache-miss embeddings,

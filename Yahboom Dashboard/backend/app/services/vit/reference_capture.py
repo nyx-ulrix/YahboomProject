@@ -33,6 +33,7 @@ _last_capture: dict | None = None
 _active_category: str | None = None
 _active_embedding_size_bytes: int | None = None
 _stop_category: str = VIT_STOP_REFERENCE_CATEGORY
+_stop_threshold: float = CLOUD_AWARE_REFERENCE_THRESHOLD
 
 
 class ReferenceCaptureError(Exception):
@@ -147,7 +148,7 @@ def _list_sizes_for_category(category: str) -> list[int]:
 
 
 def _load_active_state() -> None:
-    global _active_category, _active_embedding_size_bytes, _stop_category
+    global _active_category, _active_embedding_size_bytes, _stop_category, _stop_threshold
     path = _active_state_path()
     if not path.exists():
         return
@@ -156,12 +157,17 @@ def _load_active_state() -> None:
         cat = data.get("category")
         size = data.get("embedding_size_bytes")
         stop = data.get("stop_category")
+        stop_th = data.get("stop_threshold")
         if isinstance(cat, str) and CATEGORY_RE.match(cat):
             _active_category = cat
         if isinstance(size, int):
             _active_embedding_size_bytes = snap_embed_bytes(size)
         if isinstance(stop, str) and CATEGORY_RE.match(stop):
             _stop_category = stop
+        if isinstance(stop_th, (int, float)):
+            th = float(stop_th)
+            if 0.01 <= th <= 1.0:
+                _stop_threshold = th
     except Exception:
         pass
 
@@ -169,7 +175,10 @@ def _load_active_state() -> None:
 def _save_library_state() -> None:
     root = _local_library_dir()
     root.mkdir(parents=True, exist_ok=True)
-    payload: dict = {"stop_category": _stop_category}
+    payload: dict = {
+        "stop_category": _stop_category,
+        "stop_threshold": _stop_threshold,
+    }
     if _active_category is not None and _active_embedding_size_bytes is not None:
         payload["category"] = _active_category
         payload["embedding_size_bytes"] = _active_embedding_size_bytes
@@ -195,6 +204,26 @@ def set_stop_category(category: str) -> dict:
     return {
         "status": "ok",
         "stop_category": slug,
+    }
+
+
+def get_stop_threshold() -> float:
+    return _stop_threshold
+
+
+def set_stop_threshold(threshold: float) -> dict:
+    global _stop_threshold
+    try:
+        value = float(threshold)
+    except (TypeError, ValueError) as exc:
+        raise ReferenceCaptureError("threshold must be a number") from exc
+    if not 0.01 <= value <= 1.0:
+        raise ReferenceCaptureError("threshold must be between 0.01 and 1.0")
+    _stop_threshold = value
+    _save_library_state()
+    return {
+        "status": "ok",
+        "stop_threshold": _stop_threshold,
     }
 
 
@@ -726,7 +755,7 @@ def load_library_for_client(embedding_size_bytes: int | None = None) -> dict:
         "embedding_size_bytes": size,
         "stop_category": _stop_category,
         "default_threshold": VIT_REFERENCE_DEFAULT_THRESHOLD,
-        "stop_threshold": CLOUD_AWARE_REFERENCE_THRESHOLD,
+        "stop_threshold": _stop_threshold,
         "objects": cleaned,
         "count": len(cleaned),
         "categories": categories,

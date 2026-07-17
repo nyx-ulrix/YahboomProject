@@ -162,6 +162,36 @@ export async function applyStopCategory(
   }
 }
 
+export function setStopThreshold(threshold: number): void {
+  stopThreshold = threshold;
+}
+
+/** Persist stop similarity threshold on the backend. */
+export async function applyStopThreshold(
+  threshold: number,
+  options?: { publishMqtt?: boolean },
+): Promise<{ ok: boolean; mqttPublished?: boolean }> {
+  try {
+    const res = await fetch('/api/vit/reference/stop_threshold', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        threshold,
+        publish_mqtt: options?.publishMqtt ?? false,
+      }),
+    });
+    if (!res.ok) return { ok: false };
+    const data = (await res.json()) as {
+      stop_threshold?: number;
+      mqtt_published?: boolean;
+    };
+    stopThreshold = data.stop_threshold ?? threshold;
+    return { ok: true, mqttPublished: data.mqtt_published };
+  } catch {
+    return { ok: false };
+  }
+}
+
 export function getLibraryEmbeddingSizeBytes(): number | null {
   return libraryEmbeddingSizeBytes;
 }

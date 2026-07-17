@@ -161,7 +161,10 @@ export const DEFAULT_STOP_BENCH_MODE: StopBenchMode = 'cloud_aware';
 
 export const DEFAULT_STOP_TARGET_CATEGORY = 'target_bottle';
 
+export const DEFAULT_STOP_SIMILARITY_THRESHOLD_PCT = 70;
+
 const STOP_TARGET_CATEGORY_KEY = 'yahboom_stop_target_category';
+const STOP_SIMILARITY_THRESHOLD_KEY = 'yahboom_stop_similarity_threshold_pct';
 
 // Cloud-aware bottle stop is always on (no toggle); only cache-aware is user-controlled.
 export const DEFAULT_STOP_TOGGLES: StopModeToggles = { cacheOn: false, cloudOn: true };
@@ -216,6 +219,25 @@ export function loadStopTargetCategory(): string {
 export function saveStopTargetCategory(category: string): void {
   try {
     localStorage.setItem(STOP_TARGET_CATEGORY_KEY, category);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function loadStopSimilarityThresholdPct(): number {
+  try {
+    const raw = localStorage.getItem(STOP_SIMILARITY_THRESHOLD_KEY);
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 1 && n <= 100) return Math.round(n);
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_STOP_SIMILARITY_THRESHOLD_PCT;
+}
+
+export function saveStopSimilarityThresholdPct(pct: number): void {
+  try {
+    localStorage.setItem(STOP_SIMILARITY_THRESHOLD_KEY, String(Math.round(pct)));
   } catch {
     /* ignore */
   }

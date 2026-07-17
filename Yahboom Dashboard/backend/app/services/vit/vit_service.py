@@ -1190,10 +1190,12 @@ class VITService:
             }
         server_on = stream_on or encoder_live
         ref_store = self._reference_store
+        stop_threshold = CLOUD_AWARE_REFERENCE_THRESHOLD
         try:
             from app.services.vit.reference_capture import (
                 get_library_client_status,
                 get_reference_capture_status,
+                get_stop_threshold,
             )
             ref_capture = get_reference_capture_status()
             active_category = ref_capture.get("active_category")
@@ -1205,6 +1207,7 @@ class VITService:
                 or 2048
             )
             lib_status = get_library_client_status(embed_size)
+            stop_threshold = get_stop_threshold()
         except Exception:
             active_category = None
             active_embedding_size_bytes = None
@@ -1237,7 +1240,7 @@ class VITService:
             "reference_file": str(ref_store.file_path),
             "reference_error": ref_store.error if library_count == 0 else None,
             "reference_match_enabled": ref_store.enabled,
-            "reference_stop_threshold": CLOUD_AWARE_REFERENCE_THRESHOLD,
+            "reference_stop_threshold": stop_threshold,
             "reference_stop_category": lib_status.get("stop_category"),
             "reference_stop_ready": lib_status.get("stop_category_count", 0) > 0,
             "reference_library_categories": lib_status.get("categories", []),

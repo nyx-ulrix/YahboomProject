@@ -7,9 +7,10 @@
 // fires only when stop_hit is true (default: best match is target_bottle).
 
 import { useEffect } from 'react';
-import { loadStopTargetCategory } from './testBenchStorage';
+import { loadStopSimilarityThresholdPct, loadStopTargetCategory } from './testBenchStorage';
 import {
   applyStopCategory,
+  applyStopThreshold,
   base64ToFloat32,
   getLibraryEmbeddingSizeBytes,
   isReferenceLoaded,
@@ -30,6 +31,7 @@ type LatestEmbedding = {
 export function useClientReferenceDetection() {
   useEffect(() => {
     void applyStopCategory(loadStopTargetCategory());
+    void applyStopThreshold(loadStopSimilarityThresholdPct() / 100);
   }, []);
 
   useEffect(() => {

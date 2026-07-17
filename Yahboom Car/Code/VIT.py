@@ -57,6 +57,9 @@ CACHE_FILE_PATH = "/home/pi/cache_embeddings.json"
 #   embds1 / embds2 / embds3
 TOPIC_COMMAND = "yahboom/cmd"
 
+# Dashboard publishes stop-similarity percent (1–100) as plain text on this topic.
+TOPIC_COSSIM = "cossim"
+
 # VIT.py receives camera frames from webrtc_server.py here
 TOPIC_CAMERA_FRAME = "yahboom/camera/frame"
 
@@ -197,6 +200,9 @@ cache_ready = False
 # This is the actual cache-aware ON/OFF state.
 # It starts OFF and only becomes ON after Cae_ON.
 test_active = False
+
+# Dashboard can override the minimum cache-hit similarity via TOPIC_COSSIM (plain percent).
+_stop_similarity_threshold = DEFAULT_DETECTION_THRESHOLD
 
 _last_detection_time = 0.0
 _hit_streak = 0
@@ -608,6 +614,58 @@ def parse_command_payload(raw_payload: bytes) -> str:
     return text.strip().lower()
 
 
+def set_stop_similarity_threshold(percent: int) -> bool:
+    """Apply dashboard stop-similarity floor (1–100 %)."""
+    global _stop_similarity_threshold
+    if not 1 <= int(percent) <= 100:
+        return False
+    _stop_similarity_threshold = int(percent) / 100.0
+    print(
+        f"[CMD] Stop similarity threshold set to {percent}% "
+        f"({_stop_similarity_threshold:.2f})"
+    )
+    publish_status(
+        "stop_similarity_changed",
+        {
+            "threshold_percent": int(percent),
+            "threshold": _stop_similarity_threshold,
+        },
+    )
+    return True
+
+
+def effective_detection_threshold(cache_object_threshold: float) -> float:
+    return max(float(cache_object_threshold), _stop_similarity_threshold)
+
+
+def handle_cossim_message(msg):
+    """Apply stop-similarity percent from TOPIC_COSSIM (payload is e.g. ``70``)."""
+    if msg.topic != TOPIC_COSSIM:
+        return
+
+    try:
+        text = msg.payload.decode("utf-8", errors="ignore").strip()
+        if not text:
+            print("[COSSIM] Empty payload — ignored.")
+            return
+
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                raw = data.get("percent") or data.get("threshold_percent") or data.get("value")
+                if raw is not None:
+                    text = str(raw).strip()
+        except Exception:
+            pass
+
+        pct = int(round(float(text)))
+        if set_stop_similarity_threshold(pct):
+            return
+        print(f"[COSSIM] Invalid stop similarity percent: {text!r}")
+    except Exception as e:
+        print(f"[COSSIM] Error handling message: {e}")
+
+
 def handle_command_message(msg):
     global test_active, _hit_streak, _detection_latched, _miss_streak_after_latch
 
@@ -766,9 +824,11 @@ def create_mqtt_client():
 
             c.subscribe(TOPIC_CAMERA_FRAME, qos=0)
             c.subscribe(TOPIC_COMMAND, qos=0)
+            c.subscribe(TOPIC_COSSIM, qos=0)
 
             print(f"[MQTT] Subscribed camera frames <- {TOPIC_CAMERA_FRAME}")
             print(f"[MQTT] Subscribed VIT commands  <- {TOPIC_COMMAND}")
+            print(f"[MQTT] Subscribed stop sim %   <- {TOPIC_COSSIM}")
             print(f"[MQTT] Robot commands publish  -> {TOPIC_ROBOT_COMMAND}")
             print(f"[MQTT] Publishing embeddings   -> {TOPIC_CLIP}")
             print(f"[MQTT] Publishing status       -> {TOPIC_STATUS}")
@@ -810,6 +870,9 @@ def create_mqtt_client():
 
         if msg.topic == TOPIC_COMMAND:
             handle_command_message(msg)
+
+        elif msg.topic == TOPIC_COSSIM:
+            handle_cossim_message(msg)
 
         elif msg.topic == TOPIC_CAMERA_FRAME:
             frame, frame_id, timestamp = decode_camera_frame(msg.payload)
@@ -1007,7 +1070,7 @@ def vit_worker():
                     )
 
                 else:
-                    threshold = best_match["threshold"]
+                    threshold = effective_detection_threshold(best_match["threshold"])
                     cache_hit_now = similarity >= threshold
 
                     if cache_hit_now:

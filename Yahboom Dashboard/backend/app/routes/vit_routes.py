@@ -24,6 +24,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request, Response
 from app.services.vit.vit_service import vit_service
+from app.services.mqtt_service import mqtt_service
 from app.services.vit.reference_capture import (
     ReferenceCaptureError,
     activate_category,
@@ -34,12 +35,14 @@ from app.services.vit.reference_capture import (
     get_reference_capture_status,
     get_sample_image_path,
     get_stop_category,
+    get_stop_threshold,
     list_categories,
     list_library_samples,
     load_library_for_client,
     move_library_sample,
     name_to_category,
     set_stop_category,
+    set_stop_threshold,
 )
 from app.services.vit.image_encoder import ImageEncoderError
 from config import (
@@ -127,6 +130,62 @@ def reference_stop_category():
         return jsonify({"status": "error", "message": "Field 'category' is required."}), 400
     try:
         return jsonify(set_stop_category(category))
+    except ReferenceCaptureError as exc:
+        payload = {"status": "error", "message": str(exc)}
+        if exc.details:
+            payload["details"] = exc.details
+        return jsonify(payload), 400
+
+
+@vit_bp.route("/reference/stop_threshold", methods=["GET", "POST"])
+def reference_stop_threshold():
+    """
+    Get or set the minimum cosine-similarity threshold for cloud stop (0.01–1.0).
+
+    POST JSON: { "threshold": 0.70 } or { "threshold_percent": 70 }
+    """
+    if request.method == "GET":
+        return jsonify({
+            "status": "ok",
+            "stop_threshold": get_stop_threshold(),
+            "default_stop_threshold": CLOUD_AWARE_REFERENCE_THRESHOLD,
+        })
+
+    data = request.get_json(silent=True) or {}
+    threshold = data.get("threshold")
+    if threshold is None and data.get("threshold_percent") is not None:
+        try:
+            threshold = float(data["threshold_percent"]) / 100.0
+        except (TypeError, ValueError):
+            return jsonify({
+                "status": "error",
+                "message": "'threshold_percent' must be a number.",
+            }), 400
+    if threshold is None:
+        return jsonify({
+            "status": "error",
+            "message": "Field 'threshold' or 'threshold_percent' is required.",
+        }), 400
+    try:
+        result = set_stop_threshold(threshold)
+        publish_mqtt = bool(data.get("publish_mqtt", False))
+        pct = round(result.get("stop_threshold", float(threshold)) * 100)
+        mqtt_published = False
+        mqtt_message = None
+        if publish_mqtt:
+            mqtt_published, mqtt_message = mqtt_service.publish_stop_similarity_threshold(pct)
+            if not mqtt_published:
+                mqtt_service.log_event(
+                    "warning",
+                    f"Stop similarity saved as {pct}% but MQTT notify failed: {mqtt_message}",
+                    tag="vit/stop_threshold",
+                )
+        return jsonify({
+            **result,
+            "threshold_percent": pct,
+            "mqtt_published": mqtt_published,
+            "mqtt_message": mqtt_message,
+        })
     except ReferenceCaptureError as exc:
         payload = {"status": "error", "message": str(exc)}
         if exc.details:
@@ -238,7 +297,7 @@ def reference_active():
         "active_embedding_size_bytes": get_active_embedding_size_bytes(),
         "label": VIT_REFERENCE_LABEL,
         "default_threshold": VIT_REFERENCE_DEFAULT_THRESHOLD,
-        "stop_threshold": CLOUD_AWARE_REFERENCE_THRESHOLD,
+        "stop_threshold": get_stop_threshold(),
         "objects": [],
     }
     if not path.exists():

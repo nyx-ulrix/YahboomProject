@@ -1,11 +1,15 @@
 import { sendDashboardBottleStop } from './Controls';
 import { useMetricsStore } from '../app/store';
-import { getStopCategory } from './clientVit/referenceStore';
+import { getStopCategory, getStopThreshold } from './clientVit/referenceStore';
 import { benchModeHasDashboardBottleStop } from './testBenchSession';
 import { notifyTestBenchStopLabelStop } from './testBenchSession';
 
 /** Minimum reference similarity (%) before cloud-aware dashboard stop fires. */
 export const CLOUD_AWARE_MIN_CONFIDENCE = 70;
+
+function minStopSimilarityPercent(): number {
+  return getStopThreshold() * 100;
+}
 const CLOUD_AWARE_COOLDOWN_MS = 5_000;
 
 export type VitReferenceMatch = {
@@ -84,7 +88,7 @@ export function hasQualifyingReferenceMatch(vit: VitStatusForStopLabel): boolean
   if (!ref) return false;
   const stopHit = ref.stop_hit ?? (ref.category === getStopCategory() && ref.hit);
   if (!stopHit) return false;
-  return ref.similarity_percent >= CLOUD_AWARE_MIN_CONFIDENCE;
+  return ref.similarity_percent >= minStopSimilarityPercent();
 }
 
 /**
@@ -100,7 +104,7 @@ export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): b
 
   const ref = latest.reference_match;
   const stopHit = ref?.stop_hit ?? (ref?.category === getStopCategory() && ref?.hit);
-  if (!ref || !stopHit || ref.similarity_percent < CLOUD_AWARE_MIN_CONFIDENCE) return false;
+  if (!ref || !stopHit || ref.similarity_percent < minStopSimilarityPercent()) return false;
 
   return triggerStopLabelStop(key, ref.similarity_percent, ref.label);
 }
@@ -116,7 +120,7 @@ function triggerStopLabelStop(key: string, confidence: number, label: string): b
   sendDashboardBottleStop();
   useMetricsStore.getState().pushEvent(
     'warning',
-    `Cloud Stop — ${label} reference match ${confidence.toFixed(2)} percent (minimum ${CLOUD_AWARE_MIN_CONFIDENCE} percent), mission ended`,
+    `Cloud Stop — ${label} reference match ${confidence.toFixed(2)} percent (minimum ${minStopSimilarityPercent().toFixed(0)} percent), mission ended`,
     'yahboom/vit/status',
   );
   return true;
