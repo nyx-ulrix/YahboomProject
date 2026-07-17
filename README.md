@@ -75,7 +75,7 @@ cd ~/YahboomProject/Yahboom\ Car/Code
 python3 VIT.py
 ```
 
-`webrtc_server.py` streams WebRTC on port `8080` and publishes JPEG frames to `yahboom/camera/frame`. `VIT.py` consumes those frames, runs MobileCLIP-S1, and publishes embeddings on `yahboom/vit/embedding`. Cache-aware offloading is built into `VIT.py` — the dashboard toggles it with `Cae_ON` / `Cae_OFF` over MQTT (no separate `cache_aware_offloading.py` script).
+`webrtc_server.py` streams WebRTC on port `8080` and publishes JPEG frames to `yahboom/camera/frame`. `VIT.py` consumes those frames, runs MobileCLIP-S1, and publishes embeddings on `yahboom/vit/embedding`. Cache-aware offloading is built into `VIT.py` — the dashboard toggles it with `Cao_ON` / `Cao_OFF` over MQTT (no separate `cache_aware_offloading.py` script).
 
 The backend detects a running stream with an **HTTP probe** to port `8080` (`VIDEO_SERVER_PORT`) and exposes WebRTC via `/api/webrtc/offer`.
 
@@ -86,7 +86,7 @@ The backend detects a running stream with an **HTTP probe** to port `8080` (`VID
 | Script | Role |
 |--------|------|
 | `webrtc_server.py` | Camera capture, WebRTC server (`:8080`), MQTT frame relay to VIT |
-| `VIT.py` | MobileCLIP-S1 encoding, Pi cache comparison, embedding publish, `Cae_ON`/`Cae_OFF` handling |
+| `VIT.py` | MobileCLIP-S1 encoding, Pi cache comparison, embedding publish, `Cao_ON`/`Cao_OFF` handling |
 | `mqtt_ros_node.py` | MQTT ↔ ROS 2 bridge, autonomous explore (`auto_on`/`auto_off`), drive status |
 | `lidar_safety_node.py` | LiDAR-based obstacle safety |
 | `capture_bottle_cache_multi.py` | Build `/home/pi/cache_embeddings.json` from live embeddings (multi-angle capture) |
@@ -106,10 +106,10 @@ The backend detects a running stream with an **HTTP probe** to port `8080` (`VID
 
 Object detection is **image-to-image**. The **client never encodes images** — it receives **image embeddings generated on the Pi** (relayed by the backend) and matches them in the browser against the dashboard reference library. Optional backend text-label decode is off by default (`VIT_ENABLE_MODEL=false`). The Stop Test Bench has a mutually exclusive **Detection Mode** toggle:
 
-| Mode | What the Pi sends | Matching | Pi `Cae_*` | Who stops |
+| Mode | What the Pi sends | Matching | Pi `Cao_*` | Who stops |
 |------|-------------------|----------|-----------|-----------|
-| **Cloud Only** | Every Pi embedding | Browser i2i vs full reference library; stop on **Stop Target** category | `Cae_OFF` | Dashboard on `stop_hit` |
-| **Cache Aware Offloading** | Cache-miss embeddings only | Browser i2i vs full reference library on miss | `Cae_ON` | Pi on cache **hit**; dashboard on cache **miss** + `stop_hit` |
+| **Cloud Only** | Every Pi embedding | Browser i2i vs full reference library; stop on **Stop Target** category | `Cao_OFF` | Dashboard on `stop_hit` |
+| **Cache Aware Offloading** | Cache-miss embeddings only | Browser i2i vs full reference library on miss | `Cao_ON` | Pi on cache **hit**; dashboard on cache **miss** + `stop_hit` |
 
 Flow:
 
@@ -178,10 +178,10 @@ Default: **Cloud Only**. Preference is saved in browser `localStorage` (`yahboom
 
 | Mode | API value | Behaviour |
 |------|-----------|-----------|
-| **Cloud Only** (default) | `cloud_aware` | Pi sends every embedding (`Cae_OFF`); the **browser** matches each against the dashboard reference library (image-to-image). Sends `auto_off` + `stop` when similarity ≥ 70% after START. |
-| **Cache Aware Offloading** | `cache_aware_offloading` | Pi checks its own cache and stops on a **hit**. On a **cache miss** the Pi publishes the embedding; the **browser** runs i2i match and the dashboard stops. Publishes `Cae_ON`; START waits for `Cae_Ready`. |
+| **Cloud Only** (default) | `cloud_aware` | Pi sends every embedding (`Cao_OFF`); the **browser** matches each against the dashboard reference library (image-to-image). Sends `auto_off` + `stop` when similarity ≥ 70% after START. |
+| **Cache Aware Offloading** | `cache_aware_offloading` | Pi checks its own cache and stops on a **hit**. On a **cache miss** the Pi publishes the embedding; the **browser** runs i2i match and the dashboard stops. Publishes `Cao_ON`; START waits for `Cao_Ready`. |
 
-Selecting a mode publishes the matching `Cae_ON` / `Cae_OFF` command and mirrors the mode into `vit_service` (`POST /api/test_bench/cache_aware`).
+Selecting a mode publishes the matching `Cao_ON` / `Cao_OFF` command and mirrors the mode into `vit_service` (`POST /api/test_bench/cache_aware`).
 
 #### START button gating
 
@@ -192,7 +192,7 @@ START is disabled when:
 - Detection mode is switching (`SENDING COMMAND` pill)
 - **Cache Aware Offloading:** the Pi has not confirmed cache-aware ready yet
 
-In Cache Aware Offloading, START unlocks when the Pi confirms readiness (`Cae_Ready`, surfaced via retained MQTT on `yahboom/cache_aware/ready`). The test bench reads this through `cache_aware_mqtt_ready` / `cache_script_running` in `GET /api/test_bench/stop_mode` — not via SSH log tailing. VIT encoder and video must be running on the Pi (`webrtc_server.py`) so the Pi produces embeddings.
+In Cache Aware Offloading, START unlocks when the Pi confirms readiness (`Cao_Ready`, surfaced via retained MQTT on `yahboom/cache_aware/ready`). The test bench reads this through `cache_aware_mqtt_ready` / `cache_script_running` in `GET /api/test_bench/stop_mode` — not via SSH log tailing. VIT encoder and video must be running on the Pi (`webrtc_server.py`) so the Pi produces embeddings.
 
 #### How a run works
 
@@ -211,7 +211,7 @@ Detection uses **image-to-image** matching in the **browser**, not CLIP text lab
 - **Live Reference Capture** widget — save relayed Pi embeddings into categorized folders (default category `target_bottle`).
 - **Upload Embeddings** widget — encode a static image on the dashboard backend and save it to the library.
 - **Stop Target** dropdown on the Stop Test Bench — choose which category qualifies for cloud stop (persisted in browser `localStorage`).
-- Keep **`Cae_OFF`** for Cloud Only so every embedding is relayed.
+- Keep **`Cao_OFF`** for Cloud Only so every embedding is relayed.
 
 **Stop rule:**
 
@@ -244,7 +244,7 @@ Client-side explore autopilot (`CLIENT AUTO` widget, `useClientAutoPilot()`, `to
 |--------|------|-------------|
 | `GET` | `/api/test_bench/stop_mode` | Current mode and Pi cache-aware status. Use `?force=1` to bypass probe cache. |
 | `POST` | `/api/test_bench/stop_mode` | Body `{ "mode": "cache_aware_offloading" \| "cloud_aware" }` — set mode; mirrors into `vit_service`. |
-| `POST` | `/api/test_bench/cache_aware` | Body `{ "on": true \| false }` — publish `Cae_ON` / `Cae_OFF` to `VIT.py` and set the mode. |
+| `POST` | `/api/test_bench/cache_aware` | Body `{ "on": true \| false }` — publish `Cao_ON` / `Cao_OFF` to `VIT.py` and set the mode. |
 | `GET` / `DELETE` | `/api/test_bench/latest_detection` | Latest Pi cache-aware detection from MQTT `yahboom/detect/status` (`DELETE` clears it). |
 
 **GET `/api/test_bench/stop_mode` response fields:**

@@ -110,11 +110,11 @@ function stopTestLayout(
   return { laptop, ipad };
 }
 
-const STOP_TEST_CAE = stopTestLayout('vit_decoder_widget');
+const STOP_TEST_CAO = stopTestLayout('vit_decoder_widget');
 const STOP_TEST_YOLO = stopTestLayout('yolo_model_widget');
 
-const STOP_TEST_CAE_LAPTOP = STOP_TEST_CAE.laptop;
-const STOP_TEST_CAE_IPAD = STOP_TEST_CAE.ipad;
+const STOP_TEST_CAO_LAPTOP = STOP_TEST_CAO.laptop;
+const STOP_TEST_CAO_IPAD = STOP_TEST_CAO.ipad;
 const STOP_TEST_YOLO_LAPTOP = STOP_TEST_YOLO.laptop;
 const STOP_TEST_YOLO_IPAD = STOP_TEST_YOLO.ipad;
 
@@ -128,14 +128,14 @@ export interface LayoutTemplate {
 
 /** Registry of switchable layout templates (shown in the TopBar dropdown). */
 export const LAYOUT_TEMPLATES: LayoutTemplate[] = [
-  { id: 'stop_test_cae',  name: 'Stop Test CAE',  laptop: STOP_TEST_CAE_LAPTOP,  ipad: STOP_TEST_CAE_IPAD },
+  { id: 'stop_test_cao',  name: 'Stop Test CAO',  laptop: STOP_TEST_CAO_LAPTOP,  ipad: STOP_TEST_CAO_IPAD },
   { id: 'stop_test_yolo', name: 'Stop Test YOLO', laptop: STOP_TEST_YOLO_LAPTOP, ipad: STOP_TEST_YOLO_IPAD },
   { id: 'vit_view',       name: 'VIT View',       laptop: VIT_VIEW_LAPTOP,        ipad: VIT_VIEW_IPAD },
   { id: 'lidar_view',     name: 'LiDAR View',     laptop: LIDAR_VIEW_LAPTOP,      ipad: LIDAR_VIEW_IPAD },
 ];
 
 /** Template applied to fresh dashboards — always one of the stored views. */
-export const DEFAULT_TEMPLATE_ID = 'stop_test_cae';
+export const DEFAULT_TEMPLATE_ID = 'stop_test_cao';
 
 /** The default template object, resolved from the registry (falls back to the first). */
 export const DEFAULT_TEMPLATE: LayoutTemplate =
@@ -146,7 +146,7 @@ export const DEFAULT_TEMPLATE: LayoutTemplate =
 export const IPAD_DEFAULT_LAYOUT: LayoutItem[] = DEFAULT_TEMPLATE.ipad;
 export const LAPTOP_DEFAULT_LAYOUT: LayoutItem[] = DEFAULT_TEMPLATE.laptop;
 
-const LAYOUT_PERSIST_VERSION = 29;
+const LAYOUT_PERSIST_VERSION = 30;
 
 type PersistedLayoutState = Partial<LayoutStore> & { layout?: LayoutItem[] };
 
@@ -291,11 +291,33 @@ export const useLayoutStore = create<LayoutStore>()(
 
         const old = persistedState as PersistedLayoutState;
 
-        // v29 — Stop Test split into CAE (cosine decoder) and YOLO templates.
+        // v30 — CAE renamed to CAO (layout template id).
+        if (version < 30) {
+          const templateId =
+            old.activeTemplateId === 'stop_test_cae'
+              ? 'stop_test_cao'
+              : (old.activeTemplateId ?? DEFAULT_TEMPLATE_ID);
+          const template = LAYOUT_TEMPLATES.find((t) => t.id === templateId)
+            ?? LAYOUT_TEMPLATES.find((t) => t.id === DEFAULT_TEMPLATE_ID)
+            ?? LAYOUT_TEMPLATES[0];
+          const bp = old.activeBreakpoint ?? initialBreakpoint();
+          const layout = bp === 'laptop' ? template.laptop : template.ipad;
+          return {
+            ...old,
+            laptopLayout: template.laptop,
+            ipadLayout: template.ipad,
+            activeTemplateId: template.id,
+            activeBreakpoint: bp,
+            activeWidgetIds: layoutWidgetIds(layout),
+            lockedIds: old.lockedIds ?? [],
+          } satisfies Partial<LayoutStore>;
+        }
+
+        // v29 — Stop Test split into CAO (cosine decoder) and YOLO templates.
         if (version < 29) {
           const templateId =
             old.activeTemplateId === 'stop_test' || old.activeTemplateId == null
-              ? 'stop_test_cae'
+              ? 'stop_test_cao'
               : old.activeTemplateId;
           const template = LAYOUT_TEMPLATES.find((t) => t.id === templateId)
             ?? LAYOUT_TEMPLATES.find((t) => t.id === DEFAULT_TEMPLATE_ID)

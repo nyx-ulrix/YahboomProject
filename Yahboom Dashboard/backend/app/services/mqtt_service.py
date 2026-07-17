@@ -221,14 +221,14 @@ class MQTTService:
 
     def publish_cache_aware_command(self, on: bool) -> tuple[bool, str]:
         """
-        Turn cache-aware offloading on/off on the Pi by publishing Cae_ON/Cae_OFF
+        Turn cache-aware offloading on/off on the Pi by publishing Cao_ON/Cao_OFF
         to TOPIC (yahboom/cmd) — the same command channel as WASD movement. The car's
-        script replies with 'Cae_Ready' on CACHE_AWARE_READY_TOPIC when it is ready;
+        script replies with 'Cao_Ready' on CACHE_AWARE_READY_TOPIC when it is ready;
         that reply is what unlocks START (handled in _on_message). Sending a command
-        resets readiness so START stays blocked until a fresh 'Cae_Ready' arrives.
+        resets readiness so START stays blocked until a fresh 'Cao_Ready' arrives.
         """
-        cmd = "Cae_ON" if on else "Cae_OFF"
-        # Any command invalidates the previous ready state — wait for a new Cae_Ready.
+        cmd = "Cao_ON" if on else "Cao_OFF"
+        # Any command invalidates the previous ready state — wait for a new Cao_Ready.
         self.set_cache_aware_ready(ready=False)
         if not self.connected:
             reconnect_ip = self.broker_ip or ""
@@ -505,17 +505,17 @@ class MQTTService:
 
         if message.topic == CACHE_AWARE_READY_TOPIC:
             text = raw.strip()
-            # Cae_ON/Cae_OFF are now published on yahboom/cmd, not here. Keep this
+            # Cao_ON/Cao_OFF are now published on yahboom/cmd, not here. Keep this
             # guard as a defensive no-op in case anything echoes them onto this topic.
-            if text in ("Cae_ON", "Cae_OFF"):
+            if text in ("Cao_ON", "Cao_OFF"):
                 return
-            # The car's cache-aware script reports readiness with 'Cae_Ready';
+            # The car's cache-aware script reports readiness with 'Cao_Ready';
             # this is what unlocks START in cache-aware offloading mode. Latch it
-            # once — ignore repeats until a new command (Cae_ON/Cae_OFF) resets it.
-            if text == "Cae_Ready":
+            # once — ignore repeats until a new command (Cao_ON/Cao_OFF) resets it.
+            if text == "Cao_Ready":
                 if not self.cache_aware_embedding_ready:
                     self.set_cache_aware_ready(ready=True)
-                    self.log_event("info", f"Cache-aware script ready (Cae_Ready){hop}", tag=CACHE_AWARE_READY_TOPIC)
+                    self.log_event("info", f"Cache-aware script ready (Cao_Ready){hop}", tag=CACHE_AWARE_READY_TOPIC)
                 return
             ready = self._parse_cache_aware_ready(raw)
             dims = None

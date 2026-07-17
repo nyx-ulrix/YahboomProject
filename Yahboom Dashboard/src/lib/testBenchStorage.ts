@@ -1,5 +1,7 @@
 /** Browser-persisted Stop-Time Test Bench session data. */
 
+import { useLayoutStore } from '../app/store';
+
 const STORAGE_KEY = 'yahboom_test_bench_v1';
 
 export type StopBenchMode = 'cache_aware_offloading' | 'cloud_aware';
@@ -180,7 +182,7 @@ const STOP_TOGGLES_KEY = 'yahboom_stop_toggles';
 
 export function loadStopToggles(): StopModeToggles {
   // Cache Aware Offloading always starts OFF (never restored from a prior session);
-  // it must be re-enabled explicitly so the car receives a fresh Cae_ON + Cae_Ready.
+  // it must be re-enabled explicitly so the car receives a fresh Cao_ON + Cao_Ready.
   // cloudOn is always true — cloud-aware bottle stop has no toggle.
   return { ...DEFAULT_STOP_TOGGLES };
 }
@@ -295,10 +297,17 @@ export function togglesToStopMode(cacheOn: boolean, _cloudOn: boolean): StopBenc
   return cacheOn ? 'cache_aware_offloading' : 'cloud_aware';
 }
 
+/** Switch dashboard layout to Stop Test CAO or Stop Test YOLO for the active bench mode. */
+export function applyStopBenchLayoutForMode(mode: StopBenchMode): void {
+  const templateId = mode === 'cache_aware_offloading' ? 'stop_test_cao' : 'stop_test_yolo';
+  useLayoutStore.getState().applyTemplate(templateId);
+}
+
 /** Align backend stop mode + YOLO with local toggles (fixes stale Cache Aware after refresh). */
 export async function syncStopModeToBackend(): Promise<void> {
   const { cacheOn } = loadStopToggles();
   const localMode = togglesToStopMode(cacheOn, true);
+  applyStopBenchLayoutForMode(localMode);
   try {
     const res = await fetch('/api/test_bench/stop_mode', { cache: 'no-store' });
     if (!res.ok) return;

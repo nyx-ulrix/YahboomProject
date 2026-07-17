@@ -70,7 +70,7 @@ ESTOP_COMMANDS = {"estop_on", "estop_off"}
 # VIT encoder venv on the Pi (webrtc_server.py, VIT.py, capture scripts)
 PI_VIT_VENV = os.getenv("PI_VIT_VENV", "~/vit_env/bin/activate")
 
-# Legacy SSH cache-script settings (unused — VIT.py handles Cae_ON/Cae_OFF over MQTT)
+# Legacy SSH cache-script settings (unused — VIT.py handles Cao_ON/Cao_OFF over MQTT)
 PI_CACHE_AWARE_SCRIPT_PATH = os.getenv(
     "PI_CACHE_AWARE_SCRIPT_PATH", "VIT.py")
 PI_CACHE_AWARE_LOG = os.getenv(
@@ -137,8 +137,8 @@ VIT_REFERENCE_LIBRARY_DIR = os.getenv(
 VIT_ENABLE_MODEL = os.getenv(
     "VIT_ENABLE_MODEL", "false").lower() in ("true", "1", "yes", "on")
 # Default detection mode mirrored to vit_service (cloud_aware | cache_aware_offloading).
-# Cloud Only = Pi sends every embedding (Cae_OFF); Cache Aware = Pi sends only
-# cache-miss embeddings (Cae_ON). The browser matches in both.
+# Cloud Only = Pi sends every embedding (Cao_OFF); Cache Aware = Pi sends only
+# cache-miss embeddings (Cao_ON). The browser matches in both.
 _detection_mode = os.getenv("VIT_CLIENT_DETECTION_MODE", "cloud_aware")
 VIT_CLIENT_DETECTION_MODE = (
     "cloud_aware" if _detection_mode == "edge_aware" else _detection_mode

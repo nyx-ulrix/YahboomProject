@@ -1,7 +1,7 @@
 """
 Stop-Time Test Bench API — stop-mode selection and cache-aware MQTT control.
 
-Cache-aware offloading is toggled by publishing Cae_ON / Cae_OFF over MQTT
+Cache-aware offloading is toggled by publishing Cao_ON / Cao_OFF over MQTT
 (see mqtt_service.publish_cache_aware_command). Readiness is driven solely by
 the Pi's retained {"ready": ...} status on yahboom/cache_aware/ready.
 """
@@ -64,7 +64,7 @@ def latest_detection():
 @test_bench_bp.route("/cache_aware", methods=["POST"])
 def set_cache_aware():
     """
-    Turn cache-aware offloading on/off by publishing Cae_ON / Cae_OFF over MQTT.
+    Turn cache-aware offloading on/off by publishing Cao_ON / Cao_OFF over MQTT.
 
     Expected JSON: { "on": true|false }
     """

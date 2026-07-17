@@ -613,8 +613,8 @@ class VITService:
         self._last_decode_error: str | None = None
 
         # Detection mode mirrored from the test-bench toggle. Both modes now feed
-        # the browser: Cloud Only = Pi sends every embedding (Cae_OFF); Cache Aware =
-        # Pi sends only cache-miss embeddings (Cae_ON). The browser does the
+        # the browser: Cloud Only = Pi sends every embedding (Cao_OFF); Cache Aware =
+        # Pi sends only cache-miss embeddings (Cao_ON). The browser does the
         # image-to-image match against the dashboard reference library.
         self._detection_mode: str = _DEFAULT_DETECTION_MODE
 

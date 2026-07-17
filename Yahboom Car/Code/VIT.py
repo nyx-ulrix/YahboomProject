@@ -3,15 +3,15 @@
 # 1. Receives camera frames from webrtc_server.py through MQTT
 # 2. Runs MobileCLIP-S1 embedding on the Yahboom / Raspberry Pi
 # 3. Cache-aware OFF by default when script starts
-# 4. Client sends Cae_ON  -> cache-aware becomes ON
-# 5. Client sends Cae_OFF -> cache-aware becomes OFF
+# 4. Client sends Cao_ON  -> cache-aware becomes ON
+# 5. Client sends Cao_OFF -> cache-aware becomes OFF
 # 6. When cache-aware is ON:
 #       - live embedding is compared with /home/pi/cache_embeddings.json
 #       - cache confidence is printed in the terminal
 #       - if cache MISS: embedding is published to cloud/client
 #       - if cache HIT: embedding is NOT sent to cloud/client
 #       - if HIT is stable for required frames: robot receives stop command
-#       - cache-aware stays ON until Cae_OFF is received
+#       - cache-aware stays ON until Cao_OFF is received
 
 import os
 from pathlib import Path
@@ -52,8 +52,8 @@ BROKER_PORT = 1883
 CACHE_FILE_PATH = "/home/pi/cache_embeddings.json"
 
 # VIT.py listens to this topic for cache-aware commands:
-#   Cae_ON
-#   Cae_OFF
+#   Cao_ON
+#   Cao_OFF
 #   embds1 / embds2 / embds3
 TOPIC_COMMAND = "yahboom/cmd"
 
@@ -156,10 +156,10 @@ def set_embedding_size(new_bytes):
 # =========================
 # CACHE-AWARE COMMANDS
 # =========================
-CAE_ON_COMMAND = "cae_on"
-CAE_OFF_COMMAND = "cae_off"
-CAE_READY_COMMAND = "Cae_Ready"
-CAE_NOT_READY_COMMAND = "Cae_NotReady"
+CAO_ON_COMMAND = "cao_on"
+CAO_OFF_COMMAND = "cao_off"
+CAO_READY_COMMAND = "Cao_Ready"
+CAO_NOT_READY_COMMAND = "Cao_NotReady"
 
 AUTO_OFF_COMMAND = "auto_off"
 STOP_COMMAND = "stop"
@@ -167,13 +167,13 @@ STOP_COMMAND = "stop"
 # Only   turns cache-aware ON.
 # auto_on is NOT included here on purpose.
 START_COMMANDS = {
-    "cae_on",
+    "cao_on",
 }
 
-# Only Cae_OFF turns cache-aware OFF.
+# Only Cao_OFF turns cache-aware OFF.
 # auto_off is NOT included here on purpose.
 STOP_OR_OFF_COMMANDS = {
-    "cae_off",
+    "cao_off",
 }
 
 
@@ -198,7 +198,7 @@ cached_objects = []
 cache_ready = False
 
 # This is the actual cache-aware ON/OFF state.
-# It starts OFF and only becomes ON after Cae_ON.
+# It starts OFF and only becomes ON after Cao_ON.
 test_active = False
 
 # Dashboard can override the minimum cache-hit similarity via TOPIC_COSSIM (plain percent).
@@ -406,7 +406,7 @@ def publish_cache_ready(ready: bool, reason: str, wait: bool = False, log: bool 
     if mqtt_client is None:
         return
 
-    ready_cmd = CAE_READY_COMMAND if ready else CAE_NOT_READY_COMMAND
+    ready_cmd = CAO_READY_COMMAND if ready else CAO_NOT_READY_COMMAND
 
     payload = {
         "ready": bool(ready),
@@ -421,7 +421,7 @@ def publish_cache_ready(ready: bool, reason: str, wait: bool = False, log: bool 
         "cache_file": CACHE_FILE_PATH,
         "cached_count": len(cached_objects),
         "test_active": bool(test_active),
-        "requires_cae_on": True,
+        "requires_cao_on": True,
         "reason": reason,
         "timestamp": time.time(),
     }
@@ -483,8 +483,8 @@ def publish_client_auto_status(
     payload = {
         "auto": bool(auto_on),
         "auto_mode": bool(auto_on),
-        "state": "cae_on" if auto_on else "cae_off",
-        "command": CAE_ON_COMMAND if auto_on else CAE_OFF_COMMAND,
+        "state": "cao_on" if auto_on else "cao_off",
+        "command": CAO_ON_COMMAND if auto_on else CAO_OFF_COMMAND,
         "source": "VIT.py",
         "reason": reason,
         "label": DETECTION_LABEL,
@@ -697,8 +697,8 @@ def handle_command_message(msg):
             _detection_latched = False
             _miss_streak_after_latch = 0
 
-            print(f"[CAE] Received '{command}'. Cache-aware offloading is ACTIVE.")
-            print("[CAE] Cache-aware will stay ON until Cae_OFF is received.")
+            print(f"[CAO] Received '{command}'. Cache-aware offloading is ACTIVE.")
+            print("[CAO] Cache-aware will stay ON until Cao_OFF is received.")
 
             publish_cache_ready(True, f"cache_aware_active_by_{command}", wait=False, log=True)
             publish_client_auto_status(True, f"cache_aware_active_by_{command}")
@@ -710,7 +710,7 @@ def handle_command_message(msg):
             _detection_latched = False
             _miss_streak_after_latch = 0
 
-            print(f"[CAE] Received '{command}'. Cache-aware offloading is INACTIVE.")
+            print(f"[CAO] Received '{command}'. Cache-aware offloading is INACTIVE.")
 
             if cache_ready:
                 publish_cache_ready(True, f"cache_aware_inactive_by_{command}", wait=False, log=True)
@@ -721,7 +721,7 @@ def handle_command_message(msg):
             return
 
         print("[CMD] Unknown command for VIT.py.")
-        print("[CMD] Valid VIT commands: embds1, embds2, embds3, Cae_ON, Cae_OFF.")
+        print("[CMD] Valid VIT commands: embds1, embds2, embds3, Cao_ON, Cao_OFF.")
 
     except Exception as e:
         print(f"[CMD] Error handling command: {e}")
@@ -759,7 +759,7 @@ def publish_stop_and_auto_off(similarity=None, threshold=None, frame_id=None):
 
     Important:
     This does NOT turn cache-aware off.
-    Cache-aware stays active until the client sends Cae_OFF.
+    Cache-aware stays active until the client sends Cao_OFF.
     """
     global _hit_streak, _stop_sequence_running
 
@@ -774,7 +774,7 @@ def publish_stop_and_auto_off(similarity=None, threshold=None, frame_id=None):
         _hit_streak = 0
 
         print("[STOP] Bottle detected. Sending stop to Yahboom...")
-        print("[STOP] Cache-aware remains ON until client sends Cae_OFF.")
+        print("[STOP] Cache-aware remains ON until client sends Cao_OFF.")
 
         # Stop movement.
         safe_publish_robot_command(STOP_COMMAND, repeat=STOP_REPEAT_COUNT)
@@ -857,7 +857,7 @@ def create_mqtt_client():
                     "embedding_bytes": get_embedding_bytes(),
                     "dtype": "float32",
                     "inference_every_n_frames": INFERENCE_EVERY_N_FRAMES,
-                    "valid_commands": list(COMMAND_TO_EMBEDDING_BYTES.keys()) + [CAE_ON_COMMAND, CAE_OFF_COMMAND],
+                    "valid_commands": list(COMMAND_TO_EMBEDDING_BYTES.keys()) + [CAO_ON_COMMAND, CAO_OFF_COMMAND],
                     "cache_aware_initial_state": bool(test_active),
                 },
             )
@@ -1134,7 +1134,7 @@ def vit_worker():
                                 "mode": "cached_embedding",
                                 "source": "VIT.py",
                                 "cache_active": True,
-                                "cache_stays_on_until": "Cae_OFF",
+                                "cache_stays_on_until": "Cao_OFF",
                             }
 
                             mqtt_client.publish(
@@ -1149,7 +1149,7 @@ def vit_worker():
                                 f"similarity={similarity:.4f} | threshold={threshold} | "
                                 f"hits={CONSECUTIVE_HITS_REQUIRED} | dims={target_dims} | frame_id={frame_id}"
                             )
-                            print("[DETECT] Cache-aware remains ON until client sends Cae_OFF.")
+                            print("[DETECT] Cache-aware remains ON until client sends Cao_OFF.")
 
                             stop_thread = threading.Thread(
                                 target=publish_stop_and_auto_off,
@@ -1260,8 +1260,8 @@ def main():
     print(f"[INFO] Ready text topic   : {TOPIC_CLIENT_READY}")
     print(f"[INFO] Detection label    : {DETECTION_LABEL}")
     print(f"[INFO] Cache-aware starts : OFF")
-    print(f"[INFO] Turn ON with       : Cae_ON")
-    print(f"[INFO] Turn OFF with      : Cae_OFF")
+    print(f"[INFO] Turn ON with       : Cao_ON")
+    print(f"[INFO] Turn OFF with      : Cao_OFF")
     print("========================================")
 
     load_model()
@@ -1299,10 +1299,10 @@ def main():
 
     print("\n[VIT] VIT.py is running.")
     print("[VIT] Waiting for camera frames from webrtc_server.py...")
-    print(f"[VIT] Client will receive '{CAE_READY_COMMAND}' on {TOPIC_CLIENT_READY} when cache is ready.")
+    print(f"[VIT] Client will receive '{CAO_READY_COMMAND}' on {TOPIC_CLIENT_READY} when cache is ready.")
     print("[VIT] Cache-aware is OFF at startup.")
-    print("[VIT] Send 'Cae_ON' to activate cache-aware offloading.")
-    print("[VIT] Send 'Cae_OFF' to deactivate cache-aware offloading.")
+    print("[VIT] Send 'Cao_ON' to activate cache-aware offloading.")
+    print("[VIT] Send 'Cao_OFF' to deactivate cache-aware offloading.")
     print("[VIT] Cache-aware will NOT turn off automatically after detection.")
     print("[VIT] Cache confidence prints only after cache-aware is ON.")
     print("[VIT] Press Ctrl+C to stop.\n")

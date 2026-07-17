@@ -34,6 +34,7 @@ import {
   STOP_MODE_LABELS,
   STOP_SOURCE_LABELS,
   togglesToStopMode,
+  applyStopBenchLayoutForMode,
   type StopBenchMode,
   type StopModeToggles,
   type StopSource,
@@ -2510,7 +2511,7 @@ function StopTestBenchWidget() {
     setTestBenchStopMode(mode);
     setCloudAwareStopEnabled(benchUsesCosineSimilarity(mode));
     const mqttReady = data.cache_aware_mqtt_ready === true || data.cache_script_running === true;
-    // Cache-aware readiness comes solely from the car's Cae_Ready over MQTT.
+    // Cache-aware readiness comes solely from the car's Cao_Ready over MQTT.
     setCacheScriptRunning(cacheOn && mqttReady);
     setCacheScriptReady(!cacheOn || mqttReady);
   }, []);
@@ -3117,11 +3118,12 @@ function StopTestBenchWidget() {
     saveStopToggles(next);
   };
 
-  // Cache-Aware Offloading toggle: publish Cae_ON / Cae_OFF over MQTT. Cloud-aware
+  // Cache-Aware Offloading toggle: publish Cao_ON / Cao_OFF over MQTT. Cloud-aware
   // bottle stop stays armed regardless. Start stays gated on the Pi's ready reply.
   const applyCacheAware = (nextCache: boolean) => {
     persistStopToggles({ cacheOn: nextCache, cloudOn: true });
     const mode = togglesToStopMode(nextCache, true);
+    applyStopBenchLayoutForMode(mode);
     setStopMode(mode);
     setTestBenchStopMode(mode);
     setCloudAwareStopEnabled(benchUsesCosineSimilarity(mode));
@@ -3146,8 +3148,8 @@ function StopTestBenchWidget() {
           useMetricsStore.getState().pushEvent(
             'info',
             nextCache
-              ? 'Cache Aware Offloading — sent Cae_ON to the Raspberry Pi'
-              : 'Cache Aware Offloading — sent Cae_OFF to the Raspberry Pi',
+              ? 'Cache Aware Offloading — sent Cao_ON to the Raspberry Pi'
+              : 'Cache Aware Offloading — sent Cao_OFF to the Raspberry Pi',
           );
         }
         applyStopModeApi(data);
@@ -3164,7 +3166,7 @@ function StopTestBenchWidget() {
 
   const stopModeStatusMessage = (() => {
     if (modeSwitching && cacheOn) {
-      return 'Sending Cae_ON to the Raspberry Pi…';
+      return 'Sending Cao_ON to the Raspberry Pi…';
     }
     if (effectiveStopMode === 'cache_aware_offloading') {
       return cacheScriptReady
@@ -3355,7 +3357,7 @@ function StopTestBenchWidget() {
         </div>
       </div>
 
-      {/* Detection mode — YOLO (Cae_OFF, no cosine) or Cache Aware (Cae_ON, cosine on cache miss). */}
+      {/* Detection mode — YOLO (Cao_OFF, no cosine) or Cache Aware (Cao_ON, cosine on cache miss). */}
       <div className="flex-shrink-0 rounded-xl px-2.5 py-2"
         style={{ background: 'rgba(0,0,0,0.12)', border: '1px solid var(--stroke-subtle)' }}>
         <div className="flex items-center justify-between gap-2 mb-2">
@@ -3389,7 +3391,7 @@ function StopTestBenchWidget() {
               border: !cacheOn ? '1px solid rgba(255,255,255,0.22)' : '1px solid var(--stroke-subtle)',
               boxShadow: !cacheOn ? '0 8px 24px rgba(6,182,212,0.4), inset 0 1px 0 rgba(255,255,255,0.2)' : 'none',
             }}
-            title="YOLO — Pi sends every embedding (Cae_OFF); dashboard cosine similarity is off"
+            title="YOLO — Pi sends every embedding (Cao_OFF); dashboard cosine similarity is off"
           >
             <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
               YOLO
@@ -3410,7 +3412,7 @@ function StopTestBenchWidget() {
               border: cacheOn ? '1px solid rgba(255,255,255,0.22)' : '1px solid var(--stroke-subtle)',
               boxShadow: cacheOn ? '0 8px 24px rgba(34,197,94,0.45), inset 0 1px 0 rgba(255,255,255,0.2)' : 'none',
             }}
-            title="Cache Aware Offloading — Pi checks its cache; on a miss the client matches the Pi embedding (publishes Cae_ON)"
+            title="Cache Aware Offloading — Pi checks its cache; on a miss the client matches the Pi embedding (publishes Cao_ON)"
           >
             <span className="block uppercase tracking-wider" style={{ fontSize: 7, opacity: 0.85, marginBottom: 2 }}>
               Cache Aware
