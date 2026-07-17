@@ -247,9 +247,14 @@ export function benchNeedsPiScript(mode: StopBenchMode): boolean {
   return mode === 'cache_aware_offloading';
 }
 
-// Dashboard cosine stop runs only in Cache Aware mode (not YOLO).
+// Dashboard bottle stop: Cache Aware (cosine) or YOLO (object detection).
 export function benchHasDashboardBottleStop(mode: StopBenchMode): boolean {
-  return mode === 'cache_aware_offloading';
+  return mode === 'cache_aware_offloading' || mode === 'cloud_aware';
+}
+
+/** YOLO bottle stop runs in cloud_aware (YOLO) test-bench mode. */
+export function benchHasYoloBottleStop(mode: StopBenchMode): boolean {
+  return mode === 'cloud_aware';
 }
 
 /** Client-side cosine similarity matching (Cache Aware cache-miss path only). */

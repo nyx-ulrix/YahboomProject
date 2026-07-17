@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 
 # Re-emitted multipart boundary (clients need not match the Pi's boundary).
 _BOUNDARY = b"--frame"
@@ -52,7 +53,9 @@ class VideoRelay:
         self._ingest_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._subscribers: list[queue.Queue[bytes]] = []
+        self._frame_listeners: list[Callable[[bytes], None]] = []
         self._last_part: bytes | None = None
+        self._last_jpeg: bytes | None = None
 
     def is_active(self) -> bool:
         with self._lock:
@@ -80,10 +83,39 @@ class VideoRelay:
         self._stop_event.set()
         self._upstream = None
         self._last_part = None
+        self._last_jpeg = None
         self._subscribers.clear()
 
-    def _broadcast(self, part: bytes) -> None:
+    def add_frame_listener(self, callback: Callable[[bytes], None]) -> None:
+        """Register a callback invoked with each raw JPEG frame from the upstream feed."""
+        with self._lock:
+            if callback not in self._frame_listeners:
+                self._frame_listeners.append(callback)
+            latest = self._last_jpeg
+
+        if latest is not None:
+            try:
+                callback(latest)
+            except Exception:
+                pass
+
+    def remove_frame_listener(self, callback: Callable[[bytes], None]) -> None:
+        with self._lock:
+            if callback in self._frame_listeners:
+                self._frame_listeners.remove(callback)
+
+    def _notify_frame_listeners(self, jpeg: bytes) -> None:
+        self._last_jpeg = jpeg
+        for listener in list(self._frame_listeners):
+            try:
+                listener(jpeg)
+            except Exception:
+                pass
+
+    def _broadcast(self, jpeg: bytes) -> None:
+        part = _format_mjpeg_part(jpeg)
         self._last_part = part
+        self._notify_frame_listeners(jpeg)
         for q in list(self._subscribers):
             try:
                 q.put_nowait(part)
@@ -130,7 +162,7 @@ class VideoRelay:
                 for jpeg in _iter_jpeg_frames(response):
                     if self._stop_event.is_set():
                         break
-                    self._broadcast(_format_mjpeg_part(jpeg))
+                    self._broadcast(jpeg)
             finally:
                 response.close()
             if not self._stop_event.is_set():

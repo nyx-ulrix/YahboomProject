@@ -94,7 +94,7 @@ export function hasQualifyingReferenceMatch(vit: VitStatusForStopLabel): boolean
 }
 
 /**
- * When cloud-aware mode is on, session is armed, and reference match hits threshold,
+ * When YOLO mode is on, session is armed, and reference match hits threshold,
  * send stop (same as manual stop). Returns true if triggered.
  */
 export function processVitStatusForStopLabelEstop(vit: VitStatusForStopLabel): boolean {

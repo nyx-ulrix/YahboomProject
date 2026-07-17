@@ -9,3 +9,7 @@ scipy
 # default image-to-image flow.
 torch
 open_clip_torch
+# YOLOv8 live-video detection (Ultralytics/YOLOv8 — https://huggingface.co/Ultralytics/YOLOv8)
+ultralytics
+opencv-python-headless
+huggingface_hub

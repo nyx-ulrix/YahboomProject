@@ -11,6 +11,7 @@ import { useMetricsStore, useSettingsStore } from '../store';
 import type { WidgetDefinition, MetricsState } from '../types';
 import { sendCommand, sendCameraCommand, setEstopState, toggleRosAuto, vecToCommand, vecToCameraCommand } from '../../lib/Controls';
 import { setCloudAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/cloudAwareStopLabelEstop';
+import { setYoloStopArmed, yoloStopEventKey, type YoloStatusForBottleStop } from '../../lib/yoloBottleStop';
 import { loadReferenceLibrary, applyStopCategory, applyStopThreshold, getStopThreshold } from '../../lib/clientVit/referenceStore';
 import { dedupeCosineSimilarityCheckByLabel } from '../../lib/clientVit/cosineSimilarityCheck';
 import { uploadEmbeddingsDef } from './UploadEmbeddingsWidget';
@@ -18,6 +19,7 @@ import { liveReferenceCaptureDef } from './LiveReferenceCaptureWidget';
 import {
   benchNeedsPiScript,
   benchHasDashboardBottleStop,
+  benchHasYoloBottleStop,
   benchUsesCosineSimilarity,
   clearTestBenchCache,
   loadStopToggles,
@@ -1099,6 +1101,9 @@ type VitStatusResponse = {
   vit_server_running: boolean;
   /** Recent MQTT embeddings — encoder pipeline is active. */
   encoder_live?: boolean;
+  /** False when no new Pi embedding within readings_stale_ms. */
+  readings_fresh?: boolean;
+  readings_stale_ms?: number;
   model_enabled: boolean;
   model_ready: boolean;
   model_error: string | null;
@@ -1156,6 +1161,40 @@ type VitStatusResponse = {
   } | null;
 };
 
+type YoloDetection = {
+  label: string;
+  class_id?: number;
+  confidence: number;
+  confidence_percent: number;
+  bbox: [number, number, number, number];
+};
+
+type YoloStatusResponse = {
+  enabled: boolean;
+  model_ready: boolean;
+  model_error: string | null;
+  model_file: string;
+  model_repo: string;
+  model_family: string;
+  video_active: boolean;
+  readings_fresh?: boolean;
+  last_frame_at?: string | null;
+  readings_stale_ms?: number;
+  confidence_threshold: number;
+  confidence_threshold_percent: number;
+  inference_interval_sec: number;
+  inference_count: number;
+  session_count: number;
+  detection_count: number;
+  latest: {
+    timestamp: string;
+    frame_width: number;
+    frame_height: number;
+    detections: YoloDetection[];
+    top_detection: YoloDetection | null;
+  } | null;
+};
+
 const REFERENCE_CATEGORY_RE = /^[a-z0-9_-]{1,48}$/;
 
 const VIT_EMBED_SIZE_OPTIONS = [512, 1024, 2048] as const;
@@ -1166,6 +1205,23 @@ const VIT_EMBED_CENTER_INDEX = 1;
 const VIT_CURRENT_EMBED_FILL = 'rgba(100, 130, 165, 0.55)';
 /** How recently a decode/embedding must have arrived to count as "active". */
 const VIT_ACTIVE_MS = 2500;
+/** Clear cosine decoder readings when no new Pi embedding within this window. */
+const VIT_READINGS_STALE_MS = 8000;
+/** Clear YOLO readings when no new video frame within this window. */
+const YOLO_READINGS_STALE_MS = 5000;
+/** Widget poll — slower than stop hook; display is latched until readings meaningfully change. */
+const YOLO_WIDGET_POLL_MS = 1500;
+
+/** Stable key for YOLO widget readout — label + rounded confidence only (avoids constant refresh). */
+function yoloReadingDisplayKey(
+  latest: YoloStatusResponse['latest'],
+): string | null {
+  if (!latest?.detections?.length) return null;
+  return latest.detections
+    .slice(0, 3)
+    .map((d) => `${d.label}:${Math.round(d.confidence_percent)}`)
+    .join('|');
+}
 
 function snapVitEmbedSize(value: number): (typeof VIT_EMBED_SIZE_OPTIONS)[number] {
   return VIT_EMBED_SIZE_OPTIONS.reduce((best, n) =>
@@ -1299,7 +1355,7 @@ function vitMatchConfidenceColor(pct: number, threshold: number): string {
   return accents.red;
 }
 
-function VitDecoderWidget({ variant }: { variant: 'cosine' | 'yolo' }) {
+function VitDecoderWidget() {
   const [status, setStatus] = useState<VitStatusResponse | null>(null);
   const streamRunning = useMetricsStore((s: MetricsState) => s.streamRunning);
   const mqttLink = useMetricsStore((s: MetricsState) => s.mqttLinkStatus);
@@ -1418,16 +1474,18 @@ function VitDecoderWidget({ variant }: { variant: 'cosine' | 'yolo' }) {
   };
 
   const latest = status?.latest ?? null;
-  // Show detections while MQTT confirms the encoder pipeline is active.
-  const displayLatest = encoderLive ? latest : null;
-
-  // Both widgets always render; match labels/confidence only in the active mode.
   const detectionMode = status?.detection_mode ?? 'cloud_aware';
   const yoloActive = detectionMode === 'cloud_aware';
-  const showCosineData = variant === 'cosine' && !yoloActive;
-  const widgetTitle = variant === 'cosine' ? 'Cosine Similarity Decoder' : 'YOLO Model';
-  const HeaderIcon = variant === 'yolo' ? Radar : ScanEye;
-  const headerAccent = variant === 'yolo' ? accents.cyan : accents.purple;
+  const showCosineData = !yoloActive;
+  const embeddingFresh = status?.readings_fresh ?? (
+    vitIsoAgeMs(status?.activity?.last_embedding_at) != null
+    && (vitIsoAgeMs(status?.activity?.last_embedding_at) ?? Infinity) < (status?.readings_stale_ms ?? VIT_READINGS_STALE_MS)
+  );
+  const displayLatest = showCosineData && embeddingFresh ? latest : null;
+
+  const widgetTitle = 'Cosine Similarity Decoder';
+  const HeaderIcon = ScanEye;
+  const headerAccent = accents.purple;
   const referenceReady = status?.reference_ready ?? false;
 
   const isReferenceMatch = showCosineData && displayLatest?.match_mode === 'reference_embedding';
@@ -1445,10 +1503,6 @@ function VitDecoderWidget({ variant }: { variant: 'cosine' | 'yolo' }) {
     : accents.red;
 
   const matchSource = 'Pi cache-miss embedding';
-
-  const modeStatusLabel = encoderLive
-    ? 'CACHE AWARE — COSINE MATCH'
-    : 'CACHE AWARE — WAITING PI';
 
   // Decoder activity pill — "MODEL READY" only while actively decoding; otherwise
   // shows what the server is doing (waiting, receiving embeddings, errors, etc.).
@@ -1470,8 +1524,12 @@ function VitDecoderWidget({ variant }: { variant: 'cosine' | 'yolo' }) {
   const libraryCategoryCount = status?.reference_library_categories?.length ?? 0;
 
   const detectionHint = (() => {
+    if (!showCosineData) return '\u00A0';
     if (!referenceReady) {
       return 'Capture reference snapshots in Live Reference Capture (any category)';
+    }
+    if (!embeddingFresh) {
+      return 'Cache Aware — waiting for a Pi cache-miss embedding';
     }
     if (isReferenceMatch && referenceMatch) {
       const cat = referenceMatch.category ? ` · ${referenceMatch.category}` : '';
@@ -1507,15 +1565,6 @@ function VitDecoderWidget({ variant }: { variant: 'cosine' | 'yolo' }) {
           <span className="truncate">{widgetTitle}</span>
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          {variant === 'cosine' && !yoloActive ? (
-            <span className="pill" style={{
-              padding: '1px 6px', fontSize: 8, fontWeight: 700,
-              background: 'rgba(139,92,246,0.18)',
-              color: accents.purple,
-            }}>
-              {modeStatusLabel}
-            </span>
-          ) : null}
           <span className="w-1.5 h-1.5 rounded-full"
             style={{ background: dotActive ? accents.green : 'var(--text-muted)',
               boxShadow: dotActive ? `0 0 5px ${accents.green}` : 'none' }} />
@@ -1646,8 +1695,7 @@ function VitDecoderWidget({ variant }: { variant: 'cosine' | 'yolo' }) {
         ) : null}
       </div>
 
-      {/* Embedding size — Cosine Similarity Decoder only */}
-      {variant === 'cosine' ? (
+      {/* Embedding size */}
       <div className="flex-shrink-0 flex flex-col gap-1">
         <div className="flex items-center justify-between" style={{ fontSize: 9, color: 'var(--text-muted)' }}>
           <span className="uppercase tracking-wider">Embedding Size</span>
@@ -1701,7 +1749,6 @@ function VitDecoderWidget({ variant }: { variant: 'cosine' | 'yolo' }) {
           ))}
         </div>
       </div>
-      ) : null}
 
       {/* Session controls */}
       <div className="flex-shrink-0 flex items-center gap-2">
@@ -1746,11 +1793,182 @@ function VitDecoderWidget({ variant }: { variant: 'cosine' | 'yolo' }) {
 }
 
 function CosineSimilarityDecoderWidget() {
-  return <VitDecoderWidget variant="cosine" />;
+  return <VitDecoderWidget />;
 }
 
 function YoloModelWidget() {
-  return <VitDecoderWidget variant="yolo" />;
+  const [yoloStatus, setYoloStatus] = useState<YoloStatusResponse | null>(null);
+  const [displayLatest, setDisplayLatest] = useState<YoloStatusResponse['latest']>(null);
+  const displayKeyRef = useRef<string | null>(null);
+  const streamRunning = useMetricsStore((s: MetricsState) => s.streamRunning);
+
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/yolo/status', { cache: 'no-store' });
+        if (!res.ok || !alive) return;
+        const data = await res.json() as YoloStatusResponse;
+        if (!alive) return;
+        setYoloStatus(data);
+        if (data.latest) {
+          const key = yoloReadingDisplayKey(data.latest);
+          if (key && key !== displayKeyRef.current) {
+            displayKeyRef.current = key;
+            setDisplayLatest(data.latest);
+          }
+        }
+      } catch { /* backend unreachable */ }
+    };
+    poll();
+    const id = setInterval(poll, YOLO_WIDGET_POLL_MS);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const yoloReadingsFresh = yoloStatus?.readings_fresh ?? (
+    vitIsoAgeMs(yoloStatus?.last_frame_at) != null
+    && (vitIsoAgeMs(yoloStatus?.last_frame_at) ?? Infinity) < (yoloStatus?.readings_stale_ms ?? YOLO_READINGS_STALE_MS)
+  );
+  const yoloTop = displayLatest?.top_detection ?? null;
+  const yoloTopConf = yoloTop?.confidence_percent ?? null;
+  const yoloThresholdPct = yoloStatus?.confidence_threshold_percent ?? 25;
+  const yoloTopMatches = displayLatest?.detections?.slice(0, 3) ?? [];
+  const sessionCount = yoloStatus?.session_count ?? 0;
+  const hasDetections = yoloTopMatches.length > 0;
+  const hasLatchedReadings = hasDetections;
+
+  const confColor =
+    yoloTopConf == null ? 'var(--text-muted)'
+    : yoloTopConf >= yoloThresholdPct ? accents.green
+    : yoloTopConf >= yoloThresholdPct * 0.6 ? accents.yellow
+    : accents.red;
+
+  const dotActive = Boolean(
+    yoloStatus?.model_ready && (yoloReadingsFresh || hasLatchedReadings) && hasDetections,
+  );
+
+  const detectionHint = (() => {
+    if (yoloStatus?.model_error) return `YOLO error — ${yoloStatus.model_error}`;
+    if (!yoloStatus?.model_ready) return 'Loading YOLOv8 (Ultralytics/YOLOv8)…';
+    if (!streamRunning && !yoloStatus?.video_active && !hasLatchedReadings) return 'Start webrtc_server.py on the Pi';
+    if (!yoloReadingsFresh && !hasLatchedReadings) return 'YOLOv8 — waiting for live video frames';
+    if (yoloTop) return yoloTop.label;
+    return 'YOLOv8 — scanning live video feed';
+  })();
+
+  const clearSession = async () => {
+    try {
+      await fetch('/api/yolo/clear', { method: 'POST' });
+      displayKeyRef.current = null;
+      setDisplayLatest(null);
+      setYoloStatus((prev) => prev ? { ...prev, latest: null, session_count: 0, detection_count: 0 } : prev);
+    } catch { /* ignore */ }
+  };
+
+  return (
+    <div className="h-full flex flex-col gap-1.5 min-h-0">
+      <div className="flex-shrink-0 flex items-center justify-between gap-2 uppercase tracking-wider"
+        style={{ color: 'var(--text-muted)', fontSize: 9, lineHeight: 1.1 }}>
+        <div className="flex items-center gap-1 min-w-0">
+          <Radar size={11} style={{ color: accents.cyan, flexShrink: 0 }} />
+          <span className="truncate">YOLO Model</span>
+        </div>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          <span className="w-1.5 h-1.5 rounded-full"
+            style={{ background: dotActive ? accents.green : 'var(--text-muted)',
+              boxShadow: dotActive ? `0 0 5px ${accents.green}` : 'none' }} />
+        </div>
+      </div>
+
+      <div className="flex-shrink-0 rounded-xl px-3 py-2"
+        style={{ background: 'rgba(0,0,0,0.18)', border: '1px solid var(--stroke-subtle)' }}>
+        <div className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+          Top Detection
+        </div>
+        <div className="truncate" style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.25 }}>
+          {detectionHint}
+        </div>
+        <div className="flex items-baseline gap-1.5" style={{ marginTop: 2 }}>
+          <span style={{ fontSize: 22, fontWeight: 800, color: confColor, fontFamily: 'monospace' }}>
+            {yoloTopConf != null ? yoloTopConf.toFixed(1) : '--'}
+          </span>
+          <span style={{ fontSize: 12, fontWeight: 700, color: confColor }}>%</span>
+          <span className="uppercase" style={{ fontSize: 8, color: 'var(--text-muted)', marginLeft: 4 }}>
+            confidence
+          </span>
+        </div>
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1.5">
+        <div className="uppercase tracking-wider" style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+          Detections
+        </div>
+        {yoloTopMatches.length > 0 ? (
+          yoloTopMatches.map((det, index) => {
+            const pct = det.confidence_percent;
+            const rowColor = vitMatchConfidenceColor(pct, yoloThresholdPct);
+            return (
+              <div key={`${det.label}-${index}`} className="flex flex-col gap-0.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate" style={{ fontSize: 11, color: rowColor }}>
+                    {`${index + 1}. ${det.label}`}
+                  </span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: rowColor, fontFamily: 'monospace' }}>
+                    {pct.toFixed(1)}%
+                  </span>
+                </div>
+                <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--secondary)' }}>
+                  <div style={{
+                    width: `${Math.max(0, Math.min(100, pct))}%`,
+                    height: '100%', background: rowColor, transition: 'width 0.2s',
+                  }} />
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-center px-2" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            {yoloStatus?.model_ready
+              ? (yoloReadingsFresh || hasLatchedReadings
+                  ? 'YOLOv8 — waiting for objects in the live video feed'
+                  : 'YOLOv8 — waiting for live video frames')
+              : 'Loading YOLOv8 model…'}
+          </div>
+        )}
+        {yoloTopMatches.length > 0 && (
+          <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+            {`threshold ${yoloThresholdPct.toFixed(0)}% · YOLOv8 live feed · top ${yoloTopMatches.length}`}
+          </span>
+        )}
+        <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+          {yoloStatus?.model_ready
+            ? `${yoloStatus.model_family} · ${yoloStatus.model_file} · ${yoloStatus.model_repo}`
+            : 'Ultralytics/YOLOv8'}
+        </span>
+      </div>
+
+      <div className="flex-shrink-0 flex items-center gap-2">
+        <span style={{ fontSize: 9, color: 'var(--text-muted)' }}>
+          {sessionCount} frame{sessionCount === 1 ? '' : 's'}
+        </span>
+        <button
+          onClick={clearSession}
+          disabled={sessionCount === 0}
+          className="ml-auto flex items-center gap-1"
+          title={sessionCount === 0 ? 'No frames processed yet' : 'Clear YOLO session'}
+          style={{
+            padding: '3px 8px', borderRadius: 6, fontSize: 9, fontWeight: 700, letterSpacing: '0.06em',
+            border: '1px solid var(--stroke-subtle)',
+            background: 'rgba(255,255,255,0.04)', color: 'var(--text-muted)',
+            cursor: sessionCount === 0 ? 'not-allowed' : 'pointer',
+            opacity: sessionCount === 0 ? 0.5 : 1,
+          }}
+        >
+          <Trash2 size={11} />
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export const vitDecoderDef: WidgetDefinition = {
@@ -2348,6 +2566,7 @@ function StopTestBenchWidget() {
     cacheDetectPollCountRef.current = 0;
     setFrozenElapsedMs(null);
     setStopLabelEstopArmed(false);
+    setYoloStopArmed(false);
     setCommandSentAt(null);
     setActiveStart(null);
     setTestBenchSessionActive(false);
@@ -2575,7 +2794,7 @@ function StopTestBenchWidget() {
     movementDeadlineRef.current = Date.now() + MOVEMENT_WAIT_MS;
 
     let ignoreDecodeKey: string | null = null;
-    if (benchHasDashboardBottleStop(benchMode)) {
+    if (benchUsesCosineSimilarity(benchMode)) {
       try {
         const vitRes = await fetch('/api/vit/status', { cache: 'no-store' });
         if (vitRes.ok) {
@@ -2584,6 +2803,16 @@ function StopTestBenchWidget() {
         }
       } catch { /* VIT may be offline */ }
       setStopLabelEstopArmed(true, ignoreDecodeKey);
+    } else if (benchHasYoloBottleStop(benchMode)) {
+      let ignoreYoloKey: string | null = null;
+      try {
+        const yoloRes = await fetch('/api/yolo/status', { cache: 'no-store' });
+        if (yoloRes.ok) {
+          const yolo = await yoloRes.json() as YoloStatusForBottleStop;
+          ignoreYoloKey = yoloStopEventKey(yolo);
+        }
+      } catch { /* YOLO may be offline */ }
+      setYoloStopArmed(true, ignoreYoloKey);
     }
     setCommandSentAt(commandTs);
     setTick((n) => n + 1);
@@ -2928,7 +3157,7 @@ function StopTestBenchWidget() {
         : 'Waiting for Raspberry Pi to confirm cache-aware ready — Start is disabled.';
     }
     if (effectiveStopMode === 'cloud_aware') {
-      return 'YOLO — Pi sends every embedding (Cae_OFF); cosine similarity matching is off on the dashboard. Needs VIT.py running on the Pi.';
+      return `YOLO — dashboard stops when a bottle is detected at or above Stop Similarity (${loadStopSimilarityThresholdPct()}%). Needs webrtc_server.py on the Pi.`;
     }
     return '';
   })();

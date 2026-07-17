@@ -8,7 +8,7 @@ import time
 import json
 from app.services.backhaul_delay import backhaul_delay, format_hop_suffix
 from config import (
-    BROKER_PORT, CACHE_AWARE_READY_TOPIC, COSSIM_TOPIC, DETECT_STATUS_TOPIC, DRIVE_STATUS_TOPIC, GRID_TOPIC, TOPIC, MQTT_TIMEOUT, PUBLISH_TIMEOUT,
+    BROKER_PORT, CACHE_AWARE_READY_TOPIC, CAMERA_FRAME_TOPIC, COSSIM_TOPIC, DETECT_STATUS_TOPIC, DRIVE_STATUS_TOPIC, GRID_TOPIC, TOPIC, MQTT_TIMEOUT, PUBLISH_TIMEOUT,
     SAFETY_TOPIC, EVENT_LOG_MAX, EVENT_LOG_MESSAGE_MAXLEN,
 )
 
@@ -117,6 +117,7 @@ class MQTTService:
             self.mqtt_client.subscribe(DRIVE_STATUS_TOPIC)
             self.mqtt_client.subscribe(CACHE_AWARE_READY_TOPIC)
             self.mqtt_client.subscribe(DETECT_STATUS_TOPIC)
+            self.mqtt_client.subscribe(CAMERA_FRAME_TOPIC)
             self.mqtt_client.loop_start()
             self.connected = True
             msg = f"Connected to MQTT broker at {self.broker_ip}:{BROKER_PORT}"
@@ -141,6 +142,7 @@ class MQTTService:
         client.subscribe(DRIVE_STATUS_TOPIC)
         client.subscribe(CACHE_AWARE_READY_TOPIC)
         client.subscribe(DETECT_STATUS_TOPIC)
+        client.subscribe(CAMERA_FRAME_TOPIC)
 
     def _parse_detect_status(self, raw: str) -> dict | None:
         text = raw.strip()
@@ -453,10 +455,22 @@ class MQTTService:
         }
 
     def _on_message(self, _client, _userdata, message) -> None:
-        # Simulate wired-backhaul receive delay (non-video path).
+        raw = message.payload.decode(errors="replace")
+
+        # Camera frames: YOLO applies backhaul hop delay on ingest (not here).
+        if message.topic == CAMERA_FRAME_TOPIC:
+            try:
+                payload = json.loads(raw) if raw.strip() else {}
+            except json.JSONDecodeError:
+                return
+            if isinstance(payload, dict):
+                from app.services.yolo_service import yolo_service
+                yolo_service.handle_mqtt_frame(payload)
+            return
+
+        # Simulate wired-backhaul receive delay (non-video MQTT path).
         hop_ms = backhaul_delay.apply()
         hop = format_hop_suffix(hop_ms)
-        raw = message.payload.decode(errors="replace")
         if message.topic == TOPIC:
             self.log_event("info", f"MQTT <- {TOPIC}: {raw}{hop}", tag=TOPIC)
             if raw == "estop_on":

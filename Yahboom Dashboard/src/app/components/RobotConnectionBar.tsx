@@ -199,7 +199,7 @@ export function RobotConnectionBar() {
           onKeyDown={onHopKeyDown}
           disabled={!hopsEnabled}
           aria-label="Backhaul delay hops (h)"
-          title="Backhaul delay hops (h) — simulated network delay on all non-video MQTT traffic"
+          title="Backhaul delay hops (h) — simulated network delay on MQTT traffic and YOLO frame ingest"
           className="w-12 px-2 py-1 rounded-lg outline-none"
           style={{
             background: 'var(--input-background)',

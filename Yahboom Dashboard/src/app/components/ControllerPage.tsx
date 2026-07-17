@@ -9,7 +9,7 @@ import { useMetricsStore, useViewStore } from '../store';
 import type { ViewStore } from '../store';
 import type { MetricsState } from '../types';
 import {
-  useConnectionSync, useDriveStatusPoll, useCloudAwareStopLabelEstop, useGlobalShortcuts,
+  useConnectionSync, useDriveStatusPoll, useCloudAwareStopLabelEstop, useYoloBottleStop, useGlobalShortcuts,
   useGridStatusPoll, useKeyboardCamera, useKeyboardMovement, useSafetyStatusPoll,
 } from '../hooks';
 import { VideoFeedCore } from '../../lib/VideoFeed';
@@ -345,6 +345,7 @@ export function ControllerPage({
 
   useConnectionSync();
   useCloudAwareStopLabelEstop();
+  useYoloBottleStop();
   useSafetyStatusPoll();
   useGridStatusPoll();
   useDriveStatusPoll();

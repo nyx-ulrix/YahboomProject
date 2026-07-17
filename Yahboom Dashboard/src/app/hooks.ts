@@ -9,6 +9,7 @@ import {
   setCloudAwareStopEnabled,
 } from '../lib/cloudAwareStopLabelEstop';
 import { useCosineSimilarityCheck } from '../lib/useCosineSimilarityCheck';
+import { processYoloStatusForBottleStop } from '../lib/yoloBottleStop';
 import type { LiveGridData, MetricsState } from './types';
 
 // Polls /api/status every 3 s and writes the backend's
@@ -493,6 +494,28 @@ export function useCloudAwareStopLabelEstop() {
         if (!vitRes.ok || !alive) return;
         const vit = await vitRes.json();
         processVitStatusForStopLabelEstop(vit);
+      } catch {
+        /* backend unreachable */
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 500);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+}
+
+/** YOLO bottle stop while cloud_aware (YOLO) test-bench mode is active. */
+export function useYoloBottleStop() {
+  useEffect(() => {
+    let alive = true;
+
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/yolo/status', { cache: 'no-store' });
+        if (!res.ok || !alive) return;
+        const status = await res.json();
+        processYoloStatusForBottleStop(status);
       } catch {
         /* backend unreachable */
       }

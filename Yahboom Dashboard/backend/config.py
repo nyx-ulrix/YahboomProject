@@ -18,6 +18,7 @@ DRIVE_STATUS_TOPIC = os.getenv("MQTT_DRIVE_STATUS_TOPIC", "yahboom/drive/status"
 CACHE_AWARE_READY_TOPIC = os.getenv(
     "MQTT_CACHE_AWARE_READY_TOPIC", "yahboom/cache_aware/ready")
 DETECT_STATUS_TOPIC = os.getenv("MQTT_DETECT_STATUS_TOPIC", "yahboom/detect/status")
+CAMERA_FRAME_TOPIC = os.getenv("MQTT_CAMERA_FRAME_TOPIC", "yahboom/camera/frame")
 # Flask settings
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "3000"))
@@ -134,6 +135,16 @@ _detection_mode = os.getenv("VIT_CLIENT_DETECTION_MODE", "cloud_aware")
 VIT_CLIENT_DETECTION_MODE = (
     "cloud_aware" if _detection_mode == "edge_aware" else _detection_mode
 )
+
+# YOLOv8 object detection on the live video relay (Ultralytics/YOLOv8 on Hugging Face).
+# https://huggingface.co/Ultralytics/YOLOv8
+YOLO_ENABLED = os.getenv("YOLO_ENABLED", "true").lower() in ("true", "1", "yes", "on")
+YOLO_HF_REPO = os.getenv("YOLO_HF_REPO", "Ultralytics/YOLOv8")
+YOLO_MODEL_FILE = os.getenv("YOLO_MODEL", "yolov8n.pt")
+YOLO_CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
+YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", "640"))
+YOLO_INFERENCE_INTERVAL_SEC = float(os.getenv("YOLO_INFERENCE_INTERVAL_SEC", "0.4"))
+YOLO_READINGS_STALE_MS = int(os.getenv("YOLO_READINGS_STALE_MS", "5000"))
 
 # SLAM settings
 # yahboom/scan  – raw LaserScan JSON (angle_min, angle_increment, ranges[])

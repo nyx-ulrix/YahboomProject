@@ -16,10 +16,12 @@ def create_app():
     from app.routes.vit_routes import vit_bp
     from app.routes.test_bench_routes import test_bench_bp
     from app.routes.backhaul_routes import backhaul_bp
+    from app.routes.yolo_routes import yolo_bp
     app.register_blueprint(bot_bp)
     app.register_blueprint(stream_bp)
     app.register_blueprint(slam_bp)
     app.register_blueprint(vit_bp)
+    app.register_blueprint(yolo_bp)
     app.register_blueprint(test_bench_bp)
     app.register_blueprint(backhaul_bp)
 
@@ -33,6 +35,10 @@ def create_app():
     # Start VIT scene-decoder service (auto-connects when main MQTT connects)
     from app.services.vit.vit_service import vit_service
     vit_service.start_background()
+
+    # YOLOv8 on live video relay (Ultralytics/YOLOv8)
+    from app.services.yolo_service import yolo_service
+    yolo_service.start_background()
 
     # Auto-connect the main MQTT service to the default broker on startup so the
     # backend (and the VIT monitor that mirrors it) is connected without needing

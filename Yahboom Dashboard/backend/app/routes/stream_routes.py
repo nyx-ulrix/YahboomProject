@@ -141,16 +141,15 @@ def _apply_probe(probe: dict) -> None:
         vit_service.stop_embedding_size_requests()
 
     if running and upstream:
+        video_relay.start(upstream)
         if VIDEO_USE_MJPEG_RELAY:
             mqtt_service.video_stream_url = _client_feed_url()
-            video_relay.start(upstream)
             if upstream != prev_upstream:
                 _video_debug(f"Relay ingesting Pi stream — clients use {_client_feed_url()}")
         else:
             mqtt_service.video_stream_url = upstream
-            video_relay.stop()
             if upstream != prev_upstream:
-                _video_debug(f"WebRTC server — clients use {upstream}")
+                _video_debug(f"WebRTC server — clients use {upstream} (relay ingesting for YOLO)")
     else:
         mqtt_service.video_stream_url = None
         video_relay.stop()

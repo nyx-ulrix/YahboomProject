@@ -1136,6 +1136,11 @@ class VITService:
         except Exception as exc:
             log.debug("Cloud-aware estop hook failed: %s", exc)
 
+    def _embedding_input_fresh_locked(self) -> bool:
+        """True only when a new Pi embedding arrived recently."""
+        age = _iso_age_ms(self._last_embedding_at)
+        return age is not None and age < _ENCODER_LIVE_MS
+
     def _encoder_live_locked(self) -> bool:
         """True when recent MQTT proves the encoder pipeline is producing data."""
         for ts in (self._last_embedding_at, self._last_decode_at, self._last_status_at):
@@ -1171,13 +1176,11 @@ class VITService:
         except Exception:
             stream_on = False
         with self._lock:
+            if self._latest is not None and not self._embedding_input_fresh_locked():
+                self._latest = None
             encoder_live = self._encoder_live_locked()
-            # Hide stale detections only when the encoder pipeline is fully idle.
-            latest = (
-                dict(self._latest)
-                if self._latest and encoder_live
-                else None
-            )
+            readings_fresh = self._embedding_input_fresh_locked()
+            latest = dict(self._latest) if self._latest and readings_fresh else None
             session_count = len(self._session)
             activity = {
                 "embeddings_received": self._embeddings_received,
@@ -1225,6 +1228,8 @@ class VITService:
             "broker_ip": self._broker_ip,
             "vit_server_running": server_on,
             "encoder_live": encoder_live,
+            "readings_fresh": readings_fresh,
+            "readings_stale_ms": _ENCODER_LIVE_MS,
             "model_enabled": decoder is not None,
             "model_ready": bool(decoder and decoder.ready),
             "model_error": decoder.error if decoder else "model disabled",
