@@ -15,6 +15,7 @@ export function RobotConnectionBar() {
   const [defaultIp, setDefaultIp] = useState('');
   const [showHost, setShowHost] = useState(false);
   const [hopH, setHopH] = useState('');
+  const [hopsEnabled, setHopsEnabled] = useState(true);
 
   useEffect(() => {
     setDraftIp(brokerIp);
@@ -30,11 +31,34 @@ export function RobotConnectionBar() {
   useEffect(() => {
     fetch('/api/backhaul/config')
       .then((r) => r.json())
-      .then((d: { h?: number }) => {
+      .then((d: { h?: number; enabled?: boolean }) => {
         if (typeof d.h === 'number') setHopH(String(d.h));
+        if (typeof d.enabled === 'boolean') setHopsEnabled(d.enabled);
       })
       .catch(() => {});
   }, []);
+
+  const toggleHopsEnabled = () => {
+    const next = !hopsEnabled;
+    setHopsEnabled(next);
+    fetch('/api/backhaul/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: next }),
+    })
+      .then((r) => r.json())
+      .then((d: { enabled?: boolean; h?: number }) => {
+        const enabled = typeof d.enabled === 'boolean' ? d.enabled : next;
+        setHopsEnabled(enabled);
+        if (typeof d.h === 'number') setHopH(String(d.h));
+        useMetricsStore.getState().pushEvent(
+          'info',
+          `Backhaul delay simulation ${enabled ? 'enabled' : 'disabled'}`,
+          'mqtt',
+        );
+      })
+      .catch(() => setHopsEnabled(!next));
+  };
 
   const commitHopH = () => {
     const parsed = Number(hopH);
@@ -70,6 +94,7 @@ export function RobotConnectionBar() {
 
   const statusColor = isConnected ? 'var(--state-success)' : 'var(--text-muted)';
   const statusTitle = isConnected ? `Connected · ${brokerIp}` : 'Disconnected';
+  const hopDisplay = hopsEnabled ? hopH : '0';
 
   return (
     <div
@@ -140,22 +165,41 @@ export function RobotConnectionBar() {
         }}
       />
 
-      <label
-        className="flex items-center gap-1 shrink-0"
-        title="Backhaul delay hops (h) — simulated network delay on all non-video MQTT traffic"
-        style={{ color: 'var(--text-muted)', fontSize: 10, fontWeight: 600 }}
-      >
-        hops
+      <div className="flex items-center gap-1 shrink-0">
+        <button
+          type="button"
+          onClick={toggleHopsEnabled}
+          title={
+            hopsEnabled
+              ? 'Disable backhaul delay simulation on non-video MQTT traffic'
+              : 'Enable backhaul delay simulation on non-video MQTT traffic'
+          }
+          className="pill shrink-0"
+          style={{
+            background: hopsEnabled ? 'var(--bg-elevated)' : 'transparent',
+            color: hopsEnabled ? 'var(--text-primary)' : 'var(--text-muted)',
+            border: `1px solid ${hopsEnabled ? 'var(--stroke-subtle)' : 'transparent'}`,
+            padding: '4px 8px',
+            fontWeight: 600,
+            fontSize: 10,
+          }}
+          aria-pressed={hopsEnabled}
+          aria-label={hopsEnabled ? 'Hops on' : 'Hops off'}
+        >
+          {hopsEnabled ? 'hops on' : 'hops off'}
+        </button>
         <input
           type="number"
           min={1}
           step={1}
           inputMode="numeric"
-          value={hopH}
+          value={hopDisplay}
           onChange={(e) => setHopH(e.target.value)}
           onBlur={commitHopH}
           onKeyDown={onHopKeyDown}
+          disabled={!hopsEnabled}
           aria-label="Backhaul delay hops (h)"
+          title="Backhaul delay hops (h) — simulated network delay on all non-video MQTT traffic"
           className="w-12 px-2 py-1 rounded-lg outline-none"
           style={{
             background: 'var(--input-background)',
@@ -163,9 +207,10 @@ export function RobotConnectionBar() {
             color: 'var(--text-primary)',
             fontSize: 11,
             fontFamily: 'monospace',
+            opacity: hopsEnabled ? 1 : 0.45,
           }}
         />
-      </label>
+      </div>
     </div>
   );
 }
