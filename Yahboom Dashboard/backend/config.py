@@ -14,11 +14,14 @@ TOPIC = os.getenv("MQTT_TOPIC", "yahboom/cmd")
 COSSIM_TOPIC = os.getenv("MQTT_COSSIM_TOPIC", "yahboom/cossim")
 SAFETY_TOPIC = os.getenv("MQTT_SAFETY_TOPIC", "yahboom/safety/status")
 GRID_TOPIC = os.getenv("MQTT_GRID_TOPIC", "yahboom/grid")
-DRIVE_STATUS_TOPIC = os.getenv("MQTT_DRIVE_STATUS_TOPIC", "yahboom/drive/status")
+DRIVE_STATUS_TOPIC = os.getenv(
+    "MQTT_DRIVE_STATUS_TOPIC", "yahboom/drive/status")
 CACHE_AWARE_READY_TOPIC = os.getenv(
     "MQTT_CACHE_AWARE_READY_TOPIC", "yahboom/cache_aware/ready")
-DETECT_STATUS_TOPIC = os.getenv("MQTT_DETECT_STATUS_TOPIC", "yahboom/detect/status")
-CAMERA_FRAME_TOPIC = os.getenv("MQTT_CAMERA_FRAME_TOPIC", "yahboom/camera/frame")
+DETECT_STATUS_TOPIC = os.getenv(
+    "MQTT_DETECT_STATUS_TOPIC", "yahboom/detect/status")
+CAMERA_FRAME_TOPIC = os.getenv(
+    "MQTT_CAMERA_FRAME_TOPIC", "yahboom/camera/frame")
 # Flask settings
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "3000"))
@@ -74,8 +77,10 @@ PI_CACHE_AWARE_LOG = os.getenv(
     "PI_CACHE_AWARE_LOG", "/tmp/yahboom_cache_aware.log")
 PI_CACHE_AWARE_TERMINAL_TITLE = os.getenv(
     "PI_CACHE_AWARE_TERMINAL_TITLE", "Cache Aware Offloading")
-CACHE_SCRIPT_START_TIMEOUT_SEC = float(os.getenv("CACHE_SCRIPT_START_TIMEOUT_SEC", "30"))
-CACHE_SCRIPT_START_POLL_SEC = float(os.getenv("CACHE_SCRIPT_START_POLL_SEC", "1"))
+CACHE_SCRIPT_START_TIMEOUT_SEC = float(
+    os.getenv("CACHE_SCRIPT_START_TIMEOUT_SEC", "30"))
+CACHE_SCRIPT_START_POLL_SEC = float(
+    os.getenv("CACHE_SCRIPT_START_POLL_SEC", "1"))
 # Legacy log snippet from removed cache_aware_offloading.py (readiness is MQTT-only now)
 CACHE_SCRIPT_EMBEDDING_READY_SNIPPET = os.getenv(
     "CACHE_SCRIPT_EMBEDDING_READY_SNIPPET",
@@ -98,14 +103,16 @@ VIT_CONFIDENCE_THRESHOLD = float(os.getenv("VIT_CONFIDENCE_THRESHOLD", "60.0"))
 # Optional: set VIT_EMBED_DIM in .env to force 128/256/512-dim decode (default: auto per payload).
 
 # Cloud image-to-image reference matching (vit_service.py — copy Pi cache_embeddings.json)
-_VIT_SERVICES_DIR = Path(__file__).resolve().parent / "app" / "services" / "vit"
+_VIT_SERVICES_DIR = Path(__file__).resolve().parent / \
+    "app" / "services" / "vit"
 VIT_REFERENCE_EMBEDDINGS_FILE = os.getenv(
     "VIT_REFERENCE_EMBEDDINGS_FILE",
     str(_VIT_SERVICES_DIR / "reference_embeddings.json"),
 )
 VIT_REFERENCE_LABEL = os.getenv("VIT_REFERENCE_LABEL", "target bottle")
 # Category slug that triggers cloud stop (client scans the full library for display).
-VIT_STOP_REFERENCE_CATEGORY = os.getenv("VIT_STOP_REFERENCE_CATEGORY", "target_bottle")
+VIT_STOP_REFERENCE_CATEGORY = os.getenv(
+    "VIT_STOP_REFERENCE_CATEGORY", "target_bottle")
 VIT_REFERENCE_MATCH_ENABLED = os.getenv(
     "VIT_REFERENCE_MATCH_ENABLED", "true"
 ).lower() in ("true", "1", "yes", "on")
@@ -127,7 +134,8 @@ VIT_REFERENCE_LIBRARY_DIR = os.getenv(
 # client matches Pi embeddings against the dashboard reference library); the
 # backend only relays embeddings and records the reported match. Optional
 # text-label decode is OFF by default (needs torch + open_clip on the host).
-VIT_ENABLE_MODEL = os.getenv("VIT_ENABLE_MODEL", "false").lower() in ("true", "1", "yes", "on")
+VIT_ENABLE_MODEL = os.getenv(
+    "VIT_ENABLE_MODEL", "false").lower() in ("true", "1", "yes", "on")
 # Default detection mode mirrored to vit_service (cloud_aware | cache_aware_offloading).
 # Cloud Only = Pi sends every embedding (Cae_OFF); Cache Aware = Pi sends only
 # cache-miss embeddings (Cae_ON). The browser matches in both.
@@ -138,12 +146,14 @@ VIT_CLIENT_DETECTION_MODE = (
 
 # YOLOv8 object detection on the live video relay (Ultralytics/YOLOv8 on Hugging Face).
 # https://huggingface.co/Ultralytics/YOLOv8
-YOLO_ENABLED = os.getenv("YOLO_ENABLED", "true").lower() in ("true", "1", "yes", "on")
+YOLO_ENABLED = os.getenv("YOLO_ENABLED", "true").lower() in (
+    "true", "1", "yes", "on")
 YOLO_HF_REPO = os.getenv("YOLO_HF_REPO", "Ultralytics/YOLOv8")
-YOLO_MODEL_FILE = os.getenv("YOLO_MODEL", "yolov8n.pt")
+YOLO_MODEL_FILE = os.getenv("YOLO_MODEL", "yolov8x.pt")
 YOLO_CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
 YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", "640"))
-YOLO_INFERENCE_INTERVAL_SEC = float(os.getenv("YOLO_INFERENCE_INTERVAL_SEC", "0.4"))
+YOLO_INFERENCE_INTERVAL_SEC = float(
+    os.getenv("YOLO_INFERENCE_INTERVAL_SEC", "0.4"))
 YOLO_READINGS_STALE_MS = int(os.getenv("YOLO_READINGS_STALE_MS", "5000"))
 
 # SLAM settings

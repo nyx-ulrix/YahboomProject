@@ -64,6 +64,30 @@ class YoloService:
         self._inference_count = 0
         self._started = False
         self._frame_listener = self._on_frame
+        self._detection_mode = "cloud_aware"
+
+    def _is_inference_enabled(self) -> bool:
+        with self._lock:
+            return self._enabled
+
+    def sync_detection_mode(self, mode: str) -> bool:
+        """Run YOLO inference only in cloud_aware (YOLO) test-bench mode."""
+        if mode == "edge_aware":
+            mode = "cloud_aware"
+        should_run = mode == "cloud_aware" and YOLO_ENABLED
+        with self._lock:
+            prev_mode = self._detection_mode
+            was_enabled = self._enabled
+            self._detection_mode = mode
+        if not should_run:
+            self.clear_session()
+        enabled = self.set_enabled(should_run)
+        if prev_mode != mode or was_enabled != enabled:
+            if enabled:
+                log.info("YOLO running — detection mode %s", mode)
+            else:
+                log.info("YOLO paused — detection mode %s", mode)
+        return enabled
 
     def start_background(self) -> None:
         if self._started:
@@ -71,7 +95,12 @@ class YoloService:
         self._started = True
         from app.services.video_relay import video_relay
         video_relay.add_frame_listener(self._frame_listener)
-        if self._enabled:
+        try:
+            from app.services.vit.vit_service import vit_service
+            self.sync_detection_mode(vit_service.get_detection_mode())
+        except Exception:
+            pass
+        if self._is_inference_enabled():
             threading.Thread(
                 target=self._load_model_async,
                 name="yolo-model-load",
@@ -173,6 +202,8 @@ class YoloService:
 
     def handle_mqtt_frame(self, payload: dict[str, Any]) -> None:
         """Decode a JPEG frame published by webrtc_server.py on yahboom/camera/frame."""
+        if not self._is_inference_enabled():
+            return
         jpg_b64 = payload.get("jpg_b64")
         if not jpg_b64:
             return
@@ -185,6 +216,8 @@ class YoloService:
         self._process_jpeg(jpeg)
 
     def _on_frame(self, jpeg: bytes) -> None:
+        if not self._is_inference_enabled():
+            return
         # Prefer Pi MQTT frames; skip relay duplicates when MQTT is actively feeding.
         if time.monotonic() - self._last_mqtt_frame_at < 2.0:
             return
@@ -192,9 +225,9 @@ class YoloService:
         self._process_jpeg(jpeg)
 
     def _process_jpeg(self, jpeg: bytes) -> None:
-        self._note_frame()
-        if not self._enabled:
+        if not self._is_inference_enabled():
             return
+        self._note_frame()
 
         now = time.monotonic()
         if now - self._last_infer_at < self._interval_sec:
@@ -294,9 +327,13 @@ class YoloService:
             inference_count = self._inference_count
             last_frame_at = self._last_frame_at
             readings_fresh = self._frame_input_fresh()
+            detection_mode = self._detection_mode
+            paused_for_cache_aware = detection_mode == "cache_aware_offloading"
 
         return {
             "enabled": enabled,
+            "detection_mode": detection_mode,
+            "paused_for_cache_aware": paused_for_cache_aware,
             "model_ready": model_ready,
             "model_error": model_error,
             "model_file": YOLO_MODEL_FILE,

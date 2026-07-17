@@ -20,6 +20,15 @@ from app.services.vit.vit_service import vit_service
 test_bench_bp = Blueprint("test_bench", __name__, url_prefix="/api/test_bench")
 
 
+def _apply_stop_mode(mode: str) -> str:
+    """Mirror stop mode to VIT + YOLO (YOLO runs only in cloud_aware / YOLO mode)."""
+    applied = cloud_aware_estop.set_mode(mode)
+    vit_service.set_detection_mode(applied)
+    from app.services.yolo_service import yolo_service
+    yolo_service.sync_detection_mode(applied)
+    return applied
+
+
 def _cache_script_fields() -> dict:
     """Cache-aware readiness derived from the Pi's MQTT ready flag only (no SSH)."""
     mqtt_ready = mqtt_service.cache_aware_embedding_ready
@@ -64,8 +73,7 @@ def set_cache_aware():
 
     success, message = mqtt_service.publish_cache_aware_command(on)
     mode = STOP_MODE_CACHE if on else STOP_MODE_CLOUD
-    cloud_aware_estop.set_mode(mode)
-    vit_service.set_detection_mode(mode)
+    _apply_stop_mode(mode)
 
     payload = {
         "status": "ok" if success else "error",
@@ -86,8 +94,7 @@ def set_stop_mode():
             "message": f"Field 'mode' must be one of: {allowed}.",
         }), 400
 
-    applied = cloud_aware_estop.set_mode(mode)
-    vit_service.set_detection_mode(applied)
+    applied = _apply_stop_mode(mode)
     return jsonify({
         "status": "ok",
         **_stop_mode_payload(),
