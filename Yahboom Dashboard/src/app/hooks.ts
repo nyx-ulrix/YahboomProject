@@ -11,6 +11,7 @@ import {
 import { useCosineSimilarityCheck } from '../lib/useCosineSimilarityCheck';
 import { processYoloStatusForBottleStop } from '../lib/yoloBottleStop';
 import { pullAndReconcileStopMode } from '../lib/testBenchStorage';
+import { pullAndReconcileTestBenchSession } from '../lib/testBenchSessionSync';
 import type { LiveGridData, MetricsState } from './types';
 
 // Polls /api/status every 3 s and writes the backend's
@@ -513,6 +514,23 @@ export function useStopModeBackendSync() {
     const sync = async () => {
       if (!alive) return;
       await pullAndReconcileStopMode();
+    };
+    void sync();
+    const id = setInterval(sync, 2000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+}
+
+/** Keep Mission Test Bench Start/session state aligned across browsers/tabs. */
+export function useTestBenchSessionSync() {
+  useEffect(() => {
+    let alive = true;
+    const sync = async () => {
+      if (!alive) return;
+      await pullAndReconcileTestBenchSession();
     };
     void sync();
     const id = setInterval(sync, 2000);

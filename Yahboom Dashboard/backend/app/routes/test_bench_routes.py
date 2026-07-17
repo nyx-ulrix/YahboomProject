@@ -15,6 +15,7 @@ from app.services.vit.cloud_aware_estop import (
     STOP_MODES,
     cloud_aware_estop,
 )
+from app.services.test_bench.session import test_bench_session
 from app.services.vit.vit_service import vit_service
 
 test_bench_bp = Blueprint("test_bench", __name__, url_prefix="/api/test_bench")
@@ -100,3 +101,78 @@ def set_stop_mode():
         **_stop_mode_payload(),
         "mode": applied,
     })
+
+
+@test_bench_bp.route("/session", methods=["GET", "PATCH", "DELETE"])
+def session():
+    if request.method == "GET":
+        return jsonify(test_bench_session.get_status())
+
+    if request.method == "DELETE":
+        return jsonify(test_bench_session.clear())
+
+    data = request.get_json(silent=True) or {}
+    active_start_ms = data.get("active_start_ms")
+    frozen_elapsed_ms = data.get("frozen_elapsed_ms")
+    fields: dict = {}
+    if active_start_ms is not None:
+        fields["active_start_ms"] = active_start_ms
+    if frozen_elapsed_ms is not None:
+        fields["frozen_elapsed_ms"] = frozen_elapsed_ms
+    if not fields:
+        return jsonify({
+            "status": "error",
+            "message": "Provide active_start_ms and/or frozen_elapsed_ms.",
+        }), 400
+    return jsonify(test_bench_session.update(**fields))
+
+
+@test_bench_bp.route("/session/start", methods=["POST"])
+def session_start():
+    data = request.get_json(silent=True) or {}
+    origin = str(data.get("origin") or "").strip()
+    command_sent_at_ms = data.get("command_sent_at_ms")
+    stop_mode = data.get("stop_mode")
+    session_start_wall_ms = data.get("session_start_wall_ms")
+
+    if not origin:
+        return jsonify({"status": "error", "message": "Field 'origin' is required."}), 400
+    if command_sent_at_ms is None or not isinstance(command_sent_at_ms, (int, float)):
+        return jsonify({
+            "status": "error",
+            "message": "Field 'command_sent_at_ms' must be a number.",
+        }), 400
+    if stop_mode not in STOP_MODES:
+        return jsonify({
+            "status": "error",
+            "message": f"Field 'stop_mode' must be one of: {', '.join(sorted(STOP_MODES))}.",
+        }), 400
+    if session_start_wall_ms is None or not isinstance(session_start_wall_ms, (int, float)):
+        return jsonify({
+            "status": "error",
+            "message": "Field 'session_start_wall_ms' must be a number.",
+        }), 400
+
+    ok, payload, reason = test_bench_session.start(
+        origin=origin,
+        command_sent_at_ms=float(command_sent_at_ms),
+        stop_mode=str(stop_mode),
+        session_start_wall_ms=float(session_start_wall_ms),
+    )
+    if not ok:
+        return jsonify({**payload, "status": "error", "message": reason}), 409
+    return jsonify({**payload, "status": "ok"})
+
+
+@test_bench_bp.route("/session/complete", methods=["POST"])
+def session_complete():
+    data = request.get_json(silent=True) or {}
+    origin = str(data.get("origin") or "").strip()
+    run = data.get("run")
+    if not origin:
+        return jsonify({"status": "error", "message": "Field 'origin' is required."}), 400
+    if not isinstance(run, dict):
+        return jsonify({"status": "error", "message": "Field 'run' must be an object."}), 400
+
+    recorded, payload = test_bench_session.complete(run, origin)
+    return jsonify({**payload, "status": "ok", "recorded": recorded})

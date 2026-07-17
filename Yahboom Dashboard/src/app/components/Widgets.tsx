@@ -60,6 +60,19 @@ import {
   takeTestBenchStopIsStopLabel,
   takeTestBenchStopReason,
 } from '../../lib/testBenchSession';
+import {
+  broadcastTestBenchSessionSync,
+  clearTestBenchSession,
+  completeTestBenchSession,
+  fetchTestBenchSession,
+  getSessionSyncOrigin,
+  lockSessionSync,
+  patchTestBenchSession,
+  startTestBenchSession,
+  subscribeTestBenchSessionSync,
+  type CompletedRunApi,
+  type TestBenchSessionApi,
+} from '../../lib/testBenchSessionSync';
 import { inferEventTag, shortEventTag } from '../../lib/eventLogTag';
 import { VideoFeedCore } from '../../lib/VideoFeed';
 import { Slider } from './ui/slider';
@@ -2374,6 +2387,7 @@ function StopTestBenchWidget() {
   const pendingDistanceFocusRunIdRef = useRef<number | null>(null);
   const startTestRef = useRef<() => void>(() => {});
   const startBlockedRef = useRef(false);
+  const resettingFromRemoteRef = useRef(false);
   useEffect(() => { networkTypeRef.current = networkType; }, [networkType]);
   useEffect(() => { stopModeRef.current = stopMode; }, [stopMode]);
   useEffect(() => { stopTogglesRef.current = stopToggles; }, [stopToggles]);
@@ -2466,7 +2480,9 @@ function StopTestBenchWidget() {
       lastPiMsRef.current != null && lastPiWallMsRef.current != null
         ? lastPiMsRef.current + (Date.now() - lastPiWallMsRef.current)
         : lastPiMsRef.current ?? anchor;
-    setFrozenElapsedMs(Math.max(0, piNow - anchor));
+    const elapsed = Math.max(0, piNow - anchor);
+    setFrozenElapsedMs(elapsed);
+    void patchTestBenchSession({ frozen_elapsed_ms: elapsed });
   }, []);
 
   const latchStopSource = useCallback((source: StopSource) => {
@@ -2564,7 +2580,7 @@ function StopTestBenchWidget() {
     if (!userPickedNetworkRef.current && networkMode) setNetworkType(networkMode);
   }, [networkMode]);
 
-  const resetSession = useCallback(() => {
+  const resetSession = useCallback((options?: { skipBackend?: boolean }) => {
     const hadSession = sessionActiveRef.current;
     const recordedStopSource = stopSourceRef.current;
     commandSentAtRef.current = null;
@@ -2598,7 +2614,166 @@ function StopTestBenchWidget() {
         sendCommand('auto_off');
       }
     }
+    if (!options?.skipBackend && !resettingFromRemoteRef.current) {
+      void clearTestBenchSession();
+    }
   }, []);
+
+  const appendCompletedRun = useCallback((apiRun: CompletedRunApi) => {
+    setRuns((prev) => {
+      if (prev.some((r) => (
+        r.commandSentAt === apiRun.commandSentAt
+        && r.stoppedAt === apiRun.stoppedAt
+        && r.startedAt === apiRun.startedAt
+      ))) {
+        return prev;
+      }
+      const newRunId = Date.now() + Math.random();
+      pendingDistanceFocusRunIdRef.current = newRunId;
+      return [
+        ...prev,
+        {
+          id: newRunId,
+          run: apiRun.run || prev.length + 1,
+          commandSentAt: apiRun.commandSentAt,
+          startedAt: apiRun.startedAt,
+          stoppedAt: apiRun.stoppedAt,
+          durationMs: apiRun.durationMs,
+          commandToMoveMs: apiRun.commandToMoveMs,
+          stoppingDistance: apiRun.stoppingDistance ?? '',
+          networkType: apiRun.networkType,
+          stopMode: apiRun.stopMode,
+          stopSource: apiRun.stopSource as StopSource | undefined,
+          stopConfidencePercent: apiRun.stopConfidencePercent,
+        },
+      ];
+    });
+  }, []);
+
+  const beginLocalSession = useCallback(async (
+    commandTs: number,
+    benchMode: StopBenchMode,
+    sessionWallMs: number,
+    options: { sendAuto: boolean },
+  ) => {
+    recordedBenchModeRef.current = benchMode;
+    setTestBenchStopMode(benchMode);
+    sessionStartWallMsRef.current = sessionWallMs;
+    latestCacheDetectionRef.current = null;
+    cacheDetectPollCountRef.current = 0;
+    if (benchNeedsPiScript(benchMode)) {
+      await clearStaleCacheDetectionOnBackend();
+    }
+    sessionActiveRef.current = true;
+    setTestBenchSessionActive(true);
+    commandSentAtRef.current = commandTs;
+    lastPiMsRef.current = commandTs;
+    lastPiWallMsRef.current = Date.now();
+    movementDeadlineRef.current = Date.now() + MOVEMENT_WAIT_MS;
+    activeStartRef.current = null;
+    armedRef.current = false;
+    stopCommandPendingRef.current = false;
+    stopCommandPendingAtRef.current = null;
+    firstStopTsRef.current = null;
+    preMoveStopReasonRef.current = null;
+    stopSourceRef.current = null;
+    stopConfidenceRef.current = null;
+    autoOffWarnedRef.current = false;
+    setFrozenElapsedMs(null);
+    setActiveStart(null);
+
+    let ignoreDecodeKey: string | null = null;
+    if (benchUsesCosineSimilarity(benchMode)) {
+      try {
+        const vitRes = await fetch('/api/vit/status', { cache: 'no-store' });
+        if (vitRes.ok) {
+          const vit = await vitRes.json() as VitStatusForStopLabel;
+          ignoreDecodeKey = vitDecodeEventKey(vit);
+        }
+      } catch { /* VIT may be offline */ }
+      setStopLabelEstopArmed(true, ignoreDecodeKey);
+    } else if (benchHasYoloBottleStop(benchMode)) {
+      let ignoreYoloKey: string | null = null;
+      try {
+        const yoloRes = await fetch('/api/yolo/status', { cache: 'no-store' });
+        if (yoloRes.ok) {
+          const yolo = await yoloRes.json() as YoloStatusForBottleStop;
+          ignoreYoloKey = yoloStopEventKey(yolo);
+        }
+      } catch { /* YOLO may be offline */ }
+      setYoloStopArmed(true, ignoreYoloKey);
+    }
+
+    setCommandSentAt(commandTs);
+    setTick((n) => n + 1);
+    if (options.sendAuto) {
+      toggleRosAuto();
+    }
+  }, []);
+
+  const applySessionFromSync = useCallback((data: TestBenchSessionApi) => {
+    if (data.completed_run) {
+      appendCompletedRun(data.completed_run);
+    }
+
+    if (!data.active) {
+      if (sessionActiveRef.current) {
+        resettingFromRemoteRef.current = true;
+        resetSession({ skipBackend: true });
+        resettingFromRemoteRef.current = false;
+      }
+      return;
+    }
+
+    const cmdAt = data.command_sent_at_ms;
+    const benchMode = data.stop_mode ?? stopModeRef.current;
+    if (cmdAt == null || benchMode == null) return;
+
+    const alreadySame = sessionActiveRef.current && commandSentAtRef.current === cmdAt;
+    const syncSessionFields = () => {
+      if (data.active_start_ms != null && activeStartRef.current !== data.active_start_ms) {
+        activeStartRef.current = data.active_start_ms;
+        armedRef.current = true;
+        setActiveStart(data.active_start_ms);
+      }
+      if (data.frozen_elapsed_ms != null) {
+        setFrozenElapsedMs(data.frozen_elapsed_ms);
+      }
+    };
+
+    if (!alreadySame) {
+      void beginLocalSession(
+        cmdAt,
+        benchMode,
+        data.session_start_wall_ms ?? Date.now(),
+        { sendAuto: false },
+      ).then(() => {
+        syncSessionFields();
+      });
+      return;
+    }
+
+    syncSessionFields();
+  }, [appendCompletedRun, beginLocalSession, resetSession]);
+
+  useEffect(() => {
+    return subscribeTestBenchSessionSync(({ data }) => {
+      applySessionFromSync(data);
+    });
+  }, [applySessionFromSync]);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const data = await fetchTestBenchSession();
+        if (!alive || !data) return;
+        applySessionFromSync(data);
+      } catch { /* backend may be starting */ }
+    };
+    void load();
+    return () => { alive = false; };
+  }, [applySessionFromSync]);
 
   const captureStopMetrics = useCallback(async (source: StopSource) => {
     if (source === 'manual') {
@@ -2626,27 +2801,32 @@ function StopTestBenchWidget() {
     const recordedSource = stopSourceRef.current ?? 'manual';
     const metrics = await captureStopMetrics(recordedSource);
     const mode = recordedBenchModeRef.current;
-    const newRunId = Date.now() + Math.random();
-    pendingDistanceFocusRunIdRef.current = newRunId;
-    resetSession();
-    setRuns((prev) => [
-      ...prev,
-      {
-        id: newRunId,
-        run: prev.length + 1,
-        commandSentAt: cmdAt,
-        startedAt,
-        stoppedAt,
-        durationMs: Math.max(0, stoppedAt - startedAt),
-        commandToMoveMs: Math.max(0, startedAt - cmdAt),
-        stoppingDistance: '',
-        networkType: networkTypeRef.current,
-        stopMode: mode,
-        stopSource: recordedSource,
-        stopConfidencePercent: metrics.stopConfidencePercent,
-      },
-    ]);
-  }, [captureStopMetrics, resetSession]);
+    let runNumber = 0;
+    setRuns((prev) => {
+      runNumber = prev.length + 1;
+      return prev;
+    });
+    const runPayload: CompletedRunApi = {
+      run: runNumber,
+      commandSentAt: cmdAt,
+      startedAt,
+      stoppedAt,
+      durationMs: Math.max(0, stoppedAt - startedAt),
+      commandToMoveMs: Math.max(0, startedAt - cmdAt),
+      stoppingDistance: '',
+      networkType: networkTypeRef.current,
+      stopMode: mode,
+      stopSource: recordedSource,
+      stopConfidencePercent: metrics.stopConfidencePercent,
+    };
+    const completeResult = await completeTestBenchSession(runPayload, getSessionSyncOrigin());
+    resetSession({ skipBackend: true });
+    if (completeResult?.completed_run) {
+      appendCompletedRun(completeResult.completed_run);
+    } else {
+      appendCompletedRun(runPayload);
+    }
+  }, [appendCompletedRun, captureStopMetrics, resetSession]);
 
   const disableAutoRoam = useCallback(() => {
     // Pi owns disengage when its cache-aware script stopped the run; otherwise
@@ -2679,6 +2859,7 @@ function StopTestBenchWidget() {
     activeStartRef.current = startTs;
     armedRef.current = true;
     setActiveStart(startTs);
+    void patchTestBenchSession({ active_start_ms: startTs });
   }, []);
 
   const tryEndRunOnPiAutoOff = useCallback(async (drive: DriveStatusPayload | null) => {
@@ -2801,45 +2982,40 @@ function StopTestBenchWidget() {
       return;
     }
 
-    recordedBenchModeRef.current = benchMode;
-    setTestBenchStopMode(benchMode);
-    sessionStartWallMsRef.current = Date.now();
-    latestCacheDetectionRef.current = null;
-    cacheDetectPollCountRef.current = 0;
-    if (benchNeedsPiScript(benchMode)) {
-      await clearStaleCacheDetectionOnBackend();
-    }
-    sessionActiveRef.current = true;
-    setTestBenchSessionActive(true);
-    commandSentAtRef.current = commandTs;
-    lastPiMsRef.current = commandTs;
-    lastPiWallMsRef.current = Date.now();
-    movementDeadlineRef.current = Date.now() + MOVEMENT_WAIT_MS;
+    const sessionWallMs = Date.now();
+    const origin = getSessionSyncOrigin();
+    lockSessionSync();
 
-    let ignoreDecodeKey: string | null = null;
-    if (benchUsesCosineSimilarity(benchMode)) {
-      try {
-        const vitRes = await fetch('/api/vit/status', { cache: 'no-store' });
-        if (vitRes.ok) {
-          const vit = await vitRes.json() as VitStatusForStopLabel;
-          ignoreDecodeKey = vitDecodeEventKey(vit);
-        }
-      } catch { /* VIT may be offline */ }
-      setStopLabelEstopArmed(true, ignoreDecodeKey);
-    } else if (benchHasYoloBottleStop(benchMode)) {
-      let ignoreYoloKey: string | null = null;
-      try {
-        const yoloRes = await fetch('/api/yolo/status', { cache: 'no-store' });
-        if (yoloRes.ok) {
-          const yolo = await yoloRes.json() as YoloStatusForBottleStop;
-          ignoreYoloKey = yoloStopEventKey(yolo);
-        }
-      } catch { /* YOLO may be offline */ }
-      setYoloStopArmed(true, ignoreYoloKey);
+    const startRes = await startTestBenchSession({
+      origin,
+      command_sent_at_ms: commandTs,
+      stop_mode: benchMode,
+      session_start_wall_ms: sessionWallMs,
+    });
+
+    if (!startRes.data) {
+      useMetricsStore.getState().pushEvent(
+        'error',
+        'Mission test — failed to reach backend for session start',
+      );
+      return;
     }
-    setCommandSentAt(commandTs);
-    setTick((n) => n + 1);
-    toggleRosAuto();
+
+    if (startRes.status === 409) {
+      applySessionFromSync(startRes.data);
+      return;
+    }
+
+    if (!startRes.ok) {
+      useMetricsStore.getState().pushEvent(
+        'error',
+        'Mission test — failed to start shared session on backend',
+      );
+      return;
+    }
+
+    await beginLocalSession(commandTs, benchMode, sessionWallMs, { sendAuto: true });
+    broadcastTestBenchSessionSync({ data: startRes.data, origin });
   };
 
   // Single session poll — Pi time, movement start, stop detection, live timer tick.
