@@ -99,7 +99,7 @@ function triggerYoloBottleStop(key: string, confidence: number, label: string): 
 
   lastHandledKey = key;
   lastTriggerAt = now;
-  notifyTestBenchStopLabelStop(confidence);
+  notifyTestBenchStopLabelStop(confidence, 'yolo_dashboard');
   sendDashboardBottleStop();
   useMetricsStore.getState().pushEvent(
     'warning',

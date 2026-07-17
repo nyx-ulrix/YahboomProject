@@ -119,11 +119,11 @@ function triggerStopLabelStop(key: string, confidence: number, label: string): b
 
   lastHandledKey = key;
   lastTriggerAt = now;
-  notifyTestBenchStopLabelStop(confidence);
+  notifyTestBenchStopLabelStop(confidence, 'edge_dashboard');
   sendDashboardBottleStop();
   useMetricsStore.getState().pushEvent(
     'warning',
-    `Cloud Stop — ${label} reference match ${confidence.toFixed(2)} percent (minimum ${minStopSimilarityPercent().toFixed(0)} percent), mission ended`,
+    `Edge Stop — ${label} reference match ${confidence.toFixed(2)} percent (minimum ${minStopSimilarityPercent().toFixed(0)} percent), mission ended`,
     'yahboom/vit/status',
   );
   return true;

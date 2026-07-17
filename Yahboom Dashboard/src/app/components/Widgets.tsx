@@ -46,6 +46,7 @@ import {
   setTestBenchStopMode,
   skipAutoOffAfterBenchRun,
   takeTestBenchStopConfidence,
+  takeTestBenchStopDashboardSource,
   takeTestBenchStopIsAutoOffPending,
   takeTestBenchStopIsStopLabel,
   takeTestBenchStopReason,
@@ -1856,9 +1857,11 @@ function YoloModelWidget() {
 
   const detectionHint = (() => {
     if (yoloPaused) return 'Paused — Cache Aware mode (switch to YOLO to run)';
+    if (yoloStatus && !yoloStatus.enabled) return 'YOLO off — select YOLO mode on the test bench';
     if (yoloStatus?.model_error) return `YOLO error — ${yoloStatus.model_error}`;
     if (!yoloStatus?.model_ready) return 'Loading YOLOv8 (Ultralytics/YOLOv8)…';
     if (!streamRunning && !yoloStatus?.video_active && !hasLatchedReadings) return 'Start webrtc_server.py on the Pi';
+    if (streamRunning && !yoloReadingsFresh && !hasLatchedReadings) return 'YOLOv8 — scanning live video feed';
     if (!yoloReadingsFresh && !hasLatchedReadings) return 'YOLOv8 — waiting for live video frames';
     if (yoloTop) return yoloTop.label;
     return 'YOLOv8 — scanning live video feed';
@@ -2486,7 +2489,7 @@ function StopTestBenchWidget() {
       }
       preMoveStopReasonRef.current = takeTestBenchStopReason() ?? null;
       if (isStopLabel) {
-        latchStopSource('cloud_dashboard');
+        latchStopSource(takeTestBenchStopDashboardSource() ?? 'edge_dashboard');
         if (confidence != null) stopConfidenceRef.current = confidence;
         if (useMetricsStore.getState().autoRunning) {
           sendCommand('auto_off');
@@ -2593,7 +2596,7 @@ function StopTestBenchWidget() {
     if (source === 'manual') {
       return { stopConfidencePercent: null };
     }
-    if (source === 'cloud_dashboard') {
+    if (source === 'edge_dashboard' || source === 'yolo_dashboard') {
       return { stopConfidencePercent: stopConfidenceRef.current };
     }
     const detection = await fetchLatestCacheDetectionForStop(
@@ -2710,7 +2713,9 @@ function StopTestBenchWidget() {
 
     if (!stopSourceRef.current) {
       if (isCloudAwareStopLabelBenchStop() || stopCommandPendingRef.current) {
-        latchStopSource('cloud_dashboard');
+        latchStopSource(
+          benchHasYoloBottleStop(stopModeRef.current) ? 'yolo_dashboard' : 'edge_dashboard',
+        );
       } else if (benchNeedsPiScript(stopModeRef.current) || cacheStop) {
         latchStopSource('cache_pi');
       }
@@ -2754,8 +2759,8 @@ function StopTestBenchWidget() {
       useMetricsStore.getState().pushEvent(
         'warning',
         pct != null
-          ? `Cache stop — Pi bottle detected (${pct.toFixed(1)}% similarity), mission ended`
-          : 'Cache stop — Pi bottle detected, mission ended',
+          ? `Cache Stop — Pi bottle detected (${pct.toFixed(1)}% similarity), mission ended`
+          : 'Cache Stop — Pi bottle detected, mission ended',
         'yahboom/detect/status',
       );
     }
@@ -3550,11 +3555,13 @@ function StopTestBenchWidget() {
                   fontSize: 8,
                   fontWeight: 600,
                   color:
-                    r.stopSource === 'cloud_dashboard'
+                    r.stopSource === 'yolo_dashboard'
                       ? accents.cyan
-                      : r.stopSource === 'cache_pi'
-                        ? accents.purple
-                        : 'var(--text-muted)',
+                      : r.stopSource === 'edge_dashboard'
+                        ? accents.green
+                        : r.stopSource === 'cache_pi'
+                          ? accents.purple
+                          : 'var(--text-muted)',
                 }}
               >
                 {r.stopSource ? STOP_SOURCE_LABELS[r.stopSource] : '—'}

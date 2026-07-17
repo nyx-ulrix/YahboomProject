@@ -208,6 +208,22 @@ class CameraVideoTrack(VideoStreamTrack):
 
 
 # =========================
+# HTTP SNAPSHOT (for dashboard YOLO when WebRTC is the display path)
+# =========================
+async def frame_jpg(request):
+    """Latest camera JPEG — used by the dashboard YOLO service over HTTP."""
+    with frame_lock:
+        frame = None if latest_frame is None else latest_frame.copy()
+    if frame is None:
+        return web.Response(status=503, text="No camera frame yet")
+    encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
+    ok, jpg = cv2.imencode(".jpg", frame, encode_params)
+    if not ok:
+        return web.Response(status=500, text="JPEG encode failed")
+    return web.Response(body=jpg.tobytes(), content_type="image/jpeg")
+
+
+# =========================
 # WEB PAGE
 # =========================
 async def index(request):
@@ -409,6 +425,7 @@ def main():
 
     app = web.Application()
     app.router.add_get("/", index)
+    app.router.add_get("/frame.jpg", frame_jpg)
     app.router.add_post("/offer", offer)
     app.on_shutdown.append(on_shutdown)
 

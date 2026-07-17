@@ -149,7 +149,7 @@ VIT_CLIENT_DETECTION_MODE = (
 YOLO_ENABLED = os.getenv("YOLO_ENABLED", "true").lower() in (
     "true", "1", "yes", "on")
 YOLO_HF_REPO = os.getenv("YOLO_HF_REPO", "Ultralytics/YOLOv8")
-YOLO_MODEL_FILE = os.getenv("YOLO_MODEL", "yolov8x.pt")
+YOLO_MODEL_FILE = os.getenv("YOLO_MODEL", "yolov8n.pt")
 YOLO_CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
 YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", "640"))
 YOLO_INFERENCE_INTERVAL_SEC = float(

@@ -8,6 +8,7 @@ let pendingStopReason: string | undefined;
 let pendingStopIsStopLabel = false;
 let pendingStopIsAutoOffPending = false;
 let pendingStopConfidence: number | null = null;
+let pendingDashboardStopSource: 'edge_dashboard' | 'yolo_dashboard' | null = null;
 let cloudAwareStopLabelActive = false;
 let benchSessionActive = false;
 let benchStopMode: StopBenchMode = 'cloud_aware';
@@ -64,11 +65,15 @@ export function notifyTestBenchAutoOffPending(reason?: string) {
   onManualStopDuringSession?.();
 }
 
-/** Bottle / cloud-aware stop-label — freezes the live timer immediately. */
-export function notifyTestBenchStopLabelStop(confidence?: number) {
+/** Bottle stop from dashboard — Edge (cosine) or YOLO; freezes the live timer immediately. */
+export function notifyTestBenchStopLabelStop(
+  confidence?: number,
+  source: 'edge_dashboard' | 'yolo_dashboard' = 'edge_dashboard',
+) {
   pendingStopReason = 'Mission test — bottle detected';
   pendingStopIsStopLabel = true;
   pendingStopConfidence = confidence ?? null;
+  pendingDashboardStopSource = source;
   cloudAwareStopLabelActive = true;
   onManualStopDuringSession?.();
 }
@@ -106,4 +111,11 @@ export function takeTestBenchStopConfidence(): number | null {
   const value = pendingStopConfidence;
   pendingStopConfidence = null;
   return value;
+}
+
+/** Dashboard stop source latched with the most recent bottle stop (Edge or YOLO). */
+export function takeTestBenchStopDashboardSource(): 'edge_dashboard' | 'yolo_dashboard' | null {
+  const source = pendingDashboardStopSource;
+  pendingDashboardStopSource = null;
+  return source;
 }

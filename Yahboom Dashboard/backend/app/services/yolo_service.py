@@ -11,6 +11,8 @@ import base64
 import logging
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
@@ -24,6 +26,7 @@ from config import (
     YOLO_INFERENCE_INTERVAL_SEC,
     YOLO_MODEL_FILE,
     YOLO_READINGS_STALE_MS,
+    VIDEO_SERVER_PORT,
 )
 
 log = logging.getLogger("yolo")
@@ -65,6 +68,9 @@ class YoloService:
         self._started = False
         self._frame_listener = self._on_frame
         self._detection_mode = "cloud_aware"
+        self._frame_poll_stop = threading.Event()
+        self._frame_poll_thread: threading.Thread | None = None
+        self._last_mqtt_processed_at = 0.0
 
     def _is_inference_enabled(self) -> bool:
         with self._lock:
@@ -82,6 +88,8 @@ class YoloService:
         if not should_run:
             self.clear_session()
         enabled = self.set_enabled(should_run)
+        if enabled:
+            self._ensure_frame_poll_thread()
         if prev_mode != mode or was_enabled != enabled:
             if enabled:
                 log.info("YOLO running — detection mode %s", mode)
@@ -106,6 +114,51 @@ class YoloService:
                 name="yolo-model-load",
                 daemon=True,
             ).start()
+        self._ensure_frame_poll_thread()
+
+    def _ensure_frame_poll_thread(self) -> None:
+        if self._frame_poll_thread and self._frame_poll_thread.is_alive():
+            return
+        self._frame_poll_stop.clear()
+        self._frame_poll_thread = threading.Thread(
+            target=self._pi_frame_poll_loop,
+            name="yolo-pi-frame-poll",
+            daemon=True,
+        )
+        self._frame_poll_thread.start()
+
+    def _pi_host(self) -> str | None:
+        try:
+            from app.services.mqtt_service import mqtt_service
+            from config import DEFAULT_BROKER_IP
+
+            return mqtt_service.broker_ip or DEFAULT_BROKER_IP
+        except Exception:
+            return None
+
+    def _pi_frame_poll_loop(self) -> None:
+        """HTTP fallback: grab /frame.jpg from webrtc_server when MQTT is quiet."""
+        while not self._frame_poll_stop.is_set():
+            time.sleep(max(0.2, self._interval_sec))
+            if not self._is_inference_enabled():
+                continue
+            if time.monotonic() - self._last_mqtt_processed_at < 2.0:
+                continue
+            host = self._pi_host()
+            if not host:
+                continue
+            url = f"http://{host}:{VIDEO_SERVER_PORT}/frame.jpg"
+            try:
+                with urllib.request.urlopen(url, timeout=4) as resp:
+                    if resp.status >= 400:
+                        continue
+                    jpeg = resp.read()
+            except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+                continue
+            if not jpeg:
+                continue
+            self._apply_frame_hop_delay()
+            self._process_jpeg(jpeg)
 
     def _load_model_async(self) -> None:
         try:
@@ -158,6 +211,8 @@ class YoloService:
                 name="yolo-model-load",
                 daemon=True,
             ).start()
+        if enabled:
+            self._ensure_frame_poll_thread()
         return self._enabled
 
     def set_confidence(self, value: float) -> float:
@@ -214,12 +269,10 @@ class YoloService:
         self._last_mqtt_frame_at = time.monotonic()
         self._apply_frame_hop_delay()
         self._process_jpeg(jpeg)
+        self._last_mqtt_processed_at = time.monotonic()
 
     def _on_frame(self, jpeg: bytes) -> None:
         if not self._is_inference_enabled():
-            return
-        # Prefer Pi MQTT frames; skip relay duplicates when MQTT is actively feeding.
-        if time.monotonic() - self._last_mqtt_frame_at < 2.0:
             return
         self._apply_frame_hop_delay()
         self._process_jpeg(jpeg)
@@ -329,11 +382,17 @@ class YoloService:
             readings_fresh = self._frame_input_fresh()
             detection_mode = self._detection_mode
             paused_for_cache_aware = detection_mode == "cache_aware_offloading"
+        try:
+            from app.services.video_relay import video_relay
+            stream_relay_active = video_relay.is_active()
+        except Exception:
+            stream_relay_active = False
 
         return {
             "enabled": enabled,
             "detection_mode": detection_mode,
             "paused_for_cache_aware": paused_for_cache_aware,
+            "stream_relay_active": stream_relay_active,
             "model_ready": model_ready,
             "model_error": model_error,
             "model_file": YOLO_MODEL_FILE,

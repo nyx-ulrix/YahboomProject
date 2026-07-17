@@ -4,7 +4,7 @@ const STORAGE_KEY = 'yahboom_test_bench_v1';
 
 export type StopBenchMode = 'cache_aware_offloading' | 'cloud_aware';
 
-export type StopSource = 'cache_pi' | 'cloud_dashboard' | 'manual';
+export type StopSource = 'cache_pi' | 'edge_dashboard' | 'yolo_dashboard' | 'manual';
 
 export type PersistedStopTestRun = {
   id: number;
@@ -50,8 +50,13 @@ function normalizeStopMode(value: unknown): StopBenchMode | undefined {
 }
 
 function normalizeStopSource(value: unknown): StopSource | undefined {
-  if (value === 'edge_dashboard') return 'cloud_dashboard';
-  if (value === 'cache_pi' || value === 'cloud_dashboard' || value === 'manual') return value;
+  if (value === 'cloud_dashboard') return 'edge_dashboard';
+  if (
+    value === 'cache_pi'
+    || value === 'edge_dashboard'
+    || value === 'yolo_dashboard'
+    || value === 'manual'
+  ) return value;
   return undefined;
 }
 
@@ -142,8 +147,9 @@ export function clearTestBenchCache(): void {
 }
 
 export const STOP_SOURCE_LABELS: Record<StopSource, string> = {
-  cache_pi: 'Cache stop',
-  cloud_dashboard: 'Cloud Stop',
+  cache_pi: 'Cache Stop',
+  edge_dashboard: 'Edge Stop',
+  yolo_dashboard: 'YOLO Stop',
   manual: 'Manual stop',
 };
 
@@ -287,4 +293,23 @@ export function stopModeToToggles(mode: StopBenchMode): StopModeToggles {
  */
 export function togglesToStopMode(cacheOn: boolean, _cloudOn: boolean): StopBenchMode {
   return cacheOn ? 'cache_aware_offloading' : 'cloud_aware';
+}
+
+/** Align backend stop mode + YOLO with local toggles (fixes stale Cache Aware after refresh). */
+export async function syncStopModeToBackend(): Promise<void> {
+  const { cacheOn } = loadStopToggles();
+  const localMode = togglesToStopMode(cacheOn, true);
+  try {
+    const res = await fetch('/api/test_bench/stop_mode', { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json() as { mode?: StopBenchMode };
+    if (data.mode === localMode) return;
+    await fetch('/api/test_bench/cache_aware', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on: localMode === 'cache_aware_offloading' }),
+    });
+  } catch {
+    /* backend unreachable */
+  }
 }
