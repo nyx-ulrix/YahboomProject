@@ -7,7 +7,7 @@ import { connectBroker } from '../lib/Connections';
 import {
   processVitStatusForStopLabelEstop,
   setCloudAwareStopEnabled,
-} from '../lib/cloudAwareStopLabelEstop';
+} from '../lib/yoloStopLabelEstop';
 import { useCosineSimilarityCheck } from '../lib/useCosineSimilarityCheck';
 import { processYoloStatusForBottleStop } from '../lib/yoloBottleStop';
 import { syncStopModeToBackend } from '../lib/testBenchStorage';

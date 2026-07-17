@@ -200,7 +200,7 @@ Widgets are added from the picker (**P**). Key control widgets:
 
 ### Stop-Time Test Bench
 
-Located in `Yahboom Dashboard/src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode logic: `Yahboom Dashboard/backend/app/routes/test_bench_routes.py`, `Yahboom Dashboard/backend/app/services/vit/cloud_aware_estop.py`, `Yahboom Dashboard/backend/app/services/yolo_service.py`. Cache-aware readiness comes from retained MQTT on `yahboom/cache_aware/ready` (no SSH log probe). Pi embedding relay: `vit_service.py`; client image-to-image: `src/lib/clientVit/` + `useClientReferenceDetection.ts`; **Edge Stop:** `src/lib/cloudAwareStopLabelEstop.ts` via `useCloudAwareStopLabelEstop()`; **YOLO Stop:** `src/lib/yoloBottleStop.ts` via `useYoloBottleStop()` in `src/app/hooks.ts`. Layout sync: `applyStopBenchLayoutForMode()` / `syncStopModeToBackend()` in `testBenchStorage.ts`.
+Located in `Yahboom Dashboard/src/app/components/Widgets.tsx` (`StopTestBenchWidget`). Stop-mode logic: `Yahboom Dashboard/backend/app/routes/test_bench_routes.py`, `Yahboom Dashboard/backend/app/services/vit/cloud_aware_estop.py`, `Yahboom Dashboard/backend/app/services/yolo_service.py`. Cache-aware readiness comes from retained MQTT on `yahboom/cache_aware/ready` (no SSH log probe). Pi embedding relay: `vit_service.py`; client image-to-image: `src/lib/clientVit/` + `useClientReferenceDetection.ts`; **Edge Stop:** `src/lib/yoloStopLabelEstop.ts` via `useCloudAwareStopLabelEstop()`; **YOLO Stop:** `src/lib/yoloBottleStop.ts` via `useYoloBottleStop()` in `src/app/hooks.ts`. Layout sync: `applyStopBenchLayoutForMode()` / `syncStopModeToBackend()` in `testBenchStorage.ts`.
 
 **Purpose:** Run repeated stop-time experiments, compare stop modes, and export results as CSV.
 
@@ -261,7 +261,7 @@ Detection uses **image-to-image** matching in the **browser**, not CLIP text lab
 - **CAO:** Pi stops on cache hit locally (**Cache Stop**); on cache miss the browser matches the forwarded embedding against the library (**Edge Stop**).
 - Edge path POSTs match results to `/api/vit/client/match_result`; `/api/vit/status` is polled and, on `stop_hit === true` and similarity ≥ threshold after START, sends `auto_off` + `stop`.
 - Armed only after START (pre-START detections are ignored).
-- Implemented in `useClientReferenceDetection.ts` + `cloudAwareStopLabelEstop.ts` (`processVitStatusForStopLabelEstop`) and `yoloBottleStop.ts` (`useYoloBottleStop`).
+- Implemented in `useClientReferenceDetection.ts` + `yoloStopLabelEstop.ts` (`processVitStatusForStopLabelEstop`) and `yoloBottleStop.ts` (`useYoloBottleStop`).
 
 #### Timing and CSV
 

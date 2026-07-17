@@ -10,7 +10,7 @@ import {
 import { useMetricsStore, useSettingsStore } from '../store';
 import type { WidgetDefinition, MetricsState } from '../types';
 import { sendCommand, sendCameraCommand, setEstopState, toggleRosAuto, vecToCommand, vecToCameraCommand } from '../../lib/Controls';
-import { setCloudAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/cloudAwareStopLabelEstop';
+import { setCloudAwareStopEnabled, setStopLabelEstopArmed, vitDecodeEventKey, type VitStatusForStopLabel } from '../../lib/yoloStopLabelEstop';
 import { setYoloStopArmed, yoloStopEventKey, type YoloStatusForBottleStop } from '../../lib/yoloBottleStop';
 import { loadReferenceLibrary, applyStopCategory, applyStopThreshold, getStopThreshold } from '../../lib/clientVit/referenceStore';
 import { dedupeCosineSimilarityCheckByLabel } from '../../lib/clientVit/cosineSimilarityCheck';
