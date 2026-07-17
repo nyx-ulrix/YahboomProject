@@ -84,7 +84,7 @@ cd ~/YahboomProject/Yahboom\ Car/Code
 python3 VIT.py
 ```
 
-`webrtc_server.py` streams WebRTC on port `8080`, serves **`GET /frame.jpg`** (latest camera JPEG for dashboard YOLO when WebRTC is the display path), and publishes JPEG frames to `yahboom/camera/frame`. `VIT.py` consumes those frames, runs MobileCLIP-S1, and publishes embeddings on `yahboom/vit/embedding`. Cache-aware offloading is built into `VIT.py` — the dashboard toggles it with **`Cao_ON` / `Cao_OFF`** over MQTT (no separate `cache_aware_offloading.py` script).
+`webrtc_server.py` streams WebRTC on port `8080`, serves **`GET /frame.jpg`** (latest camera JPEG for dashboard YOLO when WebRTC is the display path), and publishes JPEG frames to `yahboom/camera/frame`. `webrtc_video_only.py` is the same camera/WebRTC path **without** MQTT frame publish or `/frame.jpg` (display-only). `VIT.py` consumes those frames, runs MobileCLIP-S1, and publishes embeddings on `yahboom/vit/embedding`. Cache-aware offloading is built into `VIT.py` — the dashboard toggles it with **`Cao_ON` / `Cao_OFF`** over MQTT (no separate `cache_aware_offloading.py` script).
 
 The backend detects a running stream with an **HTTP probe** to port `8080` (`VIDEO_SERVER_PORT`) and exposes WebRTC via `/api/webrtc/offer`.
 
@@ -94,7 +94,8 @@ The backend detects a running stream with an **HTTP probe** to port `8080` (`VID
 
 | Script | Role |
 |--------|------|
-| `webrtc_server.py` | Camera capture, WebRTC server (`:8080`), MQTT frame relay to VIT |
+| `webrtc_server.py` | Camera capture, WebRTC server (`:8080`), MQTT frame relay to VIT, `/frame.jpg` |
+| `webrtc_video_only.py` | Same WebRTC display stream only — no MQTT frames, no `/frame.jpg` |
 | `VIT.py` | MobileCLIP-S1 encoding, Pi cache comparison, embedding publish, `Cao_ON`/`Cao_OFF` handling |
 | `mqtt_ros_node.py` | MQTT ↔ ROS 2 bridge, autonomous explore (`auto_on`/`auto_off`), drive status |
 | `lidar_safety_node.py` | LiDAR-based obstacle safety |
