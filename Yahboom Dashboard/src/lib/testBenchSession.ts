@@ -65,7 +65,7 @@ export function notifyTestBenchAutoOffPending(reason?: string) {
   onManualStopDuringSession?.();
 }
 
-/** Bottle stop from dashboard — Edge (cosine) or YOLO; freezes the live timer immediately. */
+/** Bottle stop from dashboard — Edge (cosine) or YOLO; timer runs until Pi stop acknowledgement. */
 export function notifyTestBenchStopLabelStop(
   confidence?: number,
   source: 'edge_dashboard' | 'yolo_dashboard' = 'edge_dashboard',

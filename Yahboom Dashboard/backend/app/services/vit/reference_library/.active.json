@@ -1,6 +1,6 @@
 {
   "stop_category": "target_bottle",
-  "stop_threshold": 0.7,
+  "stop_threshold": 0.75,
   "category": "target_bottle",
   "embedding_size_bytes": 2048
 }

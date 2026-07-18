@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import base64
 import logging
+import queue
 import threading
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
@@ -23,10 +22,8 @@ from config import (
     YOLO_ENABLED,
     YOLO_HF_REPO,
     YOLO_IMGSZ,
-    YOLO_INFERENCE_INTERVAL_SEC,
     YOLO_MODEL_FILE,
     YOLO_READINGS_STALE_MS,
-    VIDEO_SERVER_PORT,
 )
 
 log = logging.getLogger("yolo")
@@ -57,10 +54,7 @@ class YoloService:
         self._enabled = YOLO_ENABLED
         self._confidence = YOLO_CONFIDENCE
         self._imgsz = YOLO_IMGSZ
-        self._interval_sec = max(0.1, YOLO_INFERENCE_INTERVAL_SEC)
-        self._last_infer_at = 0.0
         self._last_frame_at: str | None = None
-        self._last_mqtt_frame_at = 0.0
         self._latest: dict[str, Any] | None = None
         self._session: list[dict[str, Any]] = []
         self._video_active = False
@@ -68,9 +62,11 @@ class YoloService:
         self._started = False
         self._frame_listener = self._on_frame
         self._detection_mode = "cloud_aware"
-        self._frame_poll_stop = threading.Event()
-        self._frame_poll_thread: threading.Thread | None = None
-        self._last_mqtt_processed_at = 0.0
+        # One pending frame is enough: while inference is busy, replace it with
+        # the newest arrival so the worker never drains a stale-frame backlog.
+        self._frame_queue: queue.Queue[tuple[int, bytes]] = queue.Queue(maxsize=1)
+        self._frame_generation = 0
+        self._frame_worker_thread: threading.Thread | None = None
 
     def _is_inference_enabled(self) -> bool:
         with self._lock:
@@ -88,8 +84,6 @@ class YoloService:
         if not should_run:
             self.clear_session()
         enabled = self.set_enabled(should_run)
-        if enabled:
-            self._ensure_frame_poll_thread()
         if prev_mode != mode or was_enabled != enabled:
             if enabled:
                 log.info("YOLO running — detection mode %s", mode)
@@ -103,6 +97,7 @@ class YoloService:
         self._started = True
         from app.services.video_relay import video_relay
         video_relay.add_frame_listener(self._frame_listener)
+        self._ensure_frame_worker()
         try:
             from app.services.vit.vit_service import vit_service
             self.sync_detection_mode(vit_service.get_detection_mode())
@@ -114,51 +109,6 @@ class YoloService:
                 name="yolo-model-load",
                 daemon=True,
             ).start()
-        self._ensure_frame_poll_thread()
-
-    def _ensure_frame_poll_thread(self) -> None:
-        if self._frame_poll_thread and self._frame_poll_thread.is_alive():
-            return
-        self._frame_poll_stop.clear()
-        self._frame_poll_thread = threading.Thread(
-            target=self._pi_frame_poll_loop,
-            name="yolo-pi-frame-poll",
-            daemon=True,
-        )
-        self._frame_poll_thread.start()
-
-    def _pi_host(self) -> str | None:
-        try:
-            from app.services.mqtt_service import mqtt_service
-            from config import DEFAULT_BROKER_IP
-
-            return mqtt_service.broker_ip or DEFAULT_BROKER_IP
-        except Exception:
-            return None
-
-    def _pi_frame_poll_loop(self) -> None:
-        """HTTP fallback: grab /frame.jpg from webrtc_server when MQTT is quiet."""
-        while not self._frame_poll_stop.is_set():
-            time.sleep(max(0.2, self._interval_sec))
-            if not self._is_inference_enabled():
-                continue
-            if time.monotonic() - self._last_mqtt_processed_at < 2.0:
-                continue
-            host = self._pi_host()
-            if not host:
-                continue
-            url = f"http://{host}:{VIDEO_SERVER_PORT}/frame.jpg"
-            try:
-                with urllib.request.urlopen(url, timeout=4) as resp:
-                    if resp.status >= 400:
-                        continue
-                    jpeg = resp.read()
-            except (urllib.error.URLError, OSError, TimeoutError, ValueError):
-                continue
-            if not jpeg:
-                continue
-            self._apply_frame_hop_delay()
-            self._process_jpeg(jpeg)
 
     def _load_model_async(self) -> None:
         try:
@@ -205,6 +155,8 @@ class YoloService:
     def set_enabled(self, enabled: bool) -> bool:
         with self._lock:
             self._enabled = enabled
+            if not enabled:
+                self._invalidate_pending_frames_locked()
         if enabled and self._model is None:
             threading.Thread(
                 target=self._load_model_async,
@@ -212,7 +164,7 @@ class YoloService:
                 daemon=True,
             ).start()
         if enabled:
-            self._ensure_frame_poll_thread()
+            self._ensure_frame_worker()
         return self._enabled
 
     def set_confidence(self, value: float) -> float:
@@ -223,14 +175,79 @@ class YoloService:
 
     def clear_session(self) -> None:
         with self._lock:
+            self._invalidate_pending_frames_locked()
             self._session.clear()
             self._latest = None
             self._last_frame_at = None
             self._video_active = False
 
-    def _note_frame(self) -> None:
-        self._last_frame_at = _now_iso()
-        self._video_active = True
+    def _invalidate_pending_frames_locked(self) -> None:
+        """Invalidate in-flight work and discard the pending frame."""
+        self._frame_generation += 1
+        while True:
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                break
+            else:
+                self._frame_queue.task_done()
+
+    def _ensure_frame_worker(self) -> None:
+        with self._lock:
+            if self._frame_worker_thread and self._frame_worker_thread.is_alive():
+                return
+            self._frame_worker_thread = threading.Thread(
+                target=self._frame_worker_loop,
+                name="yolo-frame-worker",
+                daemon=True,
+            )
+            self._frame_worker_thread.start()
+
+    def _enqueue_frame(self, jpeg: bytes) -> None:
+        """Keep only the newest frame waiting for inference."""
+        if not jpeg:
+            return
+        with self._lock:
+            if not self._enabled:
+                return
+            generation = self._frame_generation
+            try:
+                self._frame_queue.put_nowait((generation, jpeg))
+            except queue.Full:
+                # The worker is still processing its previous frame. Replace
+                # the pending frame so its next inference uses the latest one.
+                try:
+                    self._frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                else:
+                    self._frame_queue.task_done()
+                self._frame_queue.put_nowait((generation, jpeg))
+
+    def _frame_worker_loop(self) -> None:
+        while True:
+            generation, jpeg = self._frame_queue.get()
+            try:
+                if not self._frame_is_current(generation):
+                    continue
+                self._apply_frame_hop_delay()
+                if not self._frame_is_current(generation):
+                    continue
+                self._process_jpeg(jpeg, generation)
+            finally:
+                self._frame_queue.task_done()
+
+    def _frame_is_current(self, generation: int) -> bool:
+        with self._lock:
+            return self._enabled and generation == self._frame_generation
+
+    def _note_frame(self, generation: int) -> bool:
+        with self._lock:
+            if not self._enabled or generation != self._frame_generation:
+                return False
+            self._last_frame_at = _now_iso()
+            self._video_active = True
+            return True
 
     def _frame_input_fresh(self) -> bool:
         if self._last_frame_at is None:
@@ -257,8 +274,6 @@ class YoloService:
 
     def handle_mqtt_frame(self, payload: dict[str, Any]) -> None:
         """Decode a JPEG frame published by webrtc_server.py on yahboom/camera/frame."""
-        if not self._is_inference_enabled():
-            return
         jpg_b64 = payload.get("jpg_b64")
         if not jpg_b64:
             return
@@ -266,26 +281,16 @@ class YoloService:
             jpeg = base64.b64decode(jpg_b64)
         except Exception:
             return
-        self._last_mqtt_frame_at = time.monotonic()
-        self._apply_frame_hop_delay()
-        self._process_jpeg(jpeg)
-        self._last_mqtt_processed_at = time.monotonic()
+        self._enqueue_frame(jpeg)
 
     def _on_frame(self, jpeg: bytes) -> None:
-        if not self._is_inference_enabled():
-            return
-        self._apply_frame_hop_delay()
-        self._process_jpeg(jpeg)
+        self._enqueue_frame(jpeg)
 
-    def _process_jpeg(self, jpeg: bytes) -> None:
-        if not self._is_inference_enabled():
+    def _process_jpeg(self, jpeg: bytes, generation: int) -> None:
+        if not self._frame_is_current(generation):
             return
-        self._note_frame()
-
-        now = time.monotonic()
-        if now - self._last_infer_at < self._interval_sec:
+        if not self._note_frame(generation):
             return
-        self._last_infer_at = now
 
         try:
             self._ensure_model()
@@ -328,6 +333,8 @@ class YoloService:
                 "top_detection": top,
             }
             with self._lock:
+                if not self._enabled or generation != self._frame_generation:
+                    return
                 self._latest = payload
                 self._session.append({
                     "timestamp": payload["timestamp"],
@@ -405,7 +412,7 @@ class YoloService:
             "readings_stale_ms": YOLO_READINGS_STALE_MS,
             "confidence_threshold": confidence,
             "confidence_threshold_percent": round(confidence * 100.0, 1),
-            "inference_interval_sec": self._interval_sec,
+            "inference_interval_sec": 0.0,
             "inference_count": inference_count,
             "latest": latest,
             "detection_count": len(latest["detections"]) if latest else 0,

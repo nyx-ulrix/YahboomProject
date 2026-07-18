@@ -1997,9 +1997,8 @@ export const yoloModelDef: WidgetDefinition = {
   icon: 'Radar', pinned: false, component: YoloModelWidget,
 };
 
-// STOP-TIME TEST BENCH — measure how long the robot takes to stop after EXPLORE.
-// Command time is stamped on the Pi clock when START is pressed; the official run
-// start is when the Pi reports movement. Mission time ends at Pi drive-status halt.
+// STOP-TIME TEST BENCH — measure from the START press until the Pi reports a halt.
+// Movement start is retained as a separate diagnostic timestamp.
 type StopModeApiResponse = {
   mode?: StopBenchMode;
   cache_script_running?: boolean;
@@ -2201,6 +2200,12 @@ async function clearStaleCacheDetectionOnBackend(): Promise<void> {
   } catch { /* backend may be offline */ }
 }
 
+async function clearYoloSessionOnBackend(): Promise<void> {
+  try {
+    await fetch('/api/yolo/clear', { method: 'POST' });
+  } catch { /* backend may be offline */ }
+}
+
 async function fetchLatestCacheDetection(): Promise<CacheDetectionApi['detection'] | null> {
   try {
     const res = await fetch('/api/test_bench/latest_detection', { cache: 'no-store' });
@@ -2349,7 +2354,6 @@ function StopTestBenchWidget() {
   const [cacheScriptRunning, setCacheScriptRunning] = useState(false);
   const [modeSwitching, setModeSwitching] = useState(false);
   const [, setTick] = useState(0);
-  const [frozenElapsedMs, setFrozenElapsedMs] = useState<number | null>(null);
 
   const commandSentAtRef = useRef<number | null>(null);
   const activeStartRef = useRef<number | null>(null);
@@ -2357,6 +2361,9 @@ function StopTestBenchWidget() {
   const sessionActiveRef = useRef(false);
   const lastPiMsRef = useRef<number | null>(null);
   const lastPiWallMsRef = useRef<number | null>(null);
+  /** Pi timestamp observed at START — ignore stale samples until a newer one arrives. */
+  const piStartBaselineRef = useRef<number | null>(null);
+  const piStartLockedRef = useRef(false);
   const movementDeadlineRef = useRef<number | null>(null);
   const stopCommandPendingRef = useRef(false);
   const stopCommandPendingAtRef = useRef<number | null>(null);
@@ -2462,16 +2469,6 @@ function StopTestBenchWidget() {
     setCloudAwareStopEnabled(benchUsesCosineSimilarity(mode));
   }, [stopToggles]);
 
-  const freezeTimerAtNow = useCallback(() => {
-    const anchor = activeStartRef.current ?? commandSentAtRef.current;
-    if (anchor == null) return;
-    const piNow =
-      lastPiMsRef.current != null && lastPiWallMsRef.current != null
-        ? lastPiMsRef.current + (Date.now() - lastPiWallMsRef.current)
-        : lastPiMsRef.current ?? anchor;
-    setFrozenElapsedMs(Math.max(0, piNow - anchor));
-  }, []);
-
   const latchStopSource = useCallback((source: StopSource) => {
     if (stopSourceRef.current != null) return;
     stopSourceRef.current = source;
@@ -2498,10 +2495,9 @@ function StopTestBenchWidget() {
       } else if (!isAutoOffPending && stopSourceRef.current == null) {
         latchStopSource('manual');
       }
-      freezeTimerAtNow();
     });
     return () => setTestBenchManualStopHook(null);
-  }, [freezeTimerAtNow, latchStopSource]);
+  }, [latchStopSource]);
 
   const applyStopModeApi = useCallback((data: StopModeApiResponse) => {
     // Mode follows the local toggle (off on startup), not any stale backend mode.
@@ -2566,6 +2562,8 @@ function StopTestBenchWidget() {
     sessionActiveRef.current = false;
     lastPiMsRef.current = null;
     lastPiWallMsRef.current = null;
+    piStartBaselineRef.current = null;
+    piStartLockedRef.current = false;
     movementDeadlineRef.current = null;
     stopCommandPendingRef.current = false;
     stopCommandPendingAtRef.current = null;
@@ -2578,7 +2576,6 @@ function StopTestBenchWidget() {
     latestCacheDetectionRef.current = null;
     sessionStartWallMsRef.current = null;
     cacheDetectPollCountRef.current = 0;
-    setFrozenElapsedMs(null);
     setStopLabelEstopArmed(false);
     setYoloStopArmed(false);
     setCommandSentAt(null);
@@ -2615,7 +2612,13 @@ function StopTestBenchWidget() {
   const endRun = useCallback(async (stoppedAt: number) => {
     const startedAt = activeStartRef.current;
     const cmdAt = commandSentAtRef.current;
-    if (startedAt == null || cmdAt == null) return;
+    if (cmdAt == null) return;
+    const movementStart = startedAt ?? cmdAt;
+    const wallStart = sessionStartWallMsRef.current;
+    // Prefer wall-clock duration from the START press so stale Pi samples cannot inflate time.
+    const durationMs = wallStart != null
+      ? Math.max(0, Date.now() - wallStart)
+      : Math.max(0, stoppedAt - cmdAt);
     const recordedSource = stopSourceRef.current ?? 'manual';
     const metrics = await captureStopMetrics(recordedSource);
     const mode = recordedBenchModeRef.current;
@@ -2628,10 +2631,10 @@ function StopTestBenchWidget() {
         id: newRunId,
         run: prev.length + 1,
         commandSentAt: cmdAt,
-        startedAt,
+        startedAt: movementStart,
         stoppedAt,
-        durationMs: Math.max(0, stoppedAt - startedAt),
-        commandToMoveMs: Math.max(0, startedAt - cmdAt),
+        durationMs,
+        commandToMoveMs: Math.max(0, movementStart - cmdAt),
         stoppingDistance: '',
         networkType: networkTypeRef.current,
         stopMode: mode,
@@ -2723,18 +2726,16 @@ function StopTestBenchWidget() {
     }
 
     if (
-      stopModeRef.current === 'cache_aware_offloading'
-      || isCloudAwareStopLabelBenchStop()
+      stopModeRef.current !== 'cache_aware_offloading'
+      && !isCloudAwareStopLabelBenchStop()
     ) {
-      freezeTimerAtNow();
-    } else {
       disableAutoRoam();
     }
     stopCommandPendingRef.current = false;
     stopCommandPendingAtRef.current = null;
     await endRun(resolveStopMs(runStartTs, firstStopTsRef.current));
     return true;
-  }, [armMissionTimerIfNeeded, disableAutoRoam, endRun, freezeTimerAtNow, isAwaitingAutoOff, latchStopSource]);
+  }, [armMissionTimerIfNeeded, disableAutoRoam, endRun, isAwaitingAutoOff, latchStopSource]);
 
   const latchCacheDetectionStop = useCallback((detection: CacheDetectionApi['detection']) => {
     if (!detection || cacheDetectionSimilarityPercent(detection) == null) return;
@@ -2754,7 +2755,6 @@ function StopTestBenchWidget() {
       stopCommandPendingAtRef.current = Date.now();
       firstStopTsRef.current = null;
     }
-    freezeTimerAtNow();
     if (firstLatch) {
       const pct = cacheDetectionSimilarityPercent(detection);
       useMetricsStore.getState().pushEvent(
@@ -2765,7 +2765,7 @@ function StopTestBenchWidget() {
         'yahboom/detect/status',
       );
     }
-  }, [armMissionTimerIfNeeded, freezeTimerAtNow, latchStopSource]);
+  }, [armMissionTimerIfNeeded, latchStopSource]);
 
   const cancelSession = useCallback((message: string) => {
     if (!sessionActiveRef.current) return;
@@ -2779,14 +2779,15 @@ function StopTestBenchWidget() {
 
   const startTest = async () => {
     if (sessionActiveRef.current) return;
+    const startPressedWallMs = Date.now();
     const benchMode = togglesToStopMode(stopTogglesRef.current.cacheOn, stopTogglesRef.current.cloudOn);
     if (useMetricsStore.getState().estopActive) {
       useMetricsStore.getState().pushEvent('warning', 'Mission test blocked — clear emergency stop first');
       return;
     }
 
-    const commandTs = await fetchLatestRobotMs();
-    if (commandTs == null) {
+    const baselinePiTs = await fetchLatestRobotMs();
+    if (baselinePiTs == null) {
       useMetricsStore.getState().pushEvent(
         'warning',
         'Mission test — no Raspberry Pi clock available (is mqtt_ros_node connected?)',
@@ -2796,17 +2797,26 @@ function StopTestBenchWidget() {
 
     recordedBenchModeRef.current = benchMode;
     setTestBenchStopMode(benchMode);
-    sessionStartWallMsRef.current = Date.now();
+    sessionStartWallMsRef.current = startPressedWallMs;
     latestCacheDetectionRef.current = null;
     cacheDetectPollCountRef.current = 0;
     if (benchNeedsPiScript(benchMode)) {
       await clearStaleCacheDetectionOnBackend();
+    } else if (benchHasYoloBottleStop(benchMode)) {
+      // Drop pre-run YOLO frames and detections before arming this mission.
+      await clearYoloSessionOnBackend();
     }
     sessionActiveRef.current = true;
     setTestBenchSessionActive(true);
-    commandSentAtRef.current = commandTs;
-    lastPiMsRef.current = commandTs;
-    lastPiWallMsRef.current = Date.now();
+    // Provisional Pi start mapped to the button-press wall instant. Replaced by the
+    // first fresher Pi sample so a stale drive_status cannot inflate the clock.
+    const wallNow = Date.now();
+    const provisionalCommandTs = baselinePiTs - Math.max(0, wallNow - startPressedWallMs);
+    piStartBaselineRef.current = baselinePiTs;
+    piStartLockedRef.current = false;
+    commandSentAtRef.current = provisionalCommandTs;
+    lastPiMsRef.current = baselinePiTs;
+    lastPiWallMsRef.current = wallNow;
     movementDeadlineRef.current = Date.now() + MOVEMENT_WAIT_MS;
 
     let ignoreDecodeKey: string | null = null;
@@ -2830,7 +2840,7 @@ function StopTestBenchWidget() {
       } catch { /* YOLO may be offline */ }
       setYoloStopArmed(true, ignoreYoloKey);
     }
-    setCommandSentAt(commandTs);
+    setCommandSentAt(provisionalCommandTs);
     setTick((n) => n + 1);
     toggleRosAuto();
   };
@@ -2841,9 +2851,27 @@ function StopTestBenchWidget() {
     let alive = true;
 
     const syncPiSample = (ts: number) => {
-      if (lastPiMsRef.current !== ts) {
+      const wallNow = Date.now();
+      const baseline = piStartBaselineRef.current;
+      const wallStart = sessionStartWallMsRef.current;
+
+      // Lock START onto the first Pi timestamp newer than the pre-press sample.
+      if (
+        !piStartLockedRef.current
+        && wallStart != null
+        && baseline != null
+        && ts > baseline
+      ) {
+        const lockedStart = ts - Math.max(0, wallNow - wallStart);
+        piStartLockedRef.current = true;
+        commandSentAtRef.current = lockedStart;
+        setCommandSentAt(lockedStart);
+      }
+
+      // Keep the Pi clock monotonic so a late stale packet cannot yank the timeline.
+      if (lastPiMsRef.current == null || ts >= lastPiMsRef.current) {
         lastPiMsRef.current = ts;
-        lastPiWallMsRef.current = Date.now();
+        lastPiWallMsRef.current = wallNow;
       }
     };
 
@@ -2967,14 +2995,14 @@ function StopTestBenchWidget() {
     const id = setInterval(() => { void poll(); }, ROBOT_TIME_POLL_MS);
     void poll();
     return () => { alive = false; clearInterval(id); };
-  }, [armMissionTimerIfNeeded, cancelSession, cancelSessionOnEstop, commandSentAt, disableAutoRoam, freezeTimerAtNow, isAwaitingAutoOff, latchCacheDetectionStop, latchStopSource, tryEndRunOnPiAutoOff, warnAutoOffStillPending]);
+  }, [armMissionTimerIfNeeded, cancelSession, cancelSessionOnEstop, commandSentAt, disableAutoRoam, isAwaitingAutoOff, latchCacheDetectionStop, latchStopSource, tryEndRunOnPiAutoOff, warnAutoOffStillPending]);
 
-  // Re-render ~10×/s so the live Pi-clock extrapolation advances between MQTT samples.
+  // Re-render ~10×/s until the Pi confirms that the robot has stopped.
   useEffect(() => {
-    if (commandSentAt == null || frozenElapsedMs != null) return;
+    if (commandSentAt == null) return;
     const id = setInterval(() => setTick((n) => n + 1), 100);
     return () => clearInterval(id);
-  }, [commandSentAt, frozenElapsedMs]);
+  }, [commandSentAt]);
 
   // E-stop during an active session cancels without recording (any phase).
   useEffect(() => {
@@ -3041,20 +3069,14 @@ function StopTestBenchWidget() {
     clearTestBenchCache();
   };
 
-  const waitingForMovement = commandSentAt != null && activeStart == null && frozenElapsedMs == null;
-  const running = activeStart != null && frozenElapsedMs == null;
-  const stopping = frozenElapsedMs != null;
+  const stopping = commandSentAt != null && stopCommandPendingRef.current;
+  const waitingForMovement = commandSentAt != null && activeStart == null && !stopping;
+  const running = activeStart != null && !stopping;
   const sessionActive = commandSentAt != null;
-  const displayPiNow =
-    lastPiMsRef.current != null && lastPiWallMsRef.current != null
-      ? lastPiMsRef.current + (Date.now() - lastPiWallMsRef.current)
-      : null;
-  const elapsedAnchor = activeStart ?? commandSentAt;
-  const elapsedMs = frozenElapsedMs != null
-    ? frozenElapsedMs
-    : sessionActive && displayPiNow != null && elapsedAnchor != null
-      ? Math.max(0, displayPiNow - elapsedAnchor)
-      : 0;
+  // Live timer is wall-clock from the START press — never derived from Pi samples.
+  const elapsedMs = sessionActive && sessionStartWallMsRef.current != null
+    ? Math.max(0, Date.now() - sessionStartWallMsRef.current)
+    : 0;
   const cacheOn = stopToggles.cacheOn;
   const cloudOn = stopToggles.cloudOn;
   // Cloud-aware bottle stop is always on, so a mission always has a dashboard stop.
