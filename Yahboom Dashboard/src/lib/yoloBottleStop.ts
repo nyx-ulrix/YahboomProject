@@ -26,13 +26,11 @@ export type YoloStatusForBottleStop = {
 
 const BOTTLE_LABEL = 'bottle';
 const YOLO_STOP_COOLDOWN_MS = 5_000;
-const YOLO_STOP_REQUIRED_HITS = 3;
 
 let yoloStopArmed = false;
 let lastHandledKey: string | null = null;
 let lastObservedTimestamp: string | null = null;
 let lastTriggerAt = 0;
-let qualifyingHitCount = 0;
 
 function minStopSimilarityPercent(): number {
   return loadStopSimilarityThresholdPct();
@@ -76,16 +74,14 @@ export function setYoloStopArmed(armed: boolean, ignoreCurrentEventKey?: string 
     lastHandledKey = ignoreCurrentEventKey ?? null;
     lastObservedTimestamp = null;
     lastTriggerAt = 0;
-    qualifyingHitCount = 0;
   } else if (!armed) {
     lastObservedTimestamp = null;
-    qualifyingHitCount = 0;
   }
 }
 
 /**
- * When YOLO mode is on and the session is armed, require three consecutive
- * fresh YOLO readings where a bottle meets Stop Similarity (%) before stopping.
+ * When YOLO mode is on and the session is armed, stop on the first fresh YOLO
+ * reading where a bottle meets Stop Similarity (%).
  */
 export function processYoloStatusForBottleStop(status: YoloStatusForBottleStop): boolean {
   if (!yoloStopArmed || !benchHasYoloBottleStop(getTestBenchStopMode())) return false;
@@ -99,18 +95,9 @@ export function processYoloStatusForBottleStop(status: YoloStatusForBottleStop):
   lastObservedTimestamp = timestamp;
 
   const bottle = bestQualifyingBottle(status);
-  if (!bottle || !key) {
-    qualifyingHitCount = 0;
-    return false;
-  }
+  if (!bottle || !key) return false;
 
-  lastHandledKey = key;
-  qualifyingHitCount += 1;
-  if (qualifyingHitCount < YOLO_STOP_REQUIRED_HITS) return false;
-
-  const stopped = triggerYoloBottleStop(key, bottle.confidence_percent, bottle.label);
-  if (stopped) qualifyingHitCount = 0;
-  return stopped;
+  return triggerYoloBottleStop(key, bottle.confidence_percent, bottle.label);
 }
 
 function triggerYoloBottleStop(key: string, confidence: number, label: string): boolean {
