@@ -1213,8 +1213,8 @@ const VIT_ACTIVE_MS = 2500;
 const VIT_READINGS_STALE_MS = 8000;
 /** Clear YOLO readings when no new video frame within this window. */
 const YOLO_READINGS_STALE_MS = 5000;
-/** Widget poll — slower than stop hook; display is latched until readings meaningfully change. */
-const YOLO_WIDGET_POLL_MS = 1500;
+/** Widget poll — keep under 500 ms; display is latched until readings meaningfully change. */
+const YOLO_WIDGET_POLL_MS = 250;
 
 /** Stable key for YOLO widget readout — label + rounded confidence only (avoids constant refresh). */
 function yoloReadingDisplayKey(

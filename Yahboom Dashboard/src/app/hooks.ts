@@ -513,6 +513,9 @@ export function useStopModeBackendSync() {
   }, []);
 }
 
+/** YOLO bottle-stop status poll interval (must stay under 500 ms). */
+const YOLO_STOP_POLL_MS = 100;
+
 /** YOLO bottle stop while cloud_aware (YOLO) test-bench mode is active. */
 export function useYoloBottleStop() {
   useEffect(() => {
@@ -520,24 +523,17 @@ export function useYoloBottleStop() {
     let nextPoll: ReturnType<typeof setTimeout> | null = null;
 
     const poll = async () => {
-      let failed = false;
       try {
         const res = await fetch('/api/yolo/status', { cache: 'no-store' });
-        if (!res.ok) {
-          failed = true;
-          return;
-        }
-        if (!alive) return;
+        if (!res.ok || !alive) return;
         const status = await res.json();
         processYoloStatusForBottleStop(status);
       } catch {
         /* backend unreachable */
-        failed = true;
       } finally {
         if (alive) {
-          // Poll again as soon as the previous request completes. This gives
-          // minimum stop latency without creating overlapping requests.
-          nextPoll = setTimeout(poll, failed ? 250 : 0);
+          // Wait for the previous request to finish, then poll again at 100 ms.
+          nextPoll = setTimeout(poll, YOLO_STOP_POLL_MS);
         }
       }
     };
