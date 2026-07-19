@@ -517,21 +517,36 @@ export function useStopModeBackendSync() {
 export function useYoloBottleStop() {
   useEffect(() => {
     let alive = true;
+    let nextPoll: ReturnType<typeof setTimeout> | null = null;
 
     const poll = async () => {
+      let failed = false;
       try {
         const res = await fetch('/api/yolo/status', { cache: 'no-store' });
-        if (!res.ok || !alive) return;
+        if (!res.ok) {
+          failed = true;
+          return;
+        }
+        if (!alive) return;
         const status = await res.json();
         processYoloStatusForBottleStop(status);
       } catch {
         /* backend unreachable */
+        failed = true;
+      } finally {
+        if (alive) {
+          // Poll again as soon as the previous request completes. This gives
+          // minimum stop latency without creating overlapping requests.
+          nextPoll = setTimeout(poll, failed ? 250 : 0);
+        }
       }
     };
 
-    poll();
-    const id = setInterval(poll, 500);
-    return () => { alive = false; clearInterval(id); };
+    void poll();
+    return () => {
+      alive = false;
+      if (nextPoll != null) clearTimeout(nextPoll);
+    };
   }, []);
 }
 
